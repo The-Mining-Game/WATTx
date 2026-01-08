@@ -1,0 +1,32 @@
+# Build subdirectories.
+/*build*
+!/build-aux
+!/build_msvc
+
+*.pyc
+
+# Only ignore unexpected patches
+*.patch
+!contrib/guix/patches/*.patch
+!depends/patches/**/*.patch
+
+/CMakeUserPresets.json
+
+# Previous releases
+/releases
+
+#build tests
+test/lint/test_runner/target/
+
+/guix-build-*
+
+/ci/scratch/
+
+# WATTx build artifacts
+dist/wattx-cli
+dist/wattx-qt
+dist/wattx-tx
+dist/wattxd
+dist/*.tar.gz
+*.tar.gz
+build/
