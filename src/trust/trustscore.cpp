@@ -520,7 +520,7 @@ bool PeerDiscoveryManager::LoadPeersFromConfig() {
             addrStr.erase(addrStr.find_last_not_of(" \t\r\n") + 1);
 
             if (!addrStr.empty()) {
-                CService addr = LookupNumeric(addrStr, 18888);
+                CService addr = LookupNumeric(addrStr, 1337);
                 if (addr.IsValid()) {
                     knownValidatorPeers.insert(addr);
                     loadedCount++;

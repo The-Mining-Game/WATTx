@@ -434,23 +434,16 @@ void MiningPage::startMining()
     statusLabel->setText(tr("Mining..."));
     statusLabel->setStyleSheet("color: #4CAF50; font-weight: bold;");
 
-    // Start the RPC mining command
-    if (clientModel && clientModel->node().baseInitialize()) {
-        QString address = miningAddressCombo->currentData().toString();
-        int threads = enableCpuMining->isChecked() ? cpuThreadsSpinBox->value() : 0;
-        int shift = shiftSpinBox->value();
+    // Get mining parameters
+    QString address = miningAddressCombo->currentData().toString();
+    int threads = enableCpuMining->isChecked() ? cpuThreadsSpinBox->value() : 0;
+    int shift = shiftSpinBox->value();
 
-        // Call the RPC command
-        try {
-            // Using the gapcoin mining RPC we created earlier
-            // This would be: startgapcoinmining <threads> <shift>
-            QString cmd = QString("startgapcoinmining %1 %2").arg(threads).arg(shift);
-            // Execute via RPC interface
-            // clientModel->node().executeRpc("startgapcoinmining", ...);
-        } catch (...) {
-            // Handle error
-        }
-    }
+    // Mining parameters ready (actual mining RPC implementation pending)
+    // threads, shift, and address are configured
+
+    // TODO: Connect to actual Gapcoin mining RPC when backend is ready
+    // For now, just update the UI to show mining state
 
     // Start stats timer
     statsTimer->start(2000);  // Update every 2 seconds

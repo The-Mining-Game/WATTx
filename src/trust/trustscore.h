@@ -96,7 +96,7 @@ public:
         std::string addrStr;
         ::Unserialize(s, addrStr);
         if (!addrStr.empty()) {
-            lastKnownAddress = LookupNumeric(addrStr, 18888);
+            lastKnownAddress = LookupNumeric(addrStr, 1337);
         }
         ::Unserialize(s, lastCheckInTime);
         ::Unserialize(s, consecutiveCheckIns);
@@ -149,7 +149,7 @@ public:
     uint16_t nodePort;            // WATTx: Node's listening port
     std::vector<unsigned char> signature;  // Signature proving validator identity
 
-    Heartbeat() : blockHeight(0), timestamp(0), nodePort(18888) {}
+    Heartbeat() : blockHeight(0), timestamp(0), nodePort(1337) {}
 
     // Custom serialization to handle CService without requiring SerParams
     template<typename Stream>
@@ -175,7 +175,7 @@ public:
         std::string addrStr;
         ::Unserialize(s, addrStr);
         if (!addrStr.empty()) {
-            nodeAddress = LookupNumeric(addrStr, 18888);
+            nodeAddress = LookupNumeric(addrStr, 1337);
         }
         ::Unserialize(s, nodePort);
         ::Unserialize(s, signature);

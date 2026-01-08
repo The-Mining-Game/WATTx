@@ -100,7 +100,7 @@ bool HeartbeatManager::BroadcastHeartbeat(int blockHeight, const uint256& blockH
 
     // WATTx: Include our IP address for peer discovery
     // TODO: Get local address from connman when networking is fully integrated
-    hb.nodePort = 18888; // Default WATTx port
+    hb.nodePort = 1337; // Default WATTx port
 
     // Sign it (signature includes IP address)
     if (!hb.Sign(*m_validator_key)) {
