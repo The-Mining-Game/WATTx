@@ -1,0 +1,16 @@
+# WATTx Configuration File
+# Place this file in ~/.wattx/wattx.conf (Linux) or %APPDATA%\WATTx\wattx.conf (Windows)
+
+# Network
+server=1
+listen=1
+
+# Connect to seed nodes (add your main node's IP here)
+# addnode=YOUR_MAIN_NODE_IP:18888
+
+# RPC Settings (optional - for CLI access)
+# rpcuser=wattxrpc
+# rpcpassword=your_secure_password_here
+
+# Staking (enable if you want to stake)
+# staking=1
