@@ -18,11 +18,14 @@
 namespace {
 // Helper function to parse hex string to CKeyID
 CKeyID ParseKeyID(const std::string& hexStr) {
-    std::vector<unsigned char> data = ParseHex(hexStr);
-    if (data.size() == 20) {
-        return CKeyID(uint160(data));
+    if (hexStr.size() != 40) {
+        return CKeyID();
     }
-    return CKeyID();
+    auto result = uint160::FromHex(hexStr);
+    if (!result) {
+        return CKeyID();
+    }
+    return CKeyID(*result);
 }
 } // anonymous namespace
 
@@ -419,6 +422,45 @@ static RPCHelpMan gettrusttierinfo()
     };
 }
 
+static RPCHelpMan activatevalidator()
+{
+    return RPCHelpMan{"activatevalidator",
+        "\n[DEBUG] Manually activate a validator (for testing only).\n",
+        {
+            {"validatorId", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The validator's public key ID"},
+        },
+        RPCResult{
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::STR, "validatorId", "Validator public key ID"},
+                {RPCResult::Type::STR, "status", "New status"},
+            }
+        },
+        RPCExamples{
+            HelpExampleCli("activatevalidator", "\"0123456789abcdef...\"")
+        },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+        {
+            if (!g_validator_db) {
+                throw JSONRPCError(RPC_INTERNAL_ERROR, "Validator database not initialized");
+            }
+
+            std::string idStr = request.params[0].get_str();
+            CKeyID validatorId = ParseKeyID(idStr);
+
+            if (!g_validator_db->SetValidatorStatus(validatorId, ValidatorStatus::ACTIVE)) {
+                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Validator not found or cannot activate");
+            }
+
+            UniValue result(UniValue::VOBJ);
+            result.pushKV("validatorId", validatorId.ToString());
+            result.pushKV("status", "active");
+
+            return result;
+        },
+    };
+}
+
 void RegisterValidatorRPCCommands(CRPCTable& t)
 {
     static const CRPCCommand commands[]{
@@ -428,6 +470,7 @@ void RegisterValidatorRPCCommands(CRPCTable& t)
         {"validators", &listdelegations},
         {"validators", &getpendingrewards},
         {"validators", &gettrusttierinfo},
+        {"hidden", &activatevalidator},
     };
     for (const auto& c : commands) {
         t.appendCommand(c.name, &c);

@@ -6,9 +6,15 @@
 #define WATTX_QT_MININGPAGE_H
 
 #include <interfaces/wallet.h>
+#include <node/randomx_miner.h>
 #include <QWidget>
 #include <QTimer>
+#include <atomic>
 #include <memory>
+
+QT_BEGIN_NAMESPACE
+class QTextEdit;
+QT_END_NAMESPACE
 
 class ClientModel;
 class WalletModel;
@@ -46,8 +52,7 @@ public Q_SLOTS:
     void updateMiningStats();
 
 private Q_SLOTS:
-    void onStartMiningClicked();
-    void onStopMiningClicked();
+    void onMiningToggleClicked();
     void onMiningModeChanged();
     void onCpuThreadsChanged(int value);
     void onGpuBandwidthChanged(int value);
@@ -62,6 +67,7 @@ private:
     void createStatsDisplay(QGroupBox *group);
     void updateAddressCombo();
     void startMining();
+    void startMiningActual();  // Called after GPU initialization (async)
     void stopMining();
     bool validatePoolSettings();
 
@@ -100,9 +106,11 @@ private:
     QSpinBox *shiftSpinBox;
     QLabel *shiftLabel;
 
-    // Control buttons
-    QPushButton *startMiningBtn;
-    QPushButton *stopMiningBtn;
+    // RandomX mode selection
+    QComboBox *rxModeCombo;
+
+    // Control button (single toggle button)
+    QPushButton *miningToggleBtn;
 
     // Statistics display
     QLabel *statusLabel;
@@ -118,9 +126,21 @@ private:
     QTimer *statsTimer;
 
     // Mining state
-    bool isMining;
-    int currentCpuThreads;
+    std::atomic<bool> isMining{false};
+    std::atomic<int> currentCpuThreads{1};
     int currentGpuBandwidth;
+    int64_t miningStartTime{0};  // For uptime tracking
+    int sessionBlocksFound{0};   // Blocks found this session
+
+    // Mining console output
+    QTextEdit *miningConsole;
+    QCheckBox *showConsoleCheckbox;
+
+    // Console logging
+    void logToConsole(const QString& message);
+    void onMiningHashrate(double hashrate, uint64_t totalHashes);
+    void onBlockFound(const CBlock& block);
+    void updateMiningButton(bool mining);
 };
 
 #endif // WATTX_QT_MININGPAGE_H

@@ -8,18 +8,24 @@
 #include <logging.h>
 
 #include <algorithm>
+#include <set>
 
 namespace validators {
 
 // Global instance
 std::unique_ptr<DelegationDB> g_delegation_db;
 
-void InitDelegationDB(const Consensus::Params& params) {
-    g_delegation_db = std::make_unique<DelegationDB>(params);
-    LogPrintf("DelegationDB: Initialized delegation database\n");
+void InitDelegationDB(const Consensus::Params& params, const fs::path& path, size_t cache_size) {
+    fs::path db_path = path / "delegations";
+    g_delegation_db = std::make_unique<DelegationDB>(params, db_path, cache_size);
+    LogPrintf("DelegationDB: Initialized delegation database at %s\n", fs::PathToString(db_path));
 }
 
 void ShutdownDelegationDB() {
+    if (g_delegation_db) {
+        LogPrintf("DelegationDB: Shutting down delegation database (%zu delegations)\n",
+                  g_delegation_db->GetActiveDelegationCount());
+    }
     g_delegation_db.reset();
     LogPrintf("DelegationDB: Shut down delegation database\n");
 }
@@ -109,8 +115,70 @@ bool RewardClaimRequest::Verify(const CPubKey& pubkey) const {
 
 // DelegationDB implementation
 
-DelegationDB::DelegationDB(const Consensus::Params& params)
-    : consensusParams(params), currentHeight(0) {}
+DelegationDB::DelegationDB(const Consensus::Params& params, const fs::path& path, size_t cache_size, bool memory_only)
+    : consensusParams(params), currentHeight(0)
+{
+    DBParams db_params{};
+    db_params.path = path;
+    db_params.cache_bytes = cache_size;
+    db_params.memory_only = memory_only;
+    db_params.wipe_data = false;
+    db_params.obfuscate = true;
+
+    m_db = std::make_unique<CDBWrapper>(db_params);
+
+    // Load existing delegations from database
+    if (!LoadFromDB()) {
+        LogPrintf("DelegationDB: No existing delegations loaded (new database)\n");
+    }
+}
+
+bool DelegationDB::WriteDelegationToDB(const DelegationEntry& entry) {
+    if (!m_db) return false;
+    uint256 delegationId = entry.GetDelegationId();
+    return m_db->Write(std::make_pair(DB_DELEGATION, delegationId), entry);
+}
+
+bool DelegationDB::EraseDelegationFromDB(const uint256& delegationId) {
+    if (!m_db) return false;
+    return m_db->Erase(std::make_pair(DB_DELEGATION, delegationId));
+}
+
+bool DelegationDB::LoadFromDB() {
+    if (!m_db) return false;
+
+    std::unique_ptr<CDBIterator> pcursor(m_db->NewIterator());
+    pcursor->Seek(std::make_pair(DB_DELEGATION, uint256()));
+
+    size_t count = 0;
+    while (pcursor->Valid()) {
+        std::pair<uint8_t, uint256> key;
+        if (!pcursor->GetKey(key) || key.first != DB_DELEGATION) {
+            break;
+        }
+
+        DelegationEntry entry;
+        if (pcursor->GetValue(entry)) {
+            uint256 delegationId = entry.GetDelegationId();
+            delegations[delegationId] = entry;
+
+            // Rebuild indexes
+            delegatorIndex[entry.delegatorId].push_back(delegationId);
+            validatorIndex[entry.validatorId].push_back(delegationId);
+            if (!entry.delegationOutpoint.IsNull()) {
+                outpointIndex[entry.delegationOutpoint] = delegationId;
+            }
+            count++;
+        }
+
+        pcursor->Next();
+    }
+
+    if (count > 0) {
+        LogPrintf("DelegationDB: Loaded %zu delegations from database\n", count);
+    }
+    return count > 0;
+}
 
 bool DelegationDB::ProcessDelegation(const DelegationRequest& request, const COutPoint& outpoint) {
     LOCK(cs_delegations);
@@ -163,7 +231,7 @@ bool DelegationDB::ProcessDelegation(const DelegationRequest& request, const COu
         return false;
     }
 
-    // Add to database
+    // Add to in-memory cache
     delegations[delegationId] = entry;
 
     // Update indexes
@@ -171,6 +239,12 @@ bool DelegationDB::ProcessDelegation(const DelegationRequest& request, const COu
     validatorIndex[entry.validatorId].push_back(delegationId);
     if (!outpoint.IsNull()) {
         outpointIndex[outpoint] = delegationId;
+    }
+
+    // Persist to LevelDB
+    if (!WriteDelegationToDB(entry)) {
+        LogPrintf("DelegationDB: WARNING - Failed to persist delegation %s to database\n",
+                  delegationId.ToString());
     }
 
     // Update validator's delegated amount
@@ -225,6 +299,9 @@ bool DelegationDB::ProcessUndelegation(const UndelegationRequest& request) {
         entry.status = DelegationStatus::UNBONDING;
         entry.unbondingStartHeight = currentHeight;
 
+        // Persist to LevelDB
+        WriteDelegationToDB(entry);
+
         // Update validator's delegated amount
         if (g_validator_db) {
             g_validator_db->RemoveDelegation(request.validatorId, toUndelegate);
@@ -268,6 +345,9 @@ CAmount DelegationDB::ProcessRewardClaim(const RewardClaimRequest& request) {
             totalClaimed += entry.pendingRewards;
             entry.pendingRewards = 0;
             entry.lastRewardHeight = currentHeight;
+
+            // Persist to LevelDB
+            WriteDelegationToDB(entry);
         }
     }
 
@@ -384,19 +464,40 @@ bool DelegationDB::AddRewards(const uint256& delegationId, CAmount rewards) {
         return false;
     }
     it->second.pendingRewards += rewards;
+
+    // Persist to LevelDB
+    WriteDelegationToDB(it->second);
+
     return true;
 }
 
 bool DelegationDB::DistributeBlockReward(const CKeyID& validatorId, CAmount delegatorsShare) {
+    LogPrintf("DelegationDB: DistributeBlockReward START validator=%s share=%lld\n",
+              validatorId.ToString(), delegatorsShare);
+
     LOCK(cs_delegations);
+    LogPrintf("DelegationDB: DistributeBlockReward acquired lock\n");
 
     if (delegatorsShare == 0) {
+        LogPrintf("DelegationDB: DistributeBlockReward - share is 0, returning\n");
         return true;
     }
 
-    // Get total active delegation for this validator
-    CAmount totalDelegation = GetTotalDelegationForValidator(validatorId);
+    // Get total active delegation for this validator - use internal version that doesn't lock
+    CAmount totalDelegation = 0;
+    auto vit = validatorIndex.find(validatorId);
+    if (vit != validatorIndex.end()) {
+        for (const auto& delegationId : vit->second) {
+            auto delIt = delegations.find(delegationId);
+            if (delIt != delegations.end() && delIt->second.status == DelegationStatus::ACTIVE) {
+                totalDelegation += delIt->second.amount;
+            }
+        }
+    }
+    LogPrintf("DelegationDB: DistributeBlockReward totalDelegation=%lld\n", totalDelegation);
+
     if (totalDelegation == 0) {
+        LogPrintf("DelegationDB: DistributeBlockReward - no active delegations\n");
         return true;
     }
 
@@ -406,6 +507,7 @@ bool DelegationDB::DistributeBlockReward(const CKeyID& validatorId, CAmount dele
         return true;
     }
 
+    int count = 0;
     for (const auto& delegationId : it->second) {
         auto delIt = delegations.find(delegationId);
         if (delIt == delegations.end()) continue;
@@ -417,11 +519,16 @@ bool DelegationDB::DistributeBlockReward(const CKeyID& validatorId, CAmount dele
         CAmount share = (delegatorsShare * entry.amount) / totalDelegation;
         if (share > 0) {
             entry.pendingRewards += share;
+            // Persist to LevelDB
+            WriteDelegationToDB(entry);
+            count++;
+            LogPrintf("DelegationDB: Rewarded delegation %s with %lld (pending=%lld)\n",
+                      delegationId.ToString().substr(0, 16), share, entry.pendingRewards);
         }
     }
 
-    LogPrintf("DelegationDB: Distributed %lld to delegators of validator %s\n",
-              delegatorsShare, validatorId.ToString());
+    LogPrintf("DelegationDB: Distributed %lld to %d delegators of validator %s\n",
+              delegatorsShare, count, validatorId.ToString());
 
     return true;
 }
@@ -433,6 +540,10 @@ bool DelegationDB::SetDelegationStatus(const uint256& delegationId, DelegationSt
         return false;
     }
     it->second.status = status;
+
+    // Persist to LevelDB
+    WriteDelegationToDB(it->second);
+
     return true;
 }
 
@@ -461,6 +572,9 @@ bool DelegationDB::UpdateDelegationOutpoint(const uint256& delegationId, const C
         outpointIndex[newOutpoint] = delegationId;
     }
 
+    // Persist to LevelDB
+    WriteDelegationToDB(it->second);
+
     return true;
 }
 
@@ -469,12 +583,15 @@ void DelegationDB::ProcessBlock(int height) {
     currentHeight = height;
 
     for (auto& [id, entry] : delegations) {
+        bool needsWrite = false;
+
         // Activate pending delegations after maturity
         if (entry.status == DelegationStatus::PENDING) {
             if (height - entry.delegationHeight >= DELEGATION_MATURITY) {
                 entry.status = DelegationStatus::ACTIVE;
                 LogPrintf("DelegationDB: Delegation %s is now active\n",
                           id.ToString().substr(0, 16));
+                needsWrite = true;
             }
         }
 
@@ -484,7 +601,12 @@ void DelegationDB::ProcessBlock(int height) {
                 entry.status = DelegationStatus::WITHDRAWN;
                 LogPrintf("DelegationDB: Delegation %s unbonding complete\n",
                           id.ToString().substr(0, 16));
+                needsWrite = true;
             }
+        }
+
+        if (needsWrite) {
+            WriteDelegationToDB(entry);
         }
     }
 }

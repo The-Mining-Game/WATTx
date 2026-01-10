@@ -6,12 +6,14 @@
 #define WATTX_VALIDATORS_DELEGATION_H
 
 #include <consensus/params.h>
+#include <dbwrapper.h>
 #include <key.h>
 #include <pubkey.h>
 #include <uint256.h>
 #include <serialize.h>
 #include <sync.h>
 #include <primitives/transaction.h>
+#include <util/fs.h>
 
 #include <cstdint>
 #include <map>
@@ -56,9 +58,12 @@ public:
 
     SERIALIZE_METHODS(DelegationEntry, obj) {
         READWRITE(obj.delegatorId, obj.validatorId, obj.amount,
-                  obj.delegationHeight, obj.lastRewardHeight,
-                  Using<CustomUintFormatter<1>>(obj.status),
-                  obj.delegationOutpoint, obj.unbondingStartHeight,
+                  obj.delegationHeight, obj.lastRewardHeight);
+        uint8_t status_byte;
+        SER_WRITE(obj, status_byte = static_cast<uint8_t>(obj.status));
+        READWRITE(status_byte);
+        SER_READ(obj, obj.status = static_cast<DelegationStatus>(status_byte));
+        READWRITE(obj.delegationOutpoint, obj.unbondingStartHeight,
                   obj.pendingRewards);
     }
 
@@ -177,6 +182,7 @@ public:
 /**
  * Delegation database manager
  * Handles delegation, undelegation, and reward distribution
+ * Uses LevelDB for persistent storage
  */
 class DelegationDB {
 private:
@@ -197,8 +203,19 @@ private:
     const Consensus::Params& consensusParams;
     int currentHeight;
 
+    // LevelDB persistence
+    std::unique_ptr<CDBWrapper> m_db;
+
+    // Database keys
+    static constexpr uint8_t DB_DELEGATION = 'd';
+
+    // Internal persistence methods
+    bool WriteDelegationToDB(const DelegationEntry& entry);
+    bool EraseDelegationFromDB(const uint256& delegationId);
+    bool LoadFromDB();
+
 public:
-    explicit DelegationDB(const Consensus::Params& params);
+    DelegationDB(const Consensus::Params& params, const fs::path& path, size_t cache_size = 1 << 20, bool memory_only = false);
 
     /**
      * Process a new delegation request
@@ -321,10 +338,10 @@ public:
     }
 };
 
-// Constants
-static constexpr CAmount MIN_DELEGATION_AMOUNT = 1000LL * 100000000LL; // 1,000 WATTx minimum
-static constexpr int DELEGATION_MATURITY = 500;                    // 500 blocks maturity
-static constexpr int DELEGATION_UNBONDING_PERIOD = 259200;         // ~3 days at 1s blocks
+// Constants - lowered for testing (TODO: make these consensus params)
+static constexpr CAmount MIN_DELEGATION_AMOUNT = 1LL * 100000000LL; // 1 WATTx minimum for testing
+static constexpr int DELEGATION_MATURITY = 10;                      // 10 blocks maturity for testing
+static constexpr int DELEGATION_UNBONDING_PERIOD = 100;             // 100 blocks for testing
 
 /**
  * Global delegation database instance
@@ -332,12 +349,15 @@ static constexpr int DELEGATION_UNBONDING_PERIOD = 259200;         // ~3 days at
 extern std::unique_ptr<DelegationDB> g_delegation_db;
 
 /**
- * Initialize delegation database
+ * Initialize delegation database with persistence
+ * @param params Consensus parameters
+ * @param path Data directory for LevelDB storage
+ * @param cache_size LevelDB cache size in bytes
  */
-void InitDelegationDB(const Consensus::Params& params);
+void InitDelegationDB(const Consensus::Params& params, const fs::path& path, size_t cache_size = 1 << 20);
 
 /**
- * Shutdown delegation database
+ * Shutdown delegation database (flushes to disk)
  */
 void ShutdownDelegationDB();
 

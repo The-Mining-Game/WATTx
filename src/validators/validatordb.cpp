@@ -13,12 +13,17 @@ namespace validators {
 // Global instance
 std::unique_ptr<ValidatorDB> g_validator_db;
 
-void InitValidatorDB(const Consensus::Params& params) {
-    g_validator_db = std::make_unique<ValidatorDB>(params);
-    LogPrintf("ValidatorDB: Initialized validator database\n");
+void InitValidatorDB(const Consensus::Params& params, const fs::path& path, size_t cache_size) {
+    fs::path db_path = path / "validators";
+    g_validator_db = std::make_unique<ValidatorDB>(params, db_path, cache_size);
+    LogPrintf("ValidatorDB: Initialized validator database at %s\n", fs::PathToString(db_path));
 }
 
 void ShutdownValidatorDB() {
+    if (g_validator_db) {
+        LogPrintf("ValidatorDB: Shutting down validator database (%zu validators)\n",
+                  g_validator_db->GetValidatorCount());
+    }
     g_validator_db.reset();
     LogPrintf("ValidatorDB: Shut down validator database\n");
 }
@@ -125,8 +130,64 @@ bool ValidatorUpdate::Verify(const CPubKey& pubkey) const {
 
 // ValidatorDB implementation
 
-ValidatorDB::ValidatorDB(const Consensus::Params& params)
-    : consensusParams(params), currentHeight(0) {}
+ValidatorDB::ValidatorDB(const Consensus::Params& params, const fs::path& path, size_t cache_size, bool memory_only)
+    : consensusParams(params), currentHeight(0)
+{
+    DBParams db_params{};
+    db_params.path = path;
+    db_params.cache_bytes = cache_size;
+    db_params.memory_only = memory_only;
+    db_params.wipe_data = false;
+    db_params.obfuscate = true;
+
+    m_db = std::make_unique<CDBWrapper>(db_params);
+
+    // Load existing validators from database
+    if (!LoadFromDB()) {
+        LogPrintf("ValidatorDB: No existing validators loaded (new database)\n");
+    }
+}
+
+bool ValidatorDB::WriteValidatorToDB(const ValidatorEntry& entry) {
+    if (!m_db) return false;
+    return m_db->Write(std::make_pair(DB_VALIDATOR, entry.validatorId), entry);
+}
+
+bool ValidatorDB::EraseValidatorFromDB(const CKeyID& validatorId) {
+    if (!m_db) return false;
+    return m_db->Erase(std::make_pair(DB_VALIDATOR, validatorId));
+}
+
+bool ValidatorDB::LoadFromDB() {
+    if (!m_db) return false;
+
+    std::unique_ptr<CDBIterator> pcursor(m_db->NewIterator());
+    pcursor->Seek(std::make_pair(DB_VALIDATOR, CKeyID()));
+
+    size_t count = 0;
+    while (pcursor->Valid()) {
+        std::pair<uint8_t, CKeyID> key;
+        if (!pcursor->GetKey(key) || key.first != DB_VALIDATOR) {
+            break;
+        }
+
+        ValidatorEntry entry;
+        if (pcursor->GetValue(entry)) {
+            validators[entry.validatorId] = entry;
+            if (!entry.stakeOutpoint.IsNull()) {
+                outpointIndex[entry.stakeOutpoint] = entry.validatorId;
+            }
+            count++;
+        }
+
+        pcursor->Next();
+    }
+
+    if (count > 0) {
+        LogPrintf("ValidatorDB: Loaded %zu validators from database\n", count);
+    }
+    return count > 0;
+}
 
 bool ValidatorDB::RegisterValidator(const ValidatorEntry& entry) {
     LOCK(cs_validators);
@@ -158,12 +219,18 @@ bool ValidatorDB::RegisterValidator(const ValidatorEntry& entry) {
         return false;
     }
 
-    // Add to database
+    // Add to in-memory cache
     validators[entry.validatorId] = entry;
 
     // Add to outpoint index
     if (!entry.stakeOutpoint.IsNull()) {
         outpointIndex[entry.stakeOutpoint] = entry.validatorId;
+    }
+
+    // Persist to LevelDB
+    if (!WriteValidatorToDB(entry)) {
+        LogPrintf("ValidatorDB: WARNING - Failed to persist validator %s to database\n",
+                  entry.validatorId.ToString());
     }
 
     LogPrintf("ValidatorDB: Registered validator %s with stake %lld and fee %lld bps\n",
@@ -252,6 +319,9 @@ bool ValidatorDB::ProcessUpdate(const ValidatorUpdate& update) {
             break;
     }
 
+    // Persist updated entry to LevelDB
+    WriteValidatorToDB(entry);
+
     return true;
 }
 
@@ -275,6 +345,9 @@ bool ValidatorDB::UpdateStakeOutpoint(const CKeyID& validatorId, const COutPoint
     if (!newOutpoint.IsNull()) {
         outpointIndex[newOutpoint] = validatorId;
     }
+
+    // Persist to LevelDB
+    WriteValidatorToDB(it->second);
 
     return true;
 }
@@ -357,6 +430,10 @@ bool ValidatorDB::SetValidatorStatus(const CKeyID& validatorId, ValidatorStatus 
     if (status == ValidatorStatus::ACTIVE) {
         it->second.lastActiveHeight = currentHeight;
     }
+
+    // Persist to LevelDB
+    WriteValidatorToDB(it->second);
+
     return true;
 }
 
@@ -370,6 +447,10 @@ bool ValidatorDB::JailValidator(const CKeyID& validatorId, int jailBlocks) {
     it->second.jailReleaseHeight = currentHeight + jailBlocks;
     LogPrintf("ValidatorDB: Jailed validator %s until height %d\n",
               validatorId.ToString(), it->second.jailReleaseHeight);
+
+    // Persist to LevelDB
+    WriteValidatorToDB(it->second);
+
     return true;
 }
 
@@ -390,6 +471,10 @@ bool ValidatorDB::UnjailValidator(const CKeyID& validatorId) {
     it->second.status = ValidatorStatus::ACTIVE;
     it->second.jailReleaseHeight = 0;
     LogPrintf("ValidatorDB: Unjailed validator %s\n", validatorId.ToString());
+
+    // Persist to LevelDB
+    WriteValidatorToDB(it->second);
+
     return true;
 }
 
@@ -419,6 +504,10 @@ bool ValidatorDB::AddDelegation(const CKeyID& validatorId, CAmount amount) {
     it->second.delegatorCount++;
     LogPrintf("ValidatorDB: Added delegation of %lld to validator %s (total: %lld, delegators: %d)\n",
               amount, validatorId.ToString(), it->second.totalDelegated, it->second.delegatorCount);
+
+    // Persist to LevelDB
+    WriteValidatorToDB(it->second);
+
     return true;
 }
 
@@ -437,12 +526,18 @@ bool ValidatorDB::RemoveDelegation(const CKeyID& validatorId, CAmount amount) {
     }
     LogPrintf("ValidatorDB: Removed delegation of %lld from validator %s (total: %lld, delegators: %d)\n",
               amount, validatorId.ToString(), it->second.totalDelegated, it->second.delegatorCount);
+
+    // Persist to LevelDB
+    WriteValidatorToDB(it->second);
+
     return true;
 }
 
 void ValidatorDB::ProcessBlock(int height) {
     LOCK(cs_validators);
     currentHeight = height;
+
+    bool needsWrite = false;
 
     // Process unbonding validators
     for (auto& [id, entry] : validators) {
@@ -452,6 +547,7 @@ void ValidatorDB::ProcessBlock(int height) {
                 entry.status = ValidatorStatus::INACTIVE;
                 LogPrintf("ValidatorDB: Validator %s unbonding complete, now inactive\n",
                           id.ToString());
+                WriteValidatorToDB(entry);
             }
         }
 

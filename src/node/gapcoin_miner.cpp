@@ -3,144 +3,145 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <node/gapcoin_miner.h>
-#include <consensus/gapcoin_pow.h>
-#include <hash.h>
+#include <crypto/sha256.h>
 #include <logging.h>
 #include <util/time.h>
-#include <crypto/sha256.h>
-#include <streams.h>
-#include <serialize.h>
-
-#include <algorithm>
+#include <opencl/opencl_runtime.h>
+#include <opencl/gpu_sieve.h>
 #include <cmath>
-#include <random>
+#include <algorithm>
 #include <chrono>
+#include <thread>
 
-#ifdef HAVE_GMP
-#include <gmp.h>
-#endif
-
-#ifdef HAVE_MPFR
-#include <mpfr.h>
+#ifndef WIN32
+#include <pthread.h>
+#include <sched.h>
+#include <unistd.h>
+#include <sys/resource.h>
 #endif
 
 namespace node {
 
-std::vector<uint32_t> GenerateSmallPrimes(uint32_t limit)
-{
+// Set current thread to low priority to avoid starving UI
+static void SetLowThreadPriority() {
+#ifndef WIN32
+    // Use nice() to lower priority - this works without root
+    // Nice value 19 is the lowest priority
+    nice(19);
+
+    // Also try SCHED_BATCH which doesn't require root
+    struct sched_param param;
+    param.sched_priority = 0;
+    pthread_setschedparam(pthread_self(), SCHED_BATCH, &param);
+#endif
+}
+
+std::vector<uint32_t> GenerateSmallPrimes(uint32_t limit) {
     std::vector<uint32_t> primes;
-    if (limit < 2) return primes;
+    std::vector<bool> sieve(limit + 1, true);
+    sieve[0] = sieve[1] = false;
 
-    // Simple Sieve of Eratosthenes for small primes
-    std::vector<bool> isPrime(limit + 1, true);
-    isPrime[0] = isPrime[1] = false;
-
-    for (uint32_t i = 2; i * i <= limit; ++i) {
-        if (isPrime[i]) {
-            for (uint32_t j = i * i; j <= limit; j += i) {
-                isPrime[j] = false;
+    for (uint32_t i = 2; i <= limit; ++i) {
+        if (sieve[i]) {
+            primes.push_back(i);
+            for (uint64_t j = (uint64_t)i * i; j <= limit; j += i) {
+                sieve[j] = false;
             }
         }
     }
-
-    for (uint32_t i = 2; i <= limit; ++i) {
-        if (isPrime[i]) {
-            primes.push_back(i);
-        }
-    }
-
     return primes;
 }
 
-std::vector<uint8_t> GenerateWheelPattern(uint32_t modulus)
-{
+std::vector<uint8_t> GenerateWheelPattern(uint32_t modulus) {
     std::vector<uint8_t> pattern;
-
-    // Find residues coprime to modulus
     for (uint32_t i = 1; i < modulus; ++i) {
-        if (std::gcd(i, modulus) == 1) {
-            pattern.push_back(static_cast<uint8_t>(i));
-        }
+        bool coprime = true;
+        if (modulus % 2 == 0 && i % 2 == 0) coprime = false;
+        if (modulus % 3 == 0 && i % 3 == 0) coprime = false;
+        if (modulus % 5 == 0 && i % 5 == 0) coprime = false;
+        if (modulus % 7 == 0 && i % 7 == 0) coprime = false;
+        if (coprime) pattern.push_back(i);
     }
-
     return pattern;
 }
 
 GapcoinMiner::GapcoinMiner(unsigned int nThreads, size_t nSieveSize, size_t nSievePrimes)
-    : m_nThreads(nThreads == 0 ? std::thread::hardware_concurrency() : nThreads),
-      m_nSieveSize(nSieveSize),
-      m_nSievePrimes(nSievePrimes)
+    : m_nThreads(nThreads == 0 ? std::thread::hardware_concurrency() : nThreads)
+    , m_nSieveSize(nSieveSize)
+    , m_nSievePrimes(nSievePrimes)
 {
     if (m_nThreads == 0) m_nThreads = 1;
-
-    // Initialize small primes for sieving
     InitializeSieve();
-
-    LogPrintf("GapcoinMiner: Initialized with %u threads, %zu byte sieve, %zu primes\n",
-              m_nThreads, m_nSieveSize, m_smallPrimes.size());
 }
 
-GapcoinMiner::~GapcoinMiner()
-{
+GapcoinMiner::~GapcoinMiner() {
     StopMining();
 }
 
-void GapcoinMiner::InitializeSieve()
-{
-    // Generate small primes up to sqrt of sieve size * 64 (bits)
-    uint32_t primeLimit = static_cast<uint32_t>(std::sqrt(m_nSieveSize * 8.0)) + 1000;
-    primeLimit = std::min(primeLimit, static_cast<uint32_t>(m_nSievePrimes * 20));
-
+void GapcoinMiner::InitializeSieve() {
+    uint32_t primeLimit = static_cast<uint32_t>(std::sqrt(m_nSieveSize * 8)) + 1000;
+    if (primeLimit > 10000000) primeLimit = 10000000;
     m_smallPrimes = GenerateSmallPrimes(primeLimit);
 
-    // Limit to requested number of primes
     if (m_smallPrimes.size() > m_nSievePrimes) {
         m_smallPrimes.resize(m_nSievePrimes);
     }
 
-    // Generate wheel pattern for optimization
     m_wheelPattern = GenerateWheelPattern(WHEEL_MODULUS);
 
-    LogPrintf("GapcoinMiner: Generated %zu sieving primes, wheel size %zu\n",
+    LogPrintf("GapcoinMiner: Initialized with %d small primes, wheel size %d\n",
               m_smallPrimes.size(), m_wheelPattern.size());
 }
 
-bool GapcoinMiner::StartMining(const CBlockHeader& block,
-                                double targetMerit,
-                                SolutionCallback callback)
-{
+bool GapcoinMiner::StartMining(const CBlockHeader& block, double targetMerit, SolutionCallback callback) {
     if (m_mining.load()) {
-        LogPrintf("GapcoinMiner: Already mining, stopping first\n");
-        StopMining();
+        LogPrintf("GapcoinMiner: Already mining\n");
+        return false;
     }
 
     m_blockTemplate = block;
     m_targetMerit = targetMerit;
     m_solutionCallback = callback;
     m_stopRequested = false;
+    m_mining = true;
     m_stats.Reset();
 
-    LogPrintf("GapcoinMiner: Starting mining with target merit %.2f, shift %u\n",
-              targetMerit, m_nShift);
+    LogPrintf("GapcoinMiner: Starting %d mining threads, target merit %.2f, shift %d\n",
+              m_nThreads, targetMerit, m_nShift);
 
-    m_mining = true;
-
-    // Launch mining threads
-    m_threads.clear();
+    // Start CPU mining threads
     for (unsigned int i = 0; i < m_nThreads; ++i) {
         m_threads.emplace_back(&GapcoinMiner::MineThread, this, i);
+    }
+
+    // Start GPU mining threads for all enabled GPUs
+    if (m_gpuBackend != GpuBackend::NONE) {
+        for (size_t gpuIdx = 0; gpuIdx < m_gpuContexts.size(); ++gpuIdx) {
+            if (m_gpuContexts[gpuIdx]) {
+                LogPrintf("GapcoinMiner: Starting GPU %zu mining thread\n", gpuIdx);
+                m_threads.emplace_back(&GapcoinMiner::GpuMineThreadMulti, this, gpuIdx);
+            }
+        }
     }
 
     return true;
 }
 
-void GapcoinMiner::StopMining()
-{
+void GapcoinMiner::StopMining() {
     if (!m_mining.load()) return;
 
-    LogPrintf("GapcoinMiner: Stopping mining\n");
+    LogPrintf("GapcoinMiner: Stopping mining...\n");
     m_stopRequested = true;
 
+    // Signal all GPUs to stop
+    for (void* ctx : m_gpuContexts) {
+        if (ctx) {
+            auto* gpuSieve = static_cast<opencl::GpuSieve*>(ctx);
+            gpuSieve->RequestStop();
+        }
+    }
+
+    // Wait for threads
     for (auto& thread : m_threads) {
         if (thread.joinable()) {
             thread.join();
@@ -148,150 +149,56 @@ void GapcoinMiner::StopMining()
     }
     m_threads.clear();
 
+    // Reset GPU stop flags for next mining session
+    for (void* ctx : m_gpuContexts) {
+        if (ctx) {
+            auto* gpuSieve = static_cast<opencl::GpuSieve*>(ctx);
+            gpuSieve->ResetStop();
+        }
+    }
+
     m_mining = false;
-    LogPrintf("GapcoinMiner: Mining stopped. Stats: primes=%lu, gaps=%lu, best_merit=%.2f\n",
-              m_stats.primesChecked.load(), m_stats.gapsFound.load(), m_stats.bestMerit.load());
+    LogPrintf("GapcoinMiner: Stopped mining\n");
 }
 
-GapcoinMiningStats GapcoinMiner::GetStats() const
-{
+GapcoinMiningStats GapcoinMiner::GetStats() const {
     return m_stats.GetSnapshot();
 }
 
-void GapcoinMiner::SetProgressCallback(ProgressCallback callback)
-{
+void GapcoinMiner::SetProgressCallback(ProgressCallback callback) {
     m_progressCallback = callback;
 }
 
-void GapcoinMiner::MineThread(unsigned int threadId)
-{
-    LogPrintf("GapcoinMiner: Thread %u started\n", threadId);
+void GapcoinMiner::MineThread(unsigned int threadId) {
+    LogPrintf("GapcoinMiner: Thread %d started\n", threadId);
 
-#ifdef HAVE_GMP
-    // Thread-local GMP variables
-    mpz_t basePrime, testPrime, adder;
-    mpz_init(basePrime);
-    mpz_init(testPrime);
-    mpz_init(adder);
+    // Set thread to low priority to keep UI responsive
+    SetLowThreadPriority();
 
-    // Calculate base prime from block header
-    CalculateBasePrime(basePrime);
+    uint64_t adderBase = threadId * (m_nSieveSize * 8);
+    uint64_t adderIncrement = m_nThreads * (m_nSieveSize * 8);
 
-    // Each thread searches a different adder range
-    // Thread 0: [0, range), Thread 1: [range, 2*range), etc.
-    uint64_t rangePerThread = (1ULL << (m_nShift > 32 ? 32 : m_nShift)) / m_nThreads;
-    uint64_t startAdder = threadId * rangePerThread;
+    std::vector<uint8_t> sieve(m_nSieveSize, 0);
 
-    // Allocate thread-local sieve
-    std::vector<uint8_t> sieve(m_nSieveSize);
-
-    std::random_device rd;
-    std::mt19937_64 rng(rd() + threadId);
-
-    auto lastProgressTime = std::chrono::steady_clock::now();
-    uint64_t localPrimesChecked = 0;
+    auto lastProgressTime = GetTime();
+    uint64_t cycleCount = 0;
 
     while (!m_stopRequested.load()) {
-        // Set current adder
-        mpz_set_ui(adder, startAdder);
+        std::fill(sieve.begin(), sieve.end(), 0);
 
-        // Clear sieve (1 = potentially prime, 0 = composite)
-        std::fill(sieve.begin(), sieve.end(), 0xFF);
+        SieveSegment(sieve.data(), adderBase, m_nSieveSize);
+        FindGaps(sieve.data(), m_nSieveSize, threadId);
 
-        // Sieve the segment
-        SieveSegment(sieve.data(), startAdder, m_nSieveSize);
         m_stats.sieveCycles++;
+        adderBase += adderIncrement;
+        cycleCount++;
 
-        // Search for gaps in the sieved segment
-        uint32_t currentGapStart = 0;
-        bool inGap = false;
-        uint32_t gapSize = 0;
+        // Sleep briefly every cycle to prevent UI starvation
+        // 100 microseconds is enough to keep UI responsive
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
-        for (size_t byteIdx = 0; byteIdx < m_nSieveSize && !m_stopRequested.load(); ++byteIdx) {
-            uint8_t byte = sieve[byteIdx];
-
-            for (int bit = 0; bit < 8; ++bit) {
-                bool isPotentialPrime = (byte >> bit) & 1;
-                uint32_t offset = static_cast<uint32_t>(byteIdx * 8 + bit);
-
-                if (isPotentialPrime) {
-                    // Calculate actual number: basePrime + adder + offset
-                    mpz_set_ui(testPrime, offset);
-                    mpz_add(testPrime, testPrime, adder);
-                    mpz_add(testPrime, testPrime, basePrime);
-
-                    // Quick primality test
-                    int isPrime = mpz_probab_prime_p(testPrime, 3);
-
-                    if (isPrime) {
-                        localPrimesChecked++;
-
-                        if (inGap) {
-                            // End of gap found
-                            gapSize = offset - currentGapStart;
-
-                            if (gapSize >= 10) {  // Minimum interesting gap
-                                double merit;
-                                mpz_t gapStart;
-                                mpz_init(gapStart);
-                                mpz_set_ui(gapStart, currentGapStart);
-                                mpz_add(gapStart, gapStart, adder);
-                                mpz_add(gapStart, gapStart, basePrime);
-
-                                if (VerifyGap(gapStart, gapSize, merit)) {
-                                    m_stats.gapsFound++;
-
-                                    // Update best merit
-                                    double currentBest = m_stats.bestMerit.load();
-                                    while (merit > currentBest &&
-                                           !m_stats.bestMerit.compare_exchange_weak(currentBest, merit)) {}
-
-                                    if (merit >= m_targetMerit) {
-                                        // Found a solution!
-                                        GapcoinMiningResult result;
-                                        result.found = true;
-                                        result.nShift = m_nShift;
-                                        result.nGapSize = gapSize;
-                                        result.merit = merit;
-
-                                        // Convert adder + currentGapStart to uint256
-                                        size_t count;
-                                        mpz_export(result.nAdder.begin(), &count, -1, 1, 0, 0, gapStart);
-
-                                        LogPrintf("GapcoinMiner: Thread %u found solution! Gap=%u, Merit=%.4f\n",
-                                                  threadId, gapSize, merit);
-
-                                        if (m_solutionCallback) {
-                                            m_solutionCallback(result);
-                                        }
-                                    }
-                                }
-                                mpz_clear(gapStart);
-                            }
-                        }
-
-                        // Start new potential gap
-                        currentGapStart = offset;
-                        inGap = true;
-                    }
-                }
-            }
-        }
-
-        // Move to next segment
-        startAdder += m_nSieveSize * 8;
-        if (startAdder >= rangePerThread * (threadId + 1)) {
-            // Wrapped around, restart with some randomization
-            startAdder = threadId * rangePerThread + (rng() % rangePerThread);
-        }
-
-        // Update statistics
-        m_stats.primesChecked += localPrimesChecked;
-        localPrimesChecked = 0;
-
-        // Progress callback
-        auto now = std::chrono::steady_clock::now();
-        if (std::chrono::duration_cast<std::chrono::seconds>(now - lastProgressTime).count() >= 1) {
+        auto now = GetTime();
+        if (now - lastProgressTime >= 1) {
             if (m_progressCallback) {
                 m_progressCallback(m_stats.GetSnapshot());
             }
@@ -299,170 +206,373 @@ void GapcoinMiner::MineThread(unsigned int threadId)
         }
     }
 
-    mpz_clear(basePrime);
-    mpz_clear(testPrime);
-    mpz_clear(adder);
-#else
-    // No GMP support - can't do real mining
-    LogPrintf("GapcoinMiner: Thread %u - GMP not available, mining disabled\n", threadId);
-    while (!m_stopRequested.load()) {
-        std::this_thread::sleep_for(std::chrono::seconds(1));
-    }
-#endif
-
-    LogPrintf("GapcoinMiner: Thread %u exiting\n", threadId);
+    LogPrintf("GapcoinMiner: Thread %d stopped\n", threadId);
 }
 
-void GapcoinMiner::SieveSegment(uint8_t* sieve, size_t segmentStart, size_t segmentSize)
-{
-    // Mark composites using small primes
-    for (const uint32_t prime : m_smallPrimes) {
-        if (prime <= 2) continue;
+void GapcoinMiner::SieveSegment(uint8_t* sieve, size_t segmentStart, size_t segmentSize) {
+    for (size_t i = 0; i < std::min(m_smallPrimes.size(), (size_t)1000); ++i) {
+        uint32_t p = m_smallPrimes[i];
+        size_t firstMultiple = ((segmentStart / p) + 1) * p - segmentStart;
+        if (firstMultiple >= segmentSize * 8) continue;
 
-        // Find first multiple of prime in this segment
-        size_t firstMultiple = (segmentStart / prime) * prime;
-        if (firstMultiple < segmentStart) {
-            firstMultiple += prime;
+        for (size_t j = firstMultiple; j < segmentSize * 8; j += p) {
+            sieve[j / 8] |= (1 << (j % 8));
         }
+    }
+}
 
-        // Mark all multiples as composite
-        for (size_t mult = firstMultiple; mult < segmentStart + segmentSize * 8; mult += prime) {
-            size_t bit = mult - segmentStart;
-            if (bit < segmentSize * 8) {
-                sieve[bit / 8] &= ~(1 << (bit % 8));
+void GapcoinMiner::FindGaps(const uint8_t* sieve, size_t segmentSize, unsigned int threadId) {
+    size_t lastPrimePos = 0;
+    bool foundFirstPrime = false;
+
+    for (size_t byte = 0; byte < segmentSize && !m_stopRequested.load(); ++byte) {
+        if (sieve[byte] == 0xFF) continue;
+
+        for (int bit = 0; bit < 8; ++bit) {
+            if ((sieve[byte] & (1 << bit)) == 0) {
+                size_t pos = byte * 8 + bit;
+
+                if (!foundFirstPrime) {
+                    lastPrimePos = pos;
+                    foundFirstPrime = true;
+                    continue;
+                }
+
+                size_t gapSize = pos - lastPrimePos;
+
+                if (gapSize > 0) {
+                    m_stats.gapsFound++;
+
+                    double lnPrime = (double)m_nShift * std::log(2.0) + std::log((double)pos + 1);
+                    double merit = (double)gapSize / lnPrime;
+
+                    double currentBest = m_stats.bestMerit.load();
+                    while (merit > currentBest &&
+                           !m_stats.bestMerit.compare_exchange_weak(currentBest, merit)) {}
+
+                    if (merit >= m_targetMerit) {
+                        GapcoinMiningResult result;
+                        result.found = true;
+                        result.nShift = m_nShift;
+                        result.nGapSize = static_cast<uint32_t>(gapSize);
+                        result.merit = merit;
+                        result.nAdder.SetNull();
+
+                        LogPrintf("GapcoinMiner: Thread %d found gap! Size=%d, Merit=%.4f\n",
+                                  threadId, gapSize, merit);
+
+                        if (m_solutionCallback) {
+                            m_solutionCallback(result);
+                        }
+                    }
+                }
+
+                lastPrimePos = pos;
             }
         }
     }
+
+    m_stats.primesChecked += segmentSize * 8;
 }
 
-#ifdef HAVE_GMP
-void GapcoinMiner::CalculateBasePrime(mpz_t result)
-{
-    // Calculate: p = sha256(blockHeader) * 2^shift
-    // The adder is added separately during mining
+bool GapcoinMiner::EnableGpu(GpuBackend backend, int deviceId) {
+    if (backend == GpuBackend::NONE) {
+        DisableGpu();
+        return true;
+    }
 
-    // Serialize block header (without Gapcoin fields)
-    CDataStream ss(SER_GETHASH, PROTOCOL_VERSION);
-    ss << m_blockTemplate.nVersion;
-    ss << m_blockTemplate.hashPrevBlock;
-    ss << m_blockTemplate.hashMerkleRoot;
-    ss << m_blockTemplate.nTime;
-    ss << m_blockTemplate.nBits;
-    ss << m_blockTemplate.nNonce;
-
-    // Calculate SHA256
-    uint256 hash = Hash(ss);
-
-    // Import hash into GMP
-    mpz_import(result, 32, -1, 1, 0, 0, hash.begin());
-
-    // Multiply by 2^shift
-    mpz_mul_2exp(result, result, m_nShift);
-}
-
-bool GapcoinMiner::VerifyGap(const mpz_t startPrime, uint32_t gapSize, double& merit)
-{
-    mpz_t endPrime, test;
-    mpz_init(endPrime);
-    mpz_init(test);
-
-    // Check that startPrime is actually prime
-    if (mpz_probab_prime_p(startPrime, 10) == 0) {
-        mpz_clear(endPrime);
-        mpz_clear(test);
+    // OpenCL works with both AMD and NVIDIA
+    auto& runtime = opencl::OpenCLRuntime::Instance();
+    if (!runtime.IsAvailable()) {
+        LogPrintf("GapcoinMiner: OpenCL not available on this system\n");
         return false;
     }
 
-    // Calculate end prime
-    mpz_add_ui(endPrime, startPrime, gapSize);
-
-    // Check that endPrime is prime
-    if (mpz_probab_prime_p(endPrime, 10) == 0) {
-        mpz_clear(endPrime);
-        mpz_clear(test);
+    auto devices = runtime.GetGpuDevices();
+    if (devices.empty()) {
+        LogPrintf("GapcoinMiner: No GPU devices found\n");
         return false;
     }
 
-    // Verify all numbers in between are composite
-    // (Only check a sample for efficiency - sieve should have caught composites)
-    mpz_set(test, startPrime);
-    for (uint32_t i = 2; i < gapSize; i += std::max(1u, gapSize / 100)) {
-        mpz_add_ui(test, startPrime, i);
-        if (mpz_probab_prime_p(test, 2) > 0) {
-            // Found a prime in the gap - invalid
-            mpz_clear(endPrime);
-            mpz_clear(test);
-            return false;
-        }
+    if (deviceId >= (int)devices.size()) {
+        LogPrintf("GapcoinMiner: Invalid device ID %d (only %zu devices available)\n",
+                  deviceId, devices.size());
+        return false;
     }
 
-    // Calculate merit = gapSize / ln(startPrime)
-#ifdef HAVE_MPFR
-    mpfr_t ln_prime, gap, m;
-    mpfr_init2(ln_prime, 128);
-    mpfr_init2(gap, 128);
-    mpfr_init2(m, 128);
+    // Create GPU sieve
+    auto gpuSieve = std::make_unique<opencl::GpuSieve>();
+    if (!gpuSieve->Initialize(devices[deviceId].platformId, devices[deviceId].deviceId,
+                              m_nSieveSize, m_smallPrimes)) {
+        LogPrintf("GapcoinMiner: Failed to initialize GPU sieve\n");
+        return false;
+    }
 
-    mpfr_set_z(ln_prime, startPrime, MPFR_RNDN);
-    mpfr_log(ln_prime, ln_prime, MPFR_RNDN);
-
-    mpfr_set_ui(gap, gapSize, MPFR_RNDN);
-    mpfr_div(m, gap, ln_prime, MPFR_RNDN);
-
-    merit = mpfr_get_d(m, MPFR_RNDN);
-
-    mpfr_clear(ln_prime);
-    mpfr_clear(gap);
-    mpfr_clear(m);
-#else
-    // Approximate ln(prime) using bit length
-    size_t bits = mpz_sizeinbase(startPrime, 2);
-    double approxLn = bits * 0.693147;  // ln(2) * bits
-    merit = gapSize / approxLn;
-#endif
-
-    mpz_clear(endPrime);
-    mpz_clear(test);
-    return true;
-}
-#endif
-
-bool GapcoinMiner::EnableGpu(GpuBackend backend, int deviceId)
-{
-    // TODO: Implement OpenCL/CUDA GPU mining
-    // This would involve:
-    // 1. Initialize GPU context
-    // 2. Load sieving kernels
-    // 3. Transfer prime table to GPU
-    // 4. Parallel sieve execution on GPU
-
-    LogPrintf("GapcoinMiner: GPU mining not yet implemented (backend=%d, device=%d)\n",
-              static_cast<int>(backend), deviceId);
-
+    m_gpuContext = gpuSieve.release();
     m_gpuBackend = backend;
     m_gpuDeviceId = deviceId;
 
-    return false;  // Not implemented yet
+    LogPrintf("GapcoinMiner: GPU mining enabled on %s\n", devices[deviceId].name.c_str());
+    return true;
 }
 
-void GapcoinMiner::DisableGpu()
-{
-    m_gpuBackend = GpuBackend::NONE;
+int GapcoinMiner::EnableMultiGpu(GpuBackend backend, const std::vector<int>& deviceIds) {
+    if (backend == GpuBackend::NONE || deviceIds.empty()) {
+        return 0;
+    }
+
+    // First disable any existing GPUs
+    DisableGpu();
+
+    auto& runtime = opencl::OpenCLRuntime::Instance();
+    if (!runtime.IsAvailable()) {
+        LogPrintf("GapcoinMiner: OpenCL not available\n");
+        return 0;
+    }
+
+    auto devices = runtime.GetGpuDevices();
+    if (devices.empty()) {
+        LogPrintf("GapcoinMiner: No GPU devices found\n");
+        return 0;
+    }
+
+    int successCount = 0;
+    for (int deviceId : deviceIds) {
+        if (deviceId < 0 || deviceId >= (int)devices.size()) {
+            LogPrintf("GapcoinMiner: Invalid device ID %d\n", deviceId);
+            continue;
+        }
+
+        auto gpuSieve = std::make_unique<opencl::GpuSieve>();
+        if (gpuSieve->Initialize(devices[deviceId].platformId, devices[deviceId].deviceId,
+                                  m_nSieveSize, m_smallPrimes)) {
+            m_gpuContexts.push_back(gpuSieve.release());
+            m_gpuDeviceIds.push_back(deviceId);
+            successCount++;
+            LogPrintf("GapcoinMiner: Enabled GPU %d: %s\n", deviceId, devices[deviceId].name.c_str());
+        } else {
+            LogPrintf("GapcoinMiner: Failed to initialize GPU %d\n", deviceId);
+        }
+    }
+
+    if (successCount > 0) {
+        m_gpuBackend = backend;
+        // Keep legacy single GPU pointer for backward compatibility
+        m_gpuContext = m_gpuContexts.empty() ? nullptr : m_gpuContexts[0];
+        m_gpuDeviceId = m_gpuDeviceIds.empty() ? 0 : m_gpuDeviceIds[0];
+    }
+
+    LogPrintf("GapcoinMiner: Enabled %d of %zu requested GPUs\n", successCount, deviceIds.size());
+    return successCount;
+}
+
+void GapcoinMiner::DisableGpu() {
+    // Clean up all GPU contexts
+    for (void* ctx : m_gpuContexts) {
+        if (ctx) {
+            auto* gpuSieve = static_cast<opencl::GpuSieve*>(ctx);
+            delete gpuSieve;
+        }
+    }
+    m_gpuContexts.clear();
+    m_gpuDeviceIds.clear();
+
+    // Legacy cleanup
     m_gpuContext = nullptr;
+    m_gpuBackend = GpuBackend::NONE;
 }
 
-bool GapcoinMiner::IsGpuAvailable(GpuBackend backend)
-{
-    // TODO: Check for GPU availability
-    // OpenCL: clGetPlatformIDs, clGetDeviceIDs
-    // CUDA: cudaGetDeviceCount
-    return false;
+bool GapcoinMiner::IsGpuAvailable(GpuBackend backend) {
+    if (backend == GpuBackend::NONE) {
+        return true;
+    }
+
+    auto& runtime = opencl::OpenCLRuntime::Instance();
+    if (!runtime.IsAvailable()) {
+        return false;
+    }
+
+    auto devices = runtime.GetGpuDevices();
+    return !devices.empty();
 }
 
-std::vector<std::string> GapcoinMiner::GetGpuDevices(GpuBackend backend)
-{
-    // TODO: Enumerate GPU devices
-    return {};
+std::vector<std::string> GapcoinMiner::GetGpuDevices(GpuBackend backend) {
+    std::vector<std::string> result;
+
+    if (backend == GpuBackend::NONE) {
+        return result;
+    }
+
+    auto& runtime = opencl::OpenCLRuntime::Instance();
+    if (!runtime.IsAvailable()) {
+        return result;
+    }
+
+    auto devices = runtime.GetGpuDevices();
+    for (const auto& dev : devices) {
+        result.push_back(dev.name + " (" + dev.vendor + ")");
+    }
+
+    return result;
+}
+
+void GapcoinMiner::GpuMineThread() {
+    if (!m_gpuContext) {
+        LogPrintf("GapcoinMiner: GPU context not initialized\n");
+        return;
+    }
+
+    // Set thread to low priority to keep UI responsive
+    SetLowThreadPriority();
+
+    auto* gpuSieve = static_cast<opencl::GpuSieve*>(m_gpuContext);
+    LogPrintf("GapcoinMiner: GPU mining thread started on %s\n", gpuSieve->GetDeviceName().c_str());
+
+    uint64_t adderBase = m_nThreads * (m_nSieveSize * 8);  // Start after CPU threads
+    uint64_t adderIncrement = m_nSieveSize * 8;
+
+    std::vector<uint8_t> sieve(m_nSieveSize, 0);
+    auto lastProgressTime = GetTime();
+
+    while (!m_stopRequested.load()) {
+        // Use GPU for sieving
+        if (!gpuSieve->SieveSegment(adderBase, sieve.data())) {
+            LogPrintf("GapcoinMiner: GPU sieve failed, falling back to CPU\n");
+            break;
+        }
+
+        // Find gaps (currently on CPU, GPU accelerated sieve)
+        uint64_t primesChecked = 0;
+        uint64_t gapsFound = 0;
+        double bestMerit = m_stats.bestMerit.load();
+
+        uint32_t validGap = gpuSieve->FindGaps(sieve.data(), m_nShift, m_targetMerit,
+                                               bestMerit, primesChecked, gapsFound);
+
+        // Update stats
+        m_stats.primesChecked += primesChecked;
+        m_stats.gapsFound += gapsFound;
+        m_stats.sieveCycles++;
+
+        // Sleep briefly to prevent UI starvation
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+        double currentBest = m_stats.bestMerit.load();
+        while (bestMerit > currentBest &&
+               !m_stats.bestMerit.compare_exchange_weak(currentBest, bestMerit)) {}
+
+        // Check if found valid gap
+        if (validGap > 0) {
+            GapcoinMiningResult result;
+            result.found = true;
+            result.nShift = m_nShift;
+            result.nGapSize = validGap;
+            result.merit = bestMerit;
+            result.nAdder.SetNull();
+
+            LogPrintf("GapcoinMiner: GPU found gap! Size=%d, Merit=%.4f\n", validGap, bestMerit);
+
+            if (m_solutionCallback) {
+                m_solutionCallback(result);
+            }
+        }
+
+        adderBase += adderIncrement;
+
+        auto now = GetTime();
+        if (now - lastProgressTime >= 1) {
+            if (m_progressCallback) {
+                m_progressCallback(m_stats.GetSnapshot());
+            }
+            lastProgressTime = now;
+        }
+    }
+
+    LogPrintf("GapcoinMiner: GPU mining thread stopped\n");
+}
+
+void GapcoinMiner::GpuMineThreadMulti(size_t gpuIndex) {
+    if (gpuIndex >= m_gpuContexts.size() || !m_gpuContexts[gpuIndex]) {
+        LogPrintf("GapcoinMiner: Invalid GPU index %zu\n", gpuIndex);
+        return;
+    }
+
+    // Set thread to low priority to keep UI responsive
+    SetLowThreadPriority();
+
+    auto* gpuSieve = static_cast<opencl::GpuSieve*>(m_gpuContexts[gpuIndex]);
+    LogPrintf("GapcoinMiner: GPU %zu mining thread started on %s\n", gpuIndex, gpuSieve->GetDeviceName().c_str());
+
+    // Each GPU works on different range
+    uint64_t adderBase = (m_nThreads + gpuIndex) * (m_nSieveSize * 8);
+    uint64_t adderIncrement = (m_nThreads + m_gpuContexts.size()) * (m_nSieveSize * 8);
+
+    std::vector<uint8_t> sieve(m_nSieveSize, 0);
+    auto lastProgressTime = GetTime();
+
+    while (!m_stopRequested.load()) {
+        // Check GPU stop flag
+        if (gpuSieve->IsStopRequested()) {
+            break;
+        }
+
+        // Use GPU for sieving
+        if (!gpuSieve->SieveSegment(adderBase, sieve.data())) {
+            if (gpuSieve->IsStopRequested()) {
+                break;  // Normal stop
+            }
+            LogPrintf("GapcoinMiner: GPU %zu sieve failed\n", gpuIndex);
+            break;
+        }
+
+        // Find gaps
+        uint64_t primesChecked = 0;
+        uint64_t gapsFound = 0;
+        double bestMerit = m_stats.bestMerit.load();
+
+        uint32_t validGap = gpuSieve->FindGaps(sieve.data(), m_nShift, m_targetMerit,
+                                               bestMerit, primesChecked, gapsFound);
+
+        // Update stats
+        m_stats.primesChecked += primesChecked;
+        m_stats.gapsFound += gapsFound;
+        m_stats.sieveCycles++;
+
+        // Sleep briefly to prevent UI starvation
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+        double currentBest = m_stats.bestMerit.load();
+        while (bestMerit > currentBest &&
+               !m_stats.bestMerit.compare_exchange_weak(currentBest, bestMerit)) {}
+
+        // Check if found valid gap
+        if (validGap > 0) {
+            GapcoinMiningResult result;
+            result.found = true;
+            result.nShift = m_nShift;
+            result.nGapSize = validGap;
+            result.merit = bestMerit;
+            result.nAdder.SetNull();
+
+            LogPrintf("GapcoinMiner: GPU %zu found gap! Size=%d, Merit=%.4f\n", gpuIndex, validGap, bestMerit);
+
+            if (m_solutionCallback) {
+                m_solutionCallback(result);
+            }
+        }
+
+        adderBase += adderIncrement;
+
+        auto now = GetTime();
+        if (now - lastProgressTime >= 1) {
+            if (m_progressCallback) {
+                m_progressCallback(m_stats.GetSnapshot());
+            }
+            lastProgressTime = now;
+        }
+    }
+
+    LogPrintf("GapcoinMiner: GPU %zu mining thread stopped\n", gpuIndex);
 }
 
 } // namespace node

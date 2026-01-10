@@ -22,6 +22,7 @@
 #include <net.h>
 #include <node/context.h>
 #include <node/miner.h>
+#include <node/randomx_miner.h>
 #include <node/warnings.h>
 #include <policy/ephemeral_policy.h>
 #include <pow.h>
@@ -135,12 +136,48 @@ static RPCHelpMan getnetworkhashps()
     };
 }
 
+// Helper function to calculate RandomX hash for RPC mining
+static uint256 GetRandomXHashForRPC(const CBlockHeader& header, const Consensus::Params& params) {
+    // Initialize RandomX if needed
+    static Mutex g_rpc_randomx_mutex;
+    static bool g_rpc_randomx_initialized = false;
+
+    {
+        LOCK(g_rpc_randomx_mutex);
+        if (!g_rpc_randomx_initialized) {
+            node::RandomXMiner& miner = node::GetRandomXMiner();
+            if (!miner.Initialize(params.hashGenesisBlock.data(), 32, node::RandomXMiner::Mode::LIGHT)) {
+                LogPrintf("RPC RandomX: Failed to initialize\n");
+                return uint256();
+            }
+            g_rpc_randomx_initialized = true;
+        }
+    }
+
+    // Calculate RandomX hash
+    auto headerData = node::RandomXMiner::SerializeBlockHeader(header);
+    uint256 hash;
+    node::GetRandomXMiner().CalculateHash(headerData.data(), headerData.size(), hash.data());
+    return hash;
+}
+
 static bool GenerateBlock(ChainstateManager& chainman, CBlock&& block, uint64_t& max_tries, std::shared_ptr<const CBlock>& block_out, bool process_new_block)
 {
     block_out.reset();
     block.hashMerkleRoot = BlockMerkleRoot(block);
 
-    while (max_tries > 0 && block.nNonce < std::numeric_limits<uint32_t>::max() && !CheckProofOfWork(block.GetHash(), block.nBits, chainman.GetConsensus()) && !chainman.m_interrupt) {
+    // Use RandomX for proof-of-work mining
+    const Consensus::Params& params = chainman.GetConsensus();
+    auto bnTarget = DeriveTarget(block.nBits, params.powLimit);
+    if (!bnTarget) {
+        return false;
+    }
+
+    while (max_tries > 0 && block.nNonce < std::numeric_limits<uint32_t>::max() && !chainman.m_interrupt) {
+        uint256 hash = GetRandomXHashForRPC(block, params);
+        if (!hash.IsNull() && UintToArith256(hash) <= *bnTarget) {
+            break;  // Found valid hash
+        }
         ++block.nNonce;
         --max_tries;
     }
@@ -238,6 +275,13 @@ static RPCHelpMan generatetodescriptor()
             "\nGenerate 11 blocks to mydesc\n" + HelpExampleCli("generatetodescriptor", "11 \"mydesc\"")},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
+    // SECURITY: Disable instant block generation on mainnet to prevent cheating
+    NodeContext& node = EnsureAnyNodeContext(request.context);
+    ChainstateManager& chainman = EnsureChainman(node);
+    if (chainman.GetParams().GetChainType() == ChainType::MAIN) {
+        throw JSONRPCError(RPC_MISC_ERROR, "generatetodescriptor is disabled on mainnet. Use proper PoW mining instead.");
+    }
+
     const auto num_blocks{self.Arg<int>("num_blocks")};
     const auto max_tries{self.Arg<uint64_t>("maxtries")};
 
@@ -247,9 +291,7 @@ static RPCHelpMan generatetodescriptor()
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, error);
     }
 
-    NodeContext& node = EnsureAnyNodeContext(request.context);
     Mining& miner = EnsureMining(node);
-    ChainstateManager& chainman = EnsureChainman(node);
 
     return generateBlocks(chainman, miner, coinbase_output_script, num_blocks, max_tries);
 },
@@ -285,6 +327,14 @@ static RPCHelpMan generatetoaddress()
                 },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
+    // SECURITY: Disable instant block generation on mainnet to prevent cheating
+    // Blocks can only be generated through proper PoW mining
+    NodeContext& node = EnsureAnyNodeContext(request.context);
+    ChainstateManager& chainman = EnsureChainman(node);
+    if (chainman.GetParams().GetChainType() == ChainType::MAIN) {
+        throw JSONRPCError(RPC_MISC_ERROR, "generatetoaddress is disabled on mainnet. Use proper PoW mining instead.");
+    }
+
     const int num_blocks{request.params[0].getInt<int>()};
     const uint64_t max_tries{request.params[2].isNull() ? DEFAULT_MAX_TRIES : request.params[2].getInt<int>()};
 
@@ -293,10 +343,7 @@ static RPCHelpMan generatetoaddress()
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Error: Invalid address");
     }
 
-    NodeContext& node = EnsureAnyNodeContext(request.context);
     Mining& miner = EnsureMining(node);
-    ChainstateManager& chainman = EnsureChainman(node);
-
     CScript coinbase_output_script = GetScriptForDestination(destination);
 
     return generateBlocks(chainman, miner, coinbase_output_script, num_blocks, max_tries);
@@ -332,6 +379,13 @@ static RPCHelpMan generateblock()
         },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
+    // SECURITY: Disable instant block generation on mainnet to prevent cheating
+    NodeContext& node = EnsureAnyNodeContext(request.context);
+    ChainstateManager& chainman = EnsureChainman(node);
+    if (chainman.GetParams().GetChainType() == ChainType::MAIN) {
+        throw JSONRPCError(RPC_MISC_ERROR, "generateblock is disabled on mainnet. Use proper PoW mining instead.");
+    }
+
     const auto address_or_descriptor = request.params[0].get_str();
     CScript coinbase_output_script;
     std::string error;
@@ -344,8 +398,6 @@ static RPCHelpMan generateblock()
 
         coinbase_output_script = GetScriptForDestination(destination);
     }
-
-    NodeContext& node = EnsureAnyNodeContext(request.context);
     Mining& miner = EnsureMining(node);
     const CTxMemPool& mempool = EnsureMemPool(node);
 
@@ -374,7 +426,6 @@ static RPCHelpMan generateblock()
     const bool process_new_block{request.params[2].isNull() ? true : request.params[2].get_bool()};
     CBlock block;
 
-    ChainstateManager& chainman = EnsureChainman(node);
     {
         LOCK(chainman.GetMutex());
         {
@@ -715,11 +766,13 @@ static RPCHelpMan getblocktemplate()
 
     if (!miner.isTestChain()) {
         const CConnman& connman = EnsureConnman(node);
-        if (connman.GetNodeCount(ConnectionDirection::Both) == 0) {
+        // Allow solo mining when at genesis (launching new blockchain) or with peers
+        bool atGenesis = (chainman.ActiveChain().Height() == 0);
+        if (!atGenesis && connman.GetNodeCount(ConnectionDirection::Both) == 0) {
             throw JSONRPCError(RPC_CLIENT_NOT_CONNECTED, CLIENT_NAME " is not connected!");
         }
 
-        if (miner.isInitialBlockDownload()) {
+        if (!atGenesis && miner.isInitialBlockDownload()) {
             throw JSONRPCError(RPC_CLIENT_IN_INITIAL_DOWNLOAD, CLIENT_NAME " is in initial sync and waiting for blocks...");
         }
     }
@@ -951,6 +1004,10 @@ static RPCHelpMan getblocktemplate()
     result.pushKV("curtime", block.GetBlockTime());
     result.pushKV("bits", strprintf("%08x", block.nBits));
     result.pushKV("height", (int64_t)(height));
+
+    // Qtum: Include state roots for EVM compatibility
+    result.pushKV("hashStateRoot", block.hashStateRoot.GetHex());
+    result.pushKV("hashUTXORoot", block.hashUTXORoot.GetHex());
 
     if (consensusParams.signet_blocks) {
         result.pushKV("signet_challenge", HexStr(consensusParams.signet_challenge));

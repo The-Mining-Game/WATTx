@@ -277,7 +277,8 @@ struct Params {
     int nGapcoinValidatorRewardPercent{50}; // 50% to validator
 
     /** Height at which hybrid PoW+PoS consensus activates */
-    int nHybridConsensusActivationHeight{1001};
+    /** Set to high value to disable until proper Gapcoin block creation is implemented */
+    int nHybridConsensusActivationHeight{999999999};
 
     /** Number of blocks to look back for difficulty adjustment */
     int nGapcoinDifficultyLookback{144}; // ~1 day at 10-min blocks
@@ -307,8 +308,9 @@ struct Params {
     int nGoldRewardMultiplier{150};     // 1.5x reward
     int nPlatinumRewardMultiplier{200}; // 2.0x reward
 
-    /** Base block reward in satoshis (0.083333333 WATTx = ~50 WATTx per 10 min) */
-    int64_t nBaseBlockReward{8333333};
+    /** Base block reward in satoshis (0.003787879 WATTx per block for each PoW/PoS) */
+    /** 50% to PoW miners, 50% to PoS stakers - each receives this amount */
+    int64_t nBaseBlockReward{378788};
 
     /** Height at which trust tier system activates */
     int nTrustTierActivationHeight{1001}; // After PoW phase

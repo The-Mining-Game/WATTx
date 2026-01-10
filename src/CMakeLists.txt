@@ -22,6 +22,13 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/leveldb/include)
 # Add blst library
 add_subdirectory(blst)
 
+# Add RandomX library for ASIC-resistant PoW mining
+message("")
+message("Configuring RandomX library...")
+set(RANDOMX_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+add_subdirectory(randomx EXCLUDE_FROM_ALL)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/randomx/src)
+
 # Subprojects include subdirectories that do or could have tests
 # and/or benchmark binaries, such as all subtrees and univalue.
 # These need to be included before CMAKE_*_OUTPUT_DIRECTORY variables
@@ -445,6 +452,9 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   node/mempool_persist_args.cpp
   node/miner.cpp
   node/gapcoin_miner.cpp
+  node/randomx_miner.cpp
+  opencl/opencl_runtime.cpp
+  opencl/gpu_sieve.cpp
   node/mini_miner.cpp
   node/minisketchwrapper.cpp
   node/peerman_args.cpp
@@ -514,6 +524,7 @@ target_link_libraries(bitcoin_node
     $<TARGET_NAME_IF_EXISTS:libevent::extra>
     $<TARGET_NAME_IF_EXISTS:libevent::pthreads>
     $<TARGET_NAME_IF_EXISTS:USDT::headers>
+    randomx
 )
 
 

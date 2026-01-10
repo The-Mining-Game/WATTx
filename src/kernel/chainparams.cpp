@@ -176,11 +176,23 @@ public:
 
         // WATTx Mainnet Genesis Block - Operation Absolute Resolve
         // Message: "Operation Absolute Resolve - Maduro Captured 03/Jan/2026 11:11 PM CST"
-        genesis = CreateMainnetGenesisBlock(1735430400, 2289, 0x1f00ffff, 1, 8333333);
+        genesis = CreateMainnetGenesisBlock(1735430400, 0, 0x1f00ffff, 1, 378788);
+
+        // Mine mainnet genesis (finds valid nonce)
+        arith_uint256 bnTarget;
+        bnTarget.SetCompact(genesis.nBits);
+        printf("Mining WATTx MAINNET genesis...\n");
+        printf("MerkleRoot: %s\n", genesis.hashMerkleRoot.GetHex().c_str());
+        for (genesis.nNonce = 0; genesis.nNonce < 0xFFFFFFFF; genesis.nNonce++) {
+            uint256 hash = genesis.GetHash();
+            if (UintToArith256(hash) <= bnTarget) {
+                printf("MAINNET FOUND! nNonce=%u\n", genesis.nNonce);
+                printf("hashGenesisBlock=%s\n", hash.GetHex().c_str());
+                break;
+            }
+            if (genesis.nNonce % 100000 == 0) printf("mainnet nonce=%u\n", genesis.nNonce);
+        }
         consensus.hashGenesisBlock = genesis.GetHash();
-        // TODO: Update genesis hashes after Gapcoin block header changes
-        // assert(consensus.hashGenesisBlock == uint256{"0000dcb9cefee21af780c703998dc651a395e34d0440412e075e67e8f7bfb698"});
-        // assert(genesis.hashMerkleRoot == uint256{"0f76f34176f029e0cee01264218acd0abb86f43605bd249d6d063d9b51e05459"});
 
         // WATTx seed nodes (to be configured)
         vSeeds.emplace_back("seed1.wattxchange.app");
@@ -207,7 +219,7 @@ public:
 
         checkpointData = {
             {
-                {0, uint256{"0000dcb9cefee21af780c703998dc651a395e34d0440412e075e67e8f7bfb698"}},
+                // Will be updated after mining mainnet genesis with Gapcoin fields
             }
         };
 
@@ -223,12 +235,12 @@ public:
 
         // WATTx-specific parameters
         consensus.nBlocktimeDownscaleFactor = 1; // No downscaling, 1s blocks from start
-        consensus.nCoinbaseMaturity = 600; // ~10 minutes maturity
-        consensus.nRBTCoinbaseMaturity = 600;
+        consensus.nCoinbaseMaturity = 500; // WATTx: 500 blocks maturity
+        consensus.nRBTCoinbaseMaturity = 500;
         consensus.nSubsidyHalvingIntervalV2 = 126000000; // ~4 years at 1s blocks
-        consensus.nMinValidatorStake = 100000 * COIN; // 100,000 WATTx minimum to stake
+        consensus.nMinValidatorStake = 20000 * COIN; // 20,000 WATTx minimum for super staking validator
 
-        consensus.nLastPOWBlock = 1000; // Short PoW phase then pure PoS
+        consensus.nLastPOWBlock = 0x7fffffff; // Allow indefinite PoW mining until hybrid consensus activation
         consensus.nLastBigReward = 0; // Fair launch - no big rewards, 0.08333333 WATTx from block 1
         consensus.nMPoSRewardRecipients = 10;
         consensus.nFirstMPoSBlock = consensus.nLastPOWBlock +
@@ -326,7 +338,7 @@ public:
 
         // WATTx Testnet Genesis Block - Fresh chain for immediate sync
         // Message: "WATTx Testnet Launch - Jan 2026 - Fast Sync Testing"
-        genesis = CreateTestnetGenesisBlock(1736035200, 0, 0x1f00ffff, 1, 8333333);
+        genesis = CreateTestnetGenesisBlock(1736035200, 0, 0x1f00ffff, 1, 378788);
 
         // Mine testnet genesis
         arith_uint256 bnTarget;
@@ -349,15 +361,16 @@ public:
         // WATTx testnet - isolated mode (no external seeds for now)
         // When ready for public testnet, add: vSeeds.emplace_back("testnet-seed1.wattxchange.app");
 
-        base58Prefixes[PUBKEY_ADDRESS] = std::vector<unsigned char>(1,120);
-        base58Prefixes[SCRIPT_ADDRESS] = std::vector<unsigned char>(1,110);
+        // WATTx testnet addresses start with 'w' (base58 prefix 135)
+        base58Prefixes[PUBKEY_ADDRESS] = std::vector<unsigned char>(1,135);
+        base58Prefixes[SCRIPT_ADDRESS] = std::vector<unsigned char>(1,137);
         base58Prefixes[SECRET_KEY] =     std::vector<unsigned char>(1,239);
         base58Prefixes[EXT_PUBLIC_KEY] = {0x04, 0x35, 0x87, 0xCF};
         base58Prefixes[EXT_SECRET_KEY] = {0x04, 0x35, 0x83, 0x94};
         // Dilithium (quantum-resistant) testnet addresses start with 'D' (base58 prefix 30)
         base58Prefixes[DILITHIUM_ADDRESS] = std::vector<unsigned char>(1,30);
 
-        bech32_hrp = "tw"; // WATTx testnet bech32 prefix
+        bech32_hrp = "wt"; // WATTx testnet bech32 prefix
 
         // No fixed seeds - WATTx testnet runs in isolated mode
         // vFixedSeeds = std::vector<uint8_t>(std::begin(chainparams_seed_test), std::end(chainparams_seed_test));
@@ -383,24 +396,26 @@ public:
             .dTxRate  = 0,
         };
 
-        consensus.nBlocktimeDownscaleFactor = 4;
-        consensus.nCoinbaseMaturity = 500;
-        consensus.nRBTCoinbaseMaturity = 100;  // WATTx testnet: 100 blocks maturity for fast testing (~2 min)
-        consensus.nSubsidyHalvingIntervalV2 = consensus.nBlocktimeDownscaleFactor*985500; // qtum halving every 4 years (nSubsidyHalvingInterval * nBlocktimeDownscaleFactor)
-        consensus.nMinValidatorStake = 0; // No minimum for testnet - allow any stake amount
+        consensus.nBlocktimeDownscaleFactor = 1; // WATTx testnet: same as mainnet (1s blocks)
+        consensus.nCoinbaseMaturity = 500;  // WATTx testnet: same as mainnet (500 blocks)
+        consensus.nRBTCoinbaseMaturity = 500;  // WATTx testnet: same as mainnet
+        consensus.nSubsidyHalvingIntervalV2 = 126000000; // WATTx testnet: ~4 years at 1s blocks (same as mainnet)
+        consensus.nMinValidatorStake = 20000 * COIN; // 20,000 WATTx minimum (same as mainnet)
 
-        // WATTx Testnet: Bootstrap with big rewards, then fair rewards
-        consensus.nLastPOWBlock = 1000;  // PoW until block 1000 for bootstrapping
-        consensus.nLastBigReward = 500;  // Big rewards (20k WATTx) for first 500 blocks to bootstrap
-        consensus.nMPoSRewardRecipients = 1;
-        consensus.nFirstMPoSBlock = 501;
-        consensus.nLastMPoSBlock = 0;   // Disable MPoS after bootstrap
+        // WATTx Testnet: Same as mainnet (fair launch, no big rewards)
+        consensus.nLastPOWBlock = 0x7fffffff;  // Allow indefinite PoW mining until hybrid consensus activation (same as mainnet)
+        consensus.nLastBigReward = 0;  // Fair launch - no big rewards (same as mainnet)
+        consensus.nMPoSRewardRecipients = 10;
+        consensus.nFirstMPoSBlock = consensus.nLastPOWBlock +
+                                    consensus.nMPoSRewardRecipients +
+                                    consensus.nCoinbaseMaturity;
+        consensus.nLastMPoSBlock = 0;   // Disable MPoS, use tiered PoS (same as mainnet)
 
         consensus.nFixUTXOCacheHFHeight = 0;
         consensus.nEnableHeaderSignatureHeight = 0;
         consensus.nCheckpointSpan = consensus.nCoinbaseMaturity;
         consensus.nRBTCheckpointSpan = consensus.nRBTCoinbaseMaturity;
-        consensus.delegationsAddress = uint160();  // WATTx testnet: disable offline staking contract for now
+        consensus.delegationsAddress = uint160(ParseHex("0000000000000000000000000000000000000086")); // Same as mainnet
         consensus.historyStorageAddress = uint160(ParseHex("0000F90827F1C53a10cb7A02335B175320002935")); // EVM block hash history contract address
         consensus.nStakeTimestampMask = 0;  // Allow staking every second
         consensus.nRBTStakeTimestampMask = 0;
@@ -474,24 +489,34 @@ public:
         m_assumed_chain_state_size = 1;
 
         // WATTx Signet Genesis Block - Uses mainnet genesis
-        genesis = CreateMainnetGenesisBlock(1735430400, 2289, 0x1f00ffff, 1, 8333333);
+        genesis = CreateMainnetGenesisBlock(1735430400, 0, 0x1f00ffff, 1, 378788);
+
+        // Mine signet genesis (finds valid nonce) - same as mainnet but cached separately
+        {
+            arith_uint256 bnTarget;
+            bnTarget.SetCompact(genesis.nBits);
+            for (genesis.nNonce = 0; genesis.nNonce < 0xFFFFFFFF; genesis.nNonce++) {
+                uint256 hash = genesis.GetHash();
+                if (UintToArith256(hash) <= bnTarget) {
+                    break;
+                }
+            }
+        }
         consensus.hashGenesisBlock = genesis.GetHash();
-        // TODO: Update genesis hashes after Gapcoin block header changes
-        // assert(consensus.hashGenesisBlock == uint256{"0000dcb9cefee21af780c703998dc651a395e34d0440412e075e67e8f7bfb698"});
-        // assert(genesis.hashMerkleRoot == uint256{"0f76f34176f029e0cee01264218acd0abb86f43605bd249d6d063d9b51e05459"});
 
         vFixedSeeds.clear();
         vSeeds.clear();
         // WATTx Signet - isolated mode (no external seeds)
         // Do NOT connect to QTUM network
 
-        base58Prefixes[PUBKEY_ADDRESS] = std::vector<unsigned char>(1,120);
-        base58Prefixes[SCRIPT_ADDRESS] = std::vector<unsigned char>(1,110);
+        // WATTx signet addresses start with 'w' (base58 prefix 135)
+        base58Prefixes[PUBKEY_ADDRESS] = std::vector<unsigned char>(1,135);
+        base58Prefixes[SCRIPT_ADDRESS] = std::vector<unsigned char>(1,137);
         base58Prefixes[SECRET_KEY] =     std::vector<unsigned char>(1,239);
         base58Prefixes[EXT_PUBLIC_KEY] = {0x04, 0x35, 0x87, 0xCF};
         base58Prefixes[EXT_SECRET_KEY] = {0x04, 0x35, 0x83, 0x94};
 
-        bech32_hrp = "sw"; // WATTx signet bech32 prefix
+        bech32_hrp = "ws"; // WATTx signet bech32 prefix
 
         // No fixed seeds - WATTx signet runs in isolated mode
         // vFixedSeeds = std::vector<uint8_t>(std::begin(chainparams_seed_testnet4), std::end(chainparams_seed_testnet4));
@@ -503,7 +528,7 @@ public:
 
         checkpointData = {
             {
-                {0, uint256{"0000dcb9cefee21af780c703998dc651a395e34d0440412e075e67e8f7bfb698"}},
+                // Will be updated after mining signet genesis with Gapcoin fields
             }
         };
 
@@ -524,7 +549,7 @@ public:
         consensus.nMinValidatorStake = 100000 * COIN; // 100,000 WATTx minimum to stake
 
         consensus.nLastPOWBlock = 5000;
-        consensus.nLastBigReward = 5000;
+        consensus.nLastBigReward = 0; // Fair launch - same as mainnet (0.08333333 WATTx per block)
         consensus.nMPoSRewardRecipients = 10;
         consensus.nFirstMPoSBlock = 5000;
         consensus.nLastMPoSBlock = 0;
@@ -639,7 +664,7 @@ public:
         nDefaultPort = 33888;
         nPruneAfterHeight = 1000;
 
-        genesis = CreateSigNetGenesisBlock(1623662135, 7377285, 0x1f00ffff, 1, 50 * COIN);
+        genesis = CreateSigNetGenesisBlock(1623662135, 7377285, 0x1f00ffff, 1, 378788);
         consensus.hashGenesisBlock = genesis.GetHash();
         // TODO: Generate new genesis block for WATTx regtest
         // assert(consensus.hashGenesisBlock == uint256{"0000e0d4bc95abd1c0fcef0abb2795b6e8525f406262d59dc60cd3c490641347"});
@@ -650,13 +675,14 @@ public:
             {}
         };
 
-        base58Prefixes[PUBKEY_ADDRESS] = std::vector<unsigned char>(1,120);
-        base58Prefixes[SCRIPT_ADDRESS] = std::vector<unsigned char>(1,110);
+        // WATTx testnet4 addresses start with 'w' (base58 prefix 135)
+        base58Prefixes[PUBKEY_ADDRESS] = std::vector<unsigned char>(1,135);
+        base58Prefixes[SCRIPT_ADDRESS] = std::vector<unsigned char>(1,137);
         base58Prefixes[SECRET_KEY] =     std::vector<unsigned char>(1,239);
         base58Prefixes[EXT_PUBLIC_KEY] = {0x04, 0x35, 0x87, 0xCF};
         base58Prefixes[EXT_SECRET_KEY] = {0x04, 0x35, 0x83, 0x94};
 
-        bech32_hrp = "tq";
+        bech32_hrp = "w4"; // WATTx testnet4 bech32 prefix
 
         fDefaultConsistencyChecks = false;
         fMineBlocksOnDemand = false;
@@ -669,7 +695,7 @@ public:
         consensus.nMinValidatorStake = 100000 * COIN; // 100,000 WATTx minimum to stake
 
         consensus.nLastPOWBlock = 0x7fffffff;
-        consensus.nLastBigReward = 5000;
+        consensus.nLastBigReward = 0; // Fair launch (0.08333333 WATTx per block)
         consensus.nMPoSRewardRecipients = 10;
         consensus.nFirstMPoSBlock = 5000;
         consensus.nLastMPoSBlock = 0;
@@ -781,10 +807,9 @@ public:
         }
 
         // WATTx Regtest Genesis - Easy difficulty for testing (uses mainnet message)
-        genesis = CreateMainnetGenesisBlock(1735430400, 1, 0x207fffff, 1, 8333333);
+        genesis = CreateMainnetGenesisBlock(1735430400, 1, 0x207fffff, 1, 378788);
         consensus.hashGenesisBlock = genesis.GetHash();
-        // Regtest uses easy difficulty so hash differs, but merkle root is same as mainnet
-        assert(genesis.hashMerkleRoot == uint256{"0f76f34176f029e0cee01264218acd0abb86f43605bd249d6d063d9b51e05459"});
+        // Regtest uses easy difficulty so hash differs from mainnet
 
         vFixedSeeds.clear(); //!< Regtest mode doesn't have any fixed seeds.
         vSeeds.clear();
@@ -828,10 +853,10 @@ public:
         consensus.nCoinbaseMaturity = 10;  // WATTx regtest: lowered for fast testing
         consensus.nRBTCoinbaseMaturity = 10;  // WATTx regtest: lowered for fast testing
         consensus.nSubsidyHalvingIntervalV2 = consensus.nBlocktimeDownscaleFactor*985500; // qtum halving every 4 years (nSubsidyHalvingInterval * nBlocktimeDownscaleFactor)
-        consensus.nMinValidatorStake = 100 * COIN; // Lower for regtest (100 WATTx)
+        consensus.nMinValidatorStake = 10 * COIN; // Lower for regtest (10 WATTx)
 
         consensus.nLastPOWBlock = 0x7fffffff;
-        consensus.nLastBigReward = 5000;
+        consensus.nLastBigReward = 0; // Fair launch (0.08333333 WATTx per block)
         consensus.nMPoSRewardRecipients = 10;
         consensus.nFirstMPoSBlock = 5000;
         consensus.nLastMPoSBlock = 0;
@@ -846,15 +871,16 @@ public:
         consensus.nStakeTimestampMask = 15;
         consensus.nRBTStakeTimestampMask = 3;
 
-        base58Prefixes[PUBKEY_ADDRESS] = std::vector<unsigned char>(1,120);
-        base58Prefixes[SCRIPT_ADDRESS] = std::vector<unsigned char>(1,110);
+        // WATTx regtest addresses start with 'w' (base58 prefix 135)
+        base58Prefixes[PUBKEY_ADDRESS] = std::vector<unsigned char>(1,135);
+        base58Prefixes[SCRIPT_ADDRESS] = std::vector<unsigned char>(1,137);
         base58Prefixes[SECRET_KEY] =     std::vector<unsigned char>(1,239);
         base58Prefixes[EXT_PUBLIC_KEY] = {0x04, 0x35, 0x87, 0xCF};
         base58Prefixes[EXT_SECRET_KEY] = {0x04, 0x35, 0x83, 0x94};
         // Dilithium (quantum-resistant) regtest addresses start with 'D' (base58 prefix 30)
         base58Prefixes[DILITHIUM_ADDRESS] = std::vector<unsigned char>(1,30);
 
-        bech32_hrp = "qcrt";
+        bech32_hrp = "wr"; // WATTx regtest bech32 prefix
     }
 };
 
@@ -884,7 +910,7 @@ public:
         consensus.nBlocktimeDownscaleFactor = 4;
         consensus.nCoinbaseMaturity = 500;
         consensus.nRBTCoinbaseMaturity = consensus.nBlocktimeDownscaleFactor*500;
-        consensus.nMinValidatorStake = 100 * COIN; // Lower for regtest (100 WATTx)
+        consensus.nMinValidatorStake = 10 * COIN; // Lower for regtest (10 WATTx)
 
         consensus.nCheckpointSpan = consensus.nCoinbaseMaturity*2; // Increase the check point span for the reorganization tests from 500 to 1000
         consensus.nRBTCheckpointSpan = consensus.nRBTCoinbaseMaturity*2; // Increase the check point span for the reorganization tests from 500 to 1000

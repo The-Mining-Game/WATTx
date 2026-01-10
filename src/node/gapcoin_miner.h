@@ -42,8 +42,8 @@ namespace node {
  * - GPU acceleration via OpenCL/CUDA (optional)
  */
 
-/** Default sieve size in bytes (32MB) */
-static constexpr size_t DEFAULT_SIEVE_SIZE = 32 * 1024 * 1024;
+/** Default sieve size in bytes (256KB - smaller for responsive UI) */
+static constexpr size_t DEFAULT_SIEVE_SIZE = 256 * 1024;
 
 /** Number of small primes used for sieving */
 static constexpr size_t DEFAULT_SIEVE_PRIMES = 900000;
@@ -188,9 +188,22 @@ public:
     bool EnableGpu(GpuBackend backend, int deviceId = 0);
 
     /**
+     * Configure multi-GPU mining
+     * @param backend GPU backend to use
+     * @param deviceIds List of GPU device IDs to use
+     * @return Number of GPUs successfully initialized
+     */
+    int EnableMultiGpu(GpuBackend backend, const std::vector<int>& deviceIds);
+
+    /**
      * Disable GPU mining
      */
     void DisableGpu();
+
+    /**
+     * Get number of active GPUs
+     */
+    size_t GetActiveGpuCount() const { return m_gpuContexts.size(); }
 
     /**
      * Check if GPU mining is available
@@ -216,6 +229,12 @@ public:
 private:
     // Mining thread function
     void MineThread(unsigned int threadId);
+
+    // GPU mining thread function (single GPU - legacy)
+    void GpuMineThread();
+
+    // GPU mining thread function (multi-GPU)
+    void GpuMineThreadMulti(size_t gpuIndex);
 
     // Initialize sieve of small primes
     void InitializeSieve();
@@ -255,10 +274,14 @@ private:
     SolutionCallback m_solutionCallback;
     ProgressCallback m_progressCallback;
 
-    // GPU mining state
+    // GPU mining state - supports multiple GPUs
     GpuBackend m_gpuBackend{GpuBackend::NONE};
+    std::vector<int> m_gpuDeviceIds;           // List of enabled GPU device IDs
+    std::vector<void*> m_gpuContexts;          // Opaque GPU contexts (one per GPU)
+
+    // Legacy single GPU support (for backward compatibility)
     int m_gpuDeviceId{0};
-    void* m_gpuContext{nullptr};  // Opaque GPU context
+    void* m_gpuContext{nullptr};
 };
 
 /**

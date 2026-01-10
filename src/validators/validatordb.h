@@ -6,12 +6,14 @@
 #define WATTX_VALIDATORS_VALIDATORDB_H
 
 #include <consensus/params.h>
+#include <dbwrapper.h>
 #include <key.h>
 #include <pubkey.h>
 #include <uint256.h>
 #include <serialize.h>
 #include <sync.h>
 #include <primitives/transaction.h>
+#include <util/fs.h>
 
 #include <cstdint>
 #include <map>
@@ -61,16 +63,25 @@ public:
 
     SERIALIZE_METHODS(ValidatorEntry, obj) {
         READWRITE(obj.validatorId, obj.validatorPubKey, obj.stakeAmount,
-                  obj.poolFeeRate, obj.registrationHeight, obj.lastActiveHeight,
-                  Using<CustomUintFormatter<1>>(obj.status), obj.validatorName,
-                  obj.stakeOutpoint, obj.jailReleaseHeight, obj.totalDelegated,
-                  obj.delegatorCount);
+                  obj.poolFeeRate, obj.registrationHeight, obj.lastActiveHeight);
+        // Handle enum serialization manually
+        uint8_t status_byte;
+        SER_WRITE(obj, status_byte = static_cast<uint8_t>(obj.status));
+        READWRITE(status_byte);
+        SER_READ(obj, obj.status = static_cast<ValidatorStatus>(status_byte));
+        READWRITE(obj.validatorName, obj.stakeOutpoint, obj.jailReleaseHeight,
+                  obj.totalDelegated, obj.delegatorCount);
     }
 
     /**
      * Get total stake (self + delegated)
      */
     CAmount GetTotalStake() const { return stakeAmount + totalDelegated; }
+
+    /**
+     * Check if validator is active
+     */
+    bool IsActive() const { return status == ValidatorStatus::ACTIVE; }
 
     /**
      * Check if validator meets minimum stake requirement
@@ -122,8 +133,12 @@ public:
                         newValue(0), updateHeight(0) {}
 
     SERIALIZE_METHODS(ValidatorUpdate, obj) {
-        READWRITE(obj.validatorId, Using<CustomUintFormatter<1>>(obj.updateType),
-                  obj.newValue, obj.newName, obj.updateHeight, obj.signature);
+        READWRITE(obj.validatorId);
+        uint8_t type_byte;
+        SER_WRITE(obj, type_byte = static_cast<uint8_t>(obj.updateType));
+        READWRITE(type_byte);
+        SER_READ(obj, obj.updateType = static_cast<ValidatorUpdateType>(type_byte));
+        READWRITE(obj.newValue, obj.newName, obj.updateHeight, obj.signature);
     }
 
     /**
@@ -145,6 +160,7 @@ public:
 /**
  * Validator database manager
  * Handles registration, updates, and queries for validators
+ * Uses LevelDB for persistent storage
  */
 class ValidatorDB {
 private:
@@ -156,8 +172,20 @@ private:
     // Index by stake outpoint for quick lookup
     std::map<COutPoint, CKeyID> outpointIndex;
 
+    // LevelDB persistence
+    std::unique_ptr<CDBWrapper> m_db;
+
+    // Database keys
+    static constexpr uint8_t DB_VALIDATOR = 'v';
+    static constexpr uint8_t DB_METADATA = 'm';
+
+    // Internal persistence methods
+    bool WriteValidatorToDB(const ValidatorEntry& entry);
+    bool EraseValidatorFromDB(const CKeyID& validatorId);
+    bool LoadFromDB();
+
 public:
-    explicit ValidatorDB(const Consensus::Params& params);
+    ValidatorDB(const Consensus::Params& params, const fs::path& path, size_t cache_size = 1 << 20, bool memory_only = false);
 
     /**
      * Register a new validator
@@ -289,12 +317,15 @@ static constexpr int UNBONDING_PERIOD = 259200;   // ~3 days at 1s blocks
 extern std::unique_ptr<ValidatorDB> g_validator_db;
 
 /**
- * Initialize validator database
+ * Initialize validator database with persistence
+ * @param params Consensus parameters
+ * @param path Data directory for LevelDB storage
+ * @param cache_size LevelDB cache size in bytes
  */
-void InitValidatorDB(const Consensus::Params& params);
+void InitValidatorDB(const Consensus::Params& params, const fs::path& path, size_t cache_size = 1 << 20);
 
 /**
- * Shutdown validator database
+ * Shutdown validator database (flushes to disk)
  */
 void ShutdownValidatorDB();
 

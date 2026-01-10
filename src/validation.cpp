@@ -43,6 +43,7 @@
 #include <pow.h>
 #include <pos.h>
 #include <primitives/block.h>
+#include <node/randomx_miner.h>
 #include <primitives/transaction.h>
 #include <random.h>
 #include <script/script.h>
@@ -74,6 +75,8 @@
 #include <qtum/qtumutils.h>
 #include <common/args.h>
 #include <addresstype.h>
+#include <validators/validatordb.h>
+#include <validators/delegation.h>
 
 #include <algorithm>
 #include <cassert>
@@ -2098,10 +2101,78 @@ bool IsConfirmedInNPrevBlocks(const CDiskTxPos& txindex, const CBlockIndex* pind
     return false;
 }
 
+// RandomX key management for PoW validation
+static Mutex g_randomx_pow_mutex;
+static bool g_randomx_pow_initialized = false;
+
+static bool EnsureRandomXInitializedForPow(const uint256& genesisHash) {
+    LOCK(g_randomx_pow_mutex);
+
+    if (g_randomx_pow_initialized) {
+        return true;
+    }
+
+    node::RandomXMiner& miner = node::GetRandomXMiner();
+
+    // If miner is already initialized (e.g., for mining), just use it
+    // Don't reinitialize or we'll destroy the mining context!
+    if (miner.IsInitialized()) {
+        g_randomx_pow_initialized = true;
+        return true;
+    }
+
+    LogPrintf("RandomX PoW: Initializing with genesis hash key\n");
+    if (!miner.Initialize(genesisHash.data(), 32, node::RandomXMiner::Mode::LIGHT)) {
+        LogPrintf("RandomX PoW: Failed to initialize with genesis hash\n");
+        return false;
+    }
+    g_randomx_pow_initialized = true;
+
+    return true;
+}
+
+uint256 GetRandomXHash(const CBlockHeader& header, const uint256& genesisHash) {
+    // Ensure RandomX is initialized
+    if (!EnsureRandomXInitializedForPow(genesisHash)) {
+        LogPrintf("RandomX: Failed to ensure initialization, returning null hash\n");
+        return uint256();
+    }
+
+    // Serialize the block header
+    auto headerData = node::RandomXMiner::SerializeBlockHeader(header);
+
+    // Calculate RandomX hash
+    uint256 hash;
+    node::GetRandomXMiner().CalculateHash(headerData.data(), headerData.size(), hash.data());
+
+    return hash;
+}
+
+bool CheckProofOfWorkRandomX(const CBlockHeader& header, unsigned int nBits, const Consensus::Params& params) {
+    // Genesis block is exempt from RandomX - it was mined with SHA256d
+    // Check if this is the genesis block by comparing hash
+    uint256 blockHash = header.GetHash();
+    if (blockHash == params.hashGenesisBlock) {
+        // Use standard SHA256d validation for genesis
+        return CheckProofOfWorkImpl(blockHash, nBits, params);
+    }
+
+    // For all other blocks, use RandomX
+    uint256 hash = GetRandomXHash(header, params.hashGenesisBlock);
+
+    if (hash.IsNull()) {
+        LogPrintf("RandomX: Got null hash for block\n");
+        return false;
+    }
+
+    // Use standard target comparison
+    return CheckProofOfWorkImpl(hash, nBits, params);
+}
+
 bool CheckHeaderPoW(const CBlockHeader& block, const Consensus::Params& consensusParams)
 {
-    // Check for proof of work block header
-    return CheckProofOfWork(block.GetHash(), block.nBits, consensusParams);
+    // Check for proof of work block header using RandomX
+    return CheckProofOfWorkRandomX(block, block.nBits, consensusParams);
 }
 
 bool CheckHeaderPoS(const CBlockHeader& block, const Consensus::Params& consensusParams, Chainstate& chainstate)
@@ -2136,15 +2207,14 @@ bool CheckHeaderProof(const CBlockHeader& block, const Consensus::Params& consen
 
 bool CheckIndexProof(const CBlockIndex& block, const Consensus::Params& consensusParams)
 {
-    // Get the hash of the proof
-    // After validating the PoS block the computed hash proof is saved in the block index, which is used to check the index
-    uint256 hashProof = block.IsProofOfWork() ? block.GetBlockHash() : block.hashProof;
     // Check for proof after the hash proof is computed
     if(block.IsProofOfStake()){
         //blocks are loaded out of order, so checking PoS kernels here is not practical
         return true; //CheckKernel(block.pprev, block.nBits, block.nTime, block.prevoutStake);
     }else{
-        return CheckProofOfWork(hashProof, block.nBits, consensusParams);
+        // For PoW blocks, use RandomX validation
+        CBlockHeader header = block.GetBlockHeader();
+        return CheckProofOfWorkRandomX(header, block.nBits, consensusParams);
     }
 }
 
@@ -4343,6 +4413,46 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     if (fLogEvents)
         pstorageresult->commitResults();
 
+    // Distribute delegation rewards for PoS blocks
+    if (block.IsProofOfStake() && validators::g_validator_db && validators::g_delegation_db) {
+        // Get active validators with delegations
+        std::vector<validators::ValidatorEntry> activeValidators = validators::g_validator_db->GetActiveValidators();
+        LogPrintf("ConnectBlock: PoS block at height %d, checking %zu active validators\n",
+                 pindex->nHeight, activeValidators.size());
+
+        for (const auto& validator : activeValidators) {
+            LogPrintf("ConnectBlock: Validator %s, totalDelegated=%lld, status=%d\n",
+                     validator.validatorId.ToString(), validator.totalDelegated, (int)validator.status);
+            if (validator.totalDelegated > 0) {
+                // Calculate block reward
+                CAmount blockReward = GetBlockSubsidy(pindex->nHeight, params.GetConsensus());
+
+                // Calculate delegators' share based on validator's fee rate
+                // fee is in basis points (100 = 1%, 10000 = 100%)
+                // delegators get (100% - fee%) of the delegated portion's reward
+                CAmount totalStake = validator.GetTotalStake();
+                LogPrintf("ConnectBlock: blockReward=%lld, totalStake=%lld, poolFeeRate=%lld\n",
+                         blockReward, totalStake, validator.poolFeeRate);
+                if (totalStake > 0) {
+                    // Delegated portion of reward
+                    // Use basis points to avoid overflow: first calculate ratio, then apply to reward
+                    CAmount delegatedRatioBP = (validator.totalDelegated * 10000) / totalStake;
+                    CAmount delegatedPortion = (blockReward * delegatedRatioBP) / 10000;
+                    // Subtract validator's fee from delegated portion
+                    CAmount delegatorsShare = (delegatedPortion * (10000 - validator.poolFeeRate)) / 10000;
+                    LogPrintf("ConnectBlock: delegatedPortion=%lld, delegatorsShare=%lld\n",
+                             delegatedPortion, delegatorsShare);
+
+                    if (delegatorsShare > 0) {
+                        validators::g_delegation_db->DistributeBlockReward(validator.validatorId, delegatorsShare);
+                        LogPrintf("ConnectBlock: Distributed %lld delegation rewards for validator %s at height %d\n",
+                                 delegatorsShare, validator.validatorId.ToString(), pindex->nHeight);
+                    }
+                }
+            }
+        }
+    }
+
     return true;
 }
 
@@ -4608,6 +4718,14 @@ void Chainstate::UpdateTip(const CBlockIndex* pindexNew)
     }
     UpdateTipLog(m_chainman, coins_tip, pindexNew, __func__, "",
                  util::Join(warning_messages, Untranslated(", ")).original);
+
+    // Process validator and delegation state updates
+    if (validators::g_validator_db) {
+        validators::g_validator_db->ProcessBlock(pindexNew->nHeight);
+    }
+    if (validators::g_delegation_db) {
+        validators::g_delegation_db->ProcessBlock(pindexNew->nHeight);
+    }
 }
 
 /** Disconnect m_chain's tip.
@@ -5913,7 +6031,7 @@ std::vector<unsigned char> ChainstateManager::GenerateCoinbaseCommitment(CBlock&
 bool HasValidProofOfWork(const std::vector<CBlockHeader>& headers, const Consensus::Params& consensusParams)
 {
     return std::all_of(headers.cbegin(), headers.cend(),
-            [&](const auto& header) { return header.IsProofOfStake() ? true : CheckProofOfWork(header.GetHash(), header.nBits, consensusParams);});
+            [&](const auto& header) { return header.IsProofOfStake() ? true : CheckProofOfWorkRandomX(header, header.nBits, consensusParams);});
 }
 
 bool IsBlockMutated(const CBlock& block, bool check_witness_root)

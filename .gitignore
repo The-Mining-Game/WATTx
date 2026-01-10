@@ -30,3 +30,9 @@ dist/wattxd
 dist/*.tar.gz
 *.tar.gz
 build/
+
+# Release binaries (too large for GitHub - use GitHub Releases)
+release/linux/wattxd
+release/linux/wattx-qt
+release/linux/wattx-cli
+build/

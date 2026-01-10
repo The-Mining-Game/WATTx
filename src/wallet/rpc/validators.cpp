@@ -25,13 +25,14 @@ namespace wallet {
 
 // Helper to parse hex string to CKeyID
 static CKeyID ParseValidatorKeyID(const std::string& hexStr) {
-    std::vector<unsigned char> data = ParseHex(hexStr);
-    if (data.size() != 20) {
+    if (hexStr.size() != 40) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid key ID (must be 40 hex characters)");
     }
-    uint160 hash;
-    memcpy(hash.begin(), data.data(), 20);
-    return CKeyID(hash);
+    auto result = uint160::FromHex(hexStr);
+    if (!result) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid hex format for key ID");
+    }
+    return CKeyID(*result);
 }
 
 // Helper to get public key from wallet (works with both legacy and descriptor wallets)

@@ -2137,8 +2137,8 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 
     // ********************************************************* Step 8b: initialize validator and delegation databases
     LogPrintf("Initializing validator and delegation databases...\n");
-    validators::InitValidatorDB(chainparams.GetConsensus());
-    validators::InitDelegationDB(chainparams.GetConsensus());
+    validators::InitValidatorDB(chainparams.GetConsensus(), args.GetDataDirNet());
+    validators::InitDelegationDB(chainparams.GetConsensus(), args.GetDataDirNet());
 
     // ********************************************************* Step 8c: initialize trust system
     LogPrintf("Initializing trust system...\n");
