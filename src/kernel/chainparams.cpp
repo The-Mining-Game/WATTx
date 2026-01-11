@@ -76,10 +76,10 @@ static CBlock CreateGenesisBlock(const char* pszTimestamp, const CScript& genesi
  * database.
  */
 
-// WATTx Mainnet Genesis - Operation Absolute Resolve
+// WATTx Mainnet Genesis - NYT World News 11/Jan/2026
 static CBlock CreateMainnetGenesisBlock(uint32_t nTime, uint32_t nNonce, uint32_t nBits, int32_t nVersion, const CAmount& genesisReward)
 {
-    const char* pszTimestamp = "Operation Absolute Resolve - Maduro Captured 03/Jan/2026 11:11 PM CST";
+    const char* pszTimestamp = "NYT 11/Jan/2026 The Tug of War at the Top of the World - Norway asserts sovereignty over Svalbard as Arctic geopolitics shift";
     const CScript genesisOutputScript = CScript() << ParseHex("04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5f") << OP_CHECKSIG;
     return CreateGenesisBlock(pszTimestamp, genesisOutputScript, nTime, nNonce, nBits, nVersion, genesisReward);
 }
@@ -174,25 +174,14 @@ public:
         m_assumed_blockchain_size = 1;
         m_assumed_chain_state_size = 1;
 
-        // WATTx Mainnet Genesis Block - Operation Absolute Resolve
-        // Message: "Operation Absolute Resolve - Maduro Captured 03/Jan/2026 11:11 PM CST"
-        genesis = CreateMainnetGenesisBlock(1735430400, 0, 0x1f00ffff, 1, 500000000);
-
-        // Mine mainnet genesis (finds valid nonce)
-        arith_uint256 bnTarget;
-        bnTarget.SetCompact(genesis.nBits);
-        printf("Mining WATTx MAINNET genesis...\n");
-        printf("MerkleRoot: %s\n", genesis.hashMerkleRoot.GetHex().c_str());
-        for (genesis.nNonce = 0; genesis.nNonce < 0xFFFFFFFF; genesis.nNonce++) {
-            uint256 hash = genesis.GetHash();
-            if (UintToArith256(hash) <= bnTarget) {
-                printf("MAINNET FOUND! nNonce=%u\n", genesis.nNonce);
-                printf("hashGenesisBlock=%s\n", hash.GetHex().c_str());
-                break;
-            }
-            if (genesis.nNonce % 100000 == 0) printf("mainnet nonce=%u\n", genesis.nNonce);
-        }
+        // WATTx Mainnet Genesis Block - NYT World News 11/Jan/2026
+        // Message: "NYT 11/Jan/2026 The Tug of War at the Top of the World - Norway asserts sovereignty over Svalbard as Arctic geopolitics shift"
+        // Timestamp: 1768145874 (Sat Jan 11 2026)
+        // Nonce: 30922
+        genesis = CreateMainnetGenesisBlock(1768145874, 30922, 0x1f00ffff, 1, 500000000);
         consensus.hashGenesisBlock = genesis.GetHash();
+        assert(consensus.hashGenesisBlock == uint256{"0000de925e1e55d8428c786748af03a3a0128e285ae8163d65c6159958092c26"});
+        assert(genesis.hashMerkleRoot == uint256{"4f2c20236645f0a3011418d20feb9df98cfaca1e1a5a15cc9acd2fb9fd99a618"});
 
         // WATTx seed nodes (to be configured)
         vSeeds.emplace_back("seed1.wattxchange.app");
@@ -339,23 +328,12 @@ public:
 
         // WATTx Testnet Genesis Block - Fresh chain for immediate sync
         // Message: "WATTx Testnet Launch - Jan 2026 - Fast Sync Testing"
-        genesis = CreateTestnetGenesisBlock(1736035200, 0, 0x1f00ffff, 1, 500000000);
-
-        // Mine testnet genesis
-        arith_uint256 bnTarget;
-        bnTarget.SetCompact(genesis.nBits);
-        printf("Mining WATTx TESTNET genesis...\n");
-        printf("MerkleRoot: %s\n", genesis.hashMerkleRoot.GetHex().c_str());
-        for (genesis.nNonce = 0; genesis.nNonce < 0xFFFFFFFF; genesis.nNonce++) {
-            uint256 hash = genesis.GetHash();
-            if (UintToArith256(hash) <= bnTarget) {
-                printf("TESTNET FOUND! nNonce=%u\n", genesis.nNonce);
-                printf("hashGenesisBlock=%s\n", hash.GetHex().c_str());
-                break;
-            }
-            if (genesis.nNonce % 100000 == 0) printf("testnet nonce=%u\n", genesis.nNonce);
-        }
+        // Timestamp: 1736035200 (Sat Jan 4 2026)
+        // Nonce: 229304
+        genesis = CreateTestnetGenesisBlock(1736035200, 229304, 0x1f00ffff, 1, 500000000);
         consensus.hashGenesisBlock = genesis.GetHash();
+        assert(consensus.hashGenesisBlock == uint256{"000051d2ae90ec304f7a735985a894f1b7b25061fda9d945a2df882b0442aed3"});
+        assert(genesis.hashMerkleRoot == uint256{"7e7f6df20a55469d87e183aedb2a726d984b519bbd33828e62121a242044d372"});
 
         vFixedSeeds.clear();
         vSeeds.clear();
@@ -809,21 +787,11 @@ public:
         }
 
         // WATTx Regtest Genesis - Easy difficulty for testing (uses mainnet message)
+        // Timestamp: 1735430400
+        // Nonce: 0
         genesis = CreateMainnetGenesisBlock(1735430400, 0, 0x207fffff, 1, 500000000);
-
-        // Mine regtest genesis
-        arith_uint256 bnTarget;
-        bnTarget.SetCompact(genesis.nBits);
-        printf("Mining WATTx REGTEST genesis...\n");
-        for (genesis.nNonce = 0; genesis.nNonce < 0xFFFFFFFF; genesis.nNonce++) {
-            uint256 hash = genesis.GetHash();
-            if (UintToArith256(hash) <= bnTarget) {
-                printf("REGTEST FOUND! nNonce=%u\n", genesis.nNonce);
-                printf("hashGenesisBlock=%s\n", hash.GetHex().c_str());
-                break;
-            }
-        }
         consensus.hashGenesisBlock = genesis.GetHash();
+        assert(consensus.hashGenesisBlock == uint256{"2a625b2d3095a0f1a75ea5c750a443b7bf698b1004faf7ad1bf54ba19e346c3f"});
 
         vFixedSeeds.clear(); //!< Regtest mode doesn't have any fixed seeds.
         vSeeds.clear();
