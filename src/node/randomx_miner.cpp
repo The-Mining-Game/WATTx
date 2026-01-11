@@ -51,13 +51,19 @@ RandomXMiner::~RandomXMiner() {
 
 // Internal cleanup without locking - called when mutex is already held
 void RandomXMiner::CleanupInternal() {
-    // Destroy VMs first
+    // Destroy mining VMs first
     for (auto* vm : m_vms) {
         if (vm) {
             randomx_destroy_vm(vm);
         }
     }
     m_vms.clear();
+
+    // Destroy validation VM (separate from mining VMs)
+    if (m_validationVm) {
+        randomx_destroy_vm(m_validationVm);
+        m_validationVm = nullptr;
+    }
 
     // Release dataset
     if (m_dataset) {
@@ -221,22 +227,22 @@ void RandomXMiner::CalculateHash(const void* input, size_t inputSize, void* outp
         return;
     }
 
-    // Create VM if needed
-    if (m_vms.empty()) {
-        randomx_vm* vm = randomx_create_vm(
+    // Use dedicated validation VM (separate from mining VMs to avoid race conditions)
+    // This VM is created on first use and protected by m_vmMutex
+    if (!m_validationVm) {
+        m_validationVm = randomx_create_vm(
             static_cast<randomx_flags>(m_flags),
             m_cache,
             m_dataset
         );
-        if (!vm) {
-            LogPrintf("RandomX: Failed to create VM\n");
+        if (!m_validationVm) {
+            LogPrintf("RandomX: Failed to create validation VM\n");
             std::memset(output, 0, HASH_SIZE);
             return;
         }
-        m_vms.push_back(vm);
     }
 
-    randomx_calculate_hash(m_vms[0], input, inputSize, output);
+    randomx_calculate_hash(m_validationVm, input, inputSize, output);
 }
 
 bool RandomXMiner::MeetsTarget(const uint256& hash, const uint256& target) {

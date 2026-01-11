@@ -165,7 +165,8 @@ private:
     // RandomX objects
     randomx_cache* m_cache{nullptr};
     randomx_dataset* m_dataset{nullptr};
-    std::vector<randomx_vm*> m_vms;  // One VM per thread
+    std::vector<randomx_vm*> m_vms;  // VMs for mining threads
+    randomx_vm* m_validationVm{nullptr};  // Dedicated VM for block validation (separate from mining)
 
     // State
     std::atomic<bool> m_initialized{false};
