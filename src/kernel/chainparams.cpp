@@ -79,7 +79,7 @@ static CBlock CreateGenesisBlock(const char* pszTimestamp, const CScript& genesi
 // WATTx Mainnet Genesis - NYT World News 11/Jan/2026
 static CBlock CreateMainnetGenesisBlock(uint32_t nTime, uint32_t nNonce, uint32_t nBits, int32_t nVersion, const CAmount& genesisReward)
 {
-    const char* pszTimestamp = "NYT 11/Jan/2026 The Tug of War at the Top of the World - Norway asserts sovereignty over Svalbard as Arctic geopolitics shift";
+    const char* pszTimestamp = "NYT 11/Jan/2026 Tug of War at Top of the World - Svalbard";
     const CScript genesisOutputScript = CScript() << ParseHex("04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5f") << OP_CHECKSIG;
     return CreateGenesisBlock(pszTimestamp, genesisOutputScript, nTime, nNonce, nBits, nVersion, genesisReward);
 }
@@ -175,13 +175,13 @@ public:
         m_assumed_chain_state_size = 1;
 
         // WATTx Mainnet Genesis Block - NYT World News 11/Jan/2026
-        // Message: "NYT 11/Jan/2026 The Tug of War at the Top of the World - Norway asserts sovereignty over Svalbard as Arctic geopolitics shift"
+        // Message: "NYT 11/Jan/2026 Tug of War at Top of the World - Svalbard"
         // Timestamp: 1768145874 (Sat Jan 11 2026)
-        // Nonce: 30922
-        genesis = CreateMainnetGenesisBlock(1768145874, 30922, 0x1f00ffff, 1, 500000000);
+        // Nonce: 12122
+        genesis = CreateMainnetGenesisBlock(1768145874, 12122, 0x1f00ffff, 1, 500000000);
         consensus.hashGenesisBlock = genesis.GetHash();
-        assert(consensus.hashGenesisBlock == uint256{"0000de925e1e55d8428c786748af03a3a0128e285ae8163d65c6159958092c26"});
-        assert(genesis.hashMerkleRoot == uint256{"4f2c20236645f0a3011418d20feb9df98cfaca1e1a5a15cc9acd2fb9fd99a618"});
+        assert(consensus.hashGenesisBlock == uint256{"0000a9cd583de9bbb051fea4e8ec1358e80b270ce08350cbb9e64b5b6eae6c14"});
+        assert(genesis.hashMerkleRoot == uint256{"47ef214c95164ba6cb2d773e15ff07d57b7b0ea4950326ad15b90c5e813b7569"});
 
         // WATTx seed nodes (to be configured)
         vSeeds.emplace_back("seed1.wattxchange.app");
@@ -787,11 +787,10 @@ public:
         }
 
         // WATTx Regtest Genesis - Easy difficulty for testing (uses mainnet message)
-        // Timestamp: 1735430400
         // Nonce: 0
         genesis = CreateMainnetGenesisBlock(1735430400, 0, 0x207fffff, 1, 500000000);
         consensus.hashGenesisBlock = genesis.GetHash();
-        assert(consensus.hashGenesisBlock == uint256{"2a625b2d3095a0f1a75ea5c750a443b7bf698b1004faf7ad1bf54ba19e346c3f"});
+        assert(consensus.hashGenesisBlock == uint256{"1b80932a0c893b97ea8f5d1601d9cd797cd2a5fd7f2f6064eb06901ff99c8bd4"});
 
         vFixedSeeds.clear(); //!< Regtest mode doesn't have any fixed seeds.
         vSeeds.clear();
