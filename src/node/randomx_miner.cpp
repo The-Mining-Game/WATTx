@@ -49,9 +49,8 @@ RandomXMiner::~RandomXMiner() {
     Cleanup();
 }
 
-void RandomXMiner::Cleanup() {
-    std::lock_guard<std::mutex> lock(m_mutex);
-
+// Internal cleanup without locking - called when mutex is already held
+void RandomXMiner::CleanupInternal() {
     // Destroy VMs first
     for (auto* vm : m_vms) {
         if (vm) {
@@ -73,6 +72,11 @@ void RandomXMiner::Cleanup() {
     }
 
     m_initialized = false;
+}
+
+void RandomXMiner::Cleanup() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    CleanupInternal();
 }
 
 unsigned RandomXMiner::GetRecommendedFlags() {
@@ -109,9 +113,9 @@ bool RandomXMiner::HasLargePages() {
 bool RandomXMiner::Initialize(const void* key, size_t keySize, Mode mode, bool safeMode) {
     std::lock_guard<std::mutex> lock(m_mutex);
 
-    // Cleanup any existing context
+    // Cleanup any existing context (use internal version since we already hold the lock)
     if (m_initialized) {
-        Cleanup();
+        CleanupInternal();
     }
 
     m_mode = mode;

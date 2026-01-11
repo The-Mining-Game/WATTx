@@ -159,6 +159,9 @@ private:
     /** Cleanup RandomX resources */
     void Cleanup();
 
+    /** Internal cleanup without locking (called when mutex is already held) */
+    void CleanupInternal();
+
     // RandomX objects
     randomx_cache* m_cache{nullptr};
     randomx_dataset* m_dataset{nullptr};
