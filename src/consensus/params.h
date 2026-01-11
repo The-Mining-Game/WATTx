@@ -204,6 +204,8 @@ struct Params {
     /** Coinbase transaction outputs can only be spent after this number of new blocks (network rule) */
     int nCoinbaseMaturity;
     int nRBTCoinbaseMaturity;
+    /** Minimum confirmations for coins to be eligible for staking */
+    int nStakeMinConfirmations{10};
     int64_t StakeTimestampMask(int height) const
     {
         return height < nReduceBlocktimeHeight ? nStakeTimestampMask : nRBTStakeTimestampMask;

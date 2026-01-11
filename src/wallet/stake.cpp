@@ -706,7 +706,8 @@ bool SelectCoinsForStaking(const CWallet& wallet, CAmount &nTargetValue, std::se
 
     bool isDescriptorWallet = wallet.IsWalletFlagSet(WALLET_FLAG_DESCRIPTORS);
     int nHeight = wallet.GetLastBlockHeight() + 1;
-    int coinbaseMaturity = Params().GetConsensus().CoinbaseMaturity(nHeight);
+    // Use nStakeMinConfirmations for staking eligibility (not coinbase maturity)
+    int stakeMinConfirmations = Params().GetConsensus().nStakeMinConfirmations;
     std::map<COutPoint, uint32_t> immatureStakes = wallet.chain().getImmatureStakes();
     std::vector<uint256> maturedTx;
     const bool include_watch_only = wallet.GetLegacyScriptPubKeyMan() && wallet.IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS);
@@ -725,7 +726,8 @@ bool SelectCoinsForStaking(const CWallet& wallet, CAmount &nTargetValue, std::se
         if (nDepth < 1)
             continue;
 
-        if (nDepth < coinbaseMaturity)
+        // Check if coin has enough confirmations for staking
+        if (nDepth < stakeMinConfirmations)
             continue;
 
         if (wallet.GetTxBlocksToMaturity(*pcoin) > 0)

@@ -937,6 +937,25 @@ void MiningPage::updateMiningStats()
     // Update accepted (blocks found this session)
     gapsCheckedLabel->setText(QString::number(sessionBlocksFound));
 
+    // Update network difficulty
+    if (clientModel) {
+        try {
+            UniValue diffResult = clientModel->node().executeRpc("getdifficulty", UniValue(UniValue::VARR), "/");
+            if (diffResult.isNum()) {
+                double diff = diffResult.get_real();
+                if (diff < 0.001) {
+                    currentDifficultyLabel->setText(QString::number(diff, 'e', 2));
+                } else if (diff < 1.0) {
+                    currentDifficultyLabel->setText(QString::number(diff, 'f', 6));
+                } else {
+                    currentDifficultyLabel->setText(QString::number(diff, 'f', 2));
+                }
+            }
+        } catch (...) {
+            // Ignore errors - difficulty display is not critical
+        }
+    }
+
     // Log periodic updates
     static uint64_t lastLoggedHashes = 0;
     if (totalHashes - lastLoggedHashes >= 10000) {

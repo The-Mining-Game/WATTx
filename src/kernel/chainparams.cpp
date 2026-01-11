@@ -235,8 +235,9 @@ public:
 
         // WATTx-specific parameters
         consensus.nBlocktimeDownscaleFactor = 1; // No downscaling
-        consensus.nCoinbaseMaturity = 10; // WATTx: 10 blocks maturity (~20 min at 2min blocks)
-        consensus.nRBTCoinbaseMaturity = 10;
+        consensus.nCoinbaseMaturity = 1; // WATTx: PoW rewards spendable after 1 confirmation
+        consensus.nRBTCoinbaseMaturity = 1;
+        consensus.nStakeMinConfirmations = 10; // WATTx: Coins need 10 confirmations to stake
         consensus.nSubsidyHalvingIntervalV2 = 1051200; // ~4 years at 2min blocks (525600 min/year * 2)
         consensus.nMinValidatorStake = 20000 * COIN; // 20,000 WATTx minimum for super staking validator
 
@@ -397,8 +398,9 @@ public:
         };
 
         consensus.nBlocktimeDownscaleFactor = 1; // WATTx testnet: no downscaling
-        consensus.nCoinbaseMaturity = 10;  // WATTx testnet: 10 blocks (~20 min at 2min blocks)
-        consensus.nRBTCoinbaseMaturity = 10;
+        consensus.nCoinbaseMaturity = 1;  // WATTx testnet: PoW rewards spendable after 1 confirmation
+        consensus.nRBTCoinbaseMaturity = 1;
+        consensus.nStakeMinConfirmations = 10; // WATTx testnet: Coins need 10 confirmations to stake
         consensus.nSubsidyHalvingIntervalV2 = 1051200; // WATTx testnet: ~4 years at 2min blocks
         consensus.nMinValidatorStake = 20000 * COIN; // 20,000 WATTx minimum (same as mainnet)
 
@@ -862,7 +864,8 @@ public:
         };
 
         consensus.nBlocktimeDownscaleFactor = 4;
-        consensus.nCoinbaseMaturity = 10;  // WATTx regtest: lowered for fast testing
+        consensus.nCoinbaseMaturity = 1;  // WATTx regtest: PoW rewards spendable after 1 confirmation
+        consensus.nStakeMinConfirmations = 10; // WATTx regtest: Coins need 10 confirmations to stake
         consensus.nRBTCoinbaseMaturity = 10;  // WATTx regtest: lowered for fast testing
         consensus.nSubsidyHalvingIntervalV2 = consensus.nBlocktimeDownscaleFactor*985500; // qtum halving every 4 years (nSubsidyHalvingInterval * nBlocktimeDownscaleFactor)
         consensus.nMinValidatorStake = 10 * COIN; // Lower for regtest (10 WATTx)
