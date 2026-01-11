@@ -14,7 +14,9 @@
 #include <chrono>
 #include <cstring>
 
-#ifndef WIN32
+#ifdef WIN32
+#include <windows.h>
+#else
 #include <pthread.h>
 #include <sched.h>
 #include <unistd.h>

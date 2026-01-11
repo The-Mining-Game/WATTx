@@ -19,7 +19,7 @@ OpenCLRuntime& OpenCLRuntime::Instance() {
 }
 
 OpenCLRuntime::OpenCLRuntime() {
-    m_available = LoadLibrary();
+    m_available = LoadOpenCLLib();
     if (m_available) {
         LogPrintf("OpenCL: Library loaded successfully\n");
     } else {
@@ -29,14 +29,14 @@ OpenCLRuntime::OpenCLRuntime() {
 
 OpenCLRuntime::~OpenCLRuntime() {
     Cleanup();
-    UnloadLibrary();
+    UnloadOpenCLLib();
 }
 
-bool OpenCLRuntime::LoadLibrary() {
+bool OpenCLRuntime::LoadOpenCLLib() {
 #ifdef WIN32
-    m_library = LoadLibraryA("OpenCL.dll");
+    m_library = ::LoadLibraryA("OpenCL.dll");
     if (!m_library) {
-        m_library = LoadLibraryA("C:\\Windows\\System32\\OpenCL.dll");
+        m_library = ::LoadLibraryA("C:\\Windows\\System32\\OpenCL.dll");
     }
 #else
     // Try common library paths
@@ -96,17 +96,17 @@ bool OpenCLRuntime::LoadLibrary() {
     if (!clGetPlatformIDs || !clGetDeviceIDs || !clCreateContext ||
         !clCreateCommandQueue || !clCreateProgramWithSource) {
         LogPrintf("OpenCL: Failed to load required functions\n");
-        UnloadLibrary();
+        UnloadOpenCLLib();
         return false;
     }
 
     return true;
 }
 
-void OpenCLRuntime::UnloadLibrary() {
+void OpenCLRuntime::UnloadOpenCLLib() {
     if (m_library) {
 #ifdef WIN32
-        FreeLibrary((HMODULE)m_library);
+        ::FreeLibrary((HMODULE)m_library);
 #else
         dlclose(m_library);
 #endif

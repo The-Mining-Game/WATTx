@@ -134,8 +134,8 @@ private:
     OpenCLRuntime();
     ~OpenCLRuntime();
 
-    bool LoadLibrary();
-    void UnloadLibrary();
+    bool LoadOpenCLLib();
+    void UnloadOpenCLLib();
 
     void* m_library{nullptr};
     bool m_available{false};
