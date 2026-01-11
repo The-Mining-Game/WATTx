@@ -23,8 +23,8 @@ QtumVersionChecker::~QtumVersionChecker()
 
 bool QtumVersionChecker::newVersionAvailable()
 {
-    Version maxReleaseVersion = getMaxReleaseVersion();
-    return maxReleaseVersion > currentVersion;
+    // WATTx: Disable QTUM update check
+    return false;
 }
 
 QList<Version> QtumVersionChecker::getVersions()
