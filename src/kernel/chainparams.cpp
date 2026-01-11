@@ -199,7 +199,14 @@ public:
 
         bech32_hrp = "wx";
 
-        vFixedSeeds.clear(); // New chain, no fixed seeds yet
+        // WATTx mainnet fixed seed nodes
+        // Format: BIP155 (network_id, addr_len, addr_bytes, port_be)
+        // 188.25.168.149:1337 and 108.217.64.180:1337
+        static const uint8_t wattx_seeds[] = {
+            0x01,0x04,0xBC,0x19,0xA8,0x95,0x05,0x39,  // 188.25.168.149:1337
+            0x01,0x04,0x6C,0xD9,0x40,0xB4,0x05,0x39,  // 108.217.64.180:1337
+        };
+        vFixedSeeds = std::vector<uint8_t>(std::begin(wattx_seeds), std::end(wattx_seeds));
 
         fDefaultConsistencyChecks = false;
         fMineBlocksOnDemand = false;
