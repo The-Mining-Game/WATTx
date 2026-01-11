@@ -764,9 +764,11 @@ static RPCHelpMan getblocktemplate()
     if (strMode != "template")
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid mode");
 
-    if (!miner.isTestChain()) {
+    // WATTx: Allow solo mining without peers for bootstrap phase
+    // Original Bitcoin Core requires peers to prevent mining on stale chain
+    // For WATTx launch, we allow solo mining to bootstrap the network
+    if (!miner.isTestChain() && !gArgs.GetBoolArg("-allowsolomining", true)) {
         const CConnman& connman = EnsureConnman(node);
-        // Allow solo mining when at genesis (launching new blockchain) or with peers
         bool atGenesis = (chainman.ActiveChain().Height() == 0);
         if (!atGenesis && connman.GetNodeCount(ConnectionDirection::Both) == 0) {
             throw JSONRPCError(RPC_CLIENT_NOT_CONNECTED, CLIENT_NAME " is not connected!");

@@ -1485,12 +1485,10 @@ bool BlockManager::ReadBlock(Block& block, const FlatFilePos& pos) const
     }
 
     // Check the header
-    // PoS blocks can be loaded out of order from disk, which makes PoS impossible to validate. So, do not validate their headers
-    // they will be validated later in CheckBlock and ConnectBlock anyway
-    if (block.IsProofOfWork() && !CheckProofOfWork(block.GetHash(), block.nBits, GetConsensus())) {
-        LogError("%s: Errors in block header at %s\n", __func__, pos.ToString());
-        return false;
-    }
+    // Note: For RandomX PoW, validation is deferred to CheckBlock/ConnectBlock
+    // because GetHash() returns SHA256d but WATTx uses RandomX for PoW
+    // PoS blocks are also deferred since they can be loaded out of order
+    // This early check is skipped - full validation happens in CheckBlock/ConnectBlock
 
     // Signet only: check block solution
     if (GetConsensus().signet_blocks && !CheckSignetBlockSolution(block, GetConsensus())) {

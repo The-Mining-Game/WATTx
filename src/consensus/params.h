@@ -308,9 +308,9 @@ struct Params {
     int nGoldRewardMultiplier{150};     // 1.5x reward
     int nPlatinumRewardMultiplier{200}; // 2.0x reward
 
-    /** Base block reward in satoshis (0.003787879 WATTx per block for each PoW/PoS) */
+    /** Base block reward in satoshis (5 WATTx per block for each PoW/PoS) */
     /** 50% to PoW miners, 50% to PoS stakers - each receives this amount */
-    int64_t nBaseBlockReward{378788};
+    int64_t nBaseBlockReward{500000000};
 
     /** Height at which trust tier system activates */
     int nTrustTierActivationHeight{1001}; // After PoW phase

@@ -110,7 +110,7 @@ public:
         m_chain_type = ChainType::MAIN;
         consensus.signet_blocks = false;
         consensus.signet_challenge.clear();
-        consensus.nSubsidyHalvingInterval = 126000000; // WATTx halving every ~4 years at 1s blocks
+        consensus.nSubsidyHalvingInterval = 1051200; // WATTx halving every ~4 years at 2min blocks
         consensus.BIP34Height = 0;
         consensus.BIP34Hash = uint256{}; // Will be set after genesis mining
         consensus.BIP65Height = 0;
@@ -136,12 +136,12 @@ public:
         // Original was 0000000000003fff... (48 bits zeros, ~2^208) - way too hard for small stakes
         // New is 0000000fff... (28 bits zeros, ~2^228) - allows blocks every ~10s with 25M satoshis
         consensus.RBTPosLimit = uint256{"0000000fffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
-        // WATTx: 1-second block time
-        consensus.nPowTargetTimespan = 600; // 10 minutes (600 blocks at 1s)
-        consensus.nPowTargetTimespanV2 = 600;
-        consensus.nRBTPowTargetTimespan = 600;
-        consensus.nPowTargetSpacing = 1; // 1 second per block
-        consensus.nRBTPowTargetSpacing = 1;
+        // WATTx: 2-minute block time (120 seconds)
+        consensus.nPowTargetTimespan = 1200; // 10 blocks at 2min = 20 minutes
+        consensus.nPowTargetTimespanV2 = 1200;
+        consensus.nRBTPowTargetTimespan = 1200;
+        consensus.nPowTargetSpacing = 120; // 2 minutes per block
+        consensus.nRBTPowTargetSpacing = 120;
         consensus.fPowAllowMinDifficultyBlocks = false;
         consensus.enforce_BIP94 = false;
         consensus.fPowNoRetargeting = true;
@@ -176,7 +176,7 @@ public:
 
         // WATTx Mainnet Genesis Block - Operation Absolute Resolve
         // Message: "Operation Absolute Resolve - Maduro Captured 03/Jan/2026 11:11 PM CST"
-        genesis = CreateMainnetGenesisBlock(1735430400, 0, 0x1f00ffff, 1, 378788);
+        genesis = CreateMainnetGenesisBlock(1735430400, 0, 0x1f00ffff, 1, 500000000);
 
         // Mine mainnet genesis (finds valid nonce)
         arith_uint256 bnTarget;
@@ -234,10 +234,10 @@ public:
         };
 
         // WATTx-specific parameters
-        consensus.nBlocktimeDownscaleFactor = 1; // No downscaling, 1s blocks from start
-        consensus.nCoinbaseMaturity = 500; // WATTx: 500 blocks maturity
-        consensus.nRBTCoinbaseMaturity = 500;
-        consensus.nSubsidyHalvingIntervalV2 = 126000000; // ~4 years at 1s blocks
+        consensus.nBlocktimeDownscaleFactor = 1; // No downscaling
+        consensus.nCoinbaseMaturity = 10; // WATTx: 10 blocks maturity (~20 min at 2min blocks)
+        consensus.nRBTCoinbaseMaturity = 10;
+        consensus.nSubsidyHalvingIntervalV2 = 1051200; // ~4 years at 2min blocks (525600 min/year * 2)
         consensus.nMinValidatorStake = 20000 * COIN; // 20,000 WATTx minimum for super staking validator
 
         consensus.nLastPOWBlock = 0x7fffffff; // Allow indefinite PoW mining until hybrid consensus activation
@@ -301,11 +301,11 @@ public:
         consensus.posLimit = uint256{"0000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
         consensus.QIP9PosLimit = uint256{"0000000000001fffffffffffffffffffffffffffffffffffffffffffffffffff"}; // The new POS-limit activated after QIP9
         consensus.RBTPosLimit = uint256{"0000000000003fffffffffffffffffffffffffffffffffffffffffffffffffff"};
-        consensus.nPowTargetTimespan = 16 * 60; // 16 minutes
-        consensus.nPowTargetTimespanV2 = 4000;
-        consensus.nRBTPowTargetTimespan = 1000;
-        consensus.nPowTargetSpacing = 1; // WATTx testnet: 1 second per block (same as mainnet)
-        consensus.nRBTPowTargetSpacing = 1;
+        consensus.nPowTargetTimespan = 1200; // 10 blocks at 2min = 20 minutes
+        consensus.nPowTargetTimespanV2 = 1200;
+        consensus.nRBTPowTargetTimespan = 1200;
+        consensus.nPowTargetSpacing = 120; // WATTx testnet: 2 minutes per block (same as mainnet)
+        consensus.nRBTPowTargetSpacing = 120;
         consensus.fPowAllowMinDifficultyBlocks = false;
         consensus.enforce_BIP94 = false;
         consensus.fPowNoRetargeting = true;
@@ -338,7 +338,7 @@ public:
 
         // WATTx Testnet Genesis Block - Fresh chain for immediate sync
         // Message: "WATTx Testnet Launch - Jan 2026 - Fast Sync Testing"
-        genesis = CreateTestnetGenesisBlock(1736035200, 0, 0x1f00ffff, 1, 378788);
+        genesis = CreateTestnetGenesisBlock(1736035200, 0, 0x1f00ffff, 1, 500000000);
 
         // Mine testnet genesis
         arith_uint256 bnTarget;
@@ -396,10 +396,10 @@ public:
             .dTxRate  = 0,
         };
 
-        consensus.nBlocktimeDownscaleFactor = 1; // WATTx testnet: same as mainnet (1s blocks)
-        consensus.nCoinbaseMaturity = 500;  // WATTx testnet: same as mainnet (500 blocks)
-        consensus.nRBTCoinbaseMaturity = 500;  // WATTx testnet: same as mainnet
-        consensus.nSubsidyHalvingIntervalV2 = 126000000; // WATTx testnet: ~4 years at 1s blocks (same as mainnet)
+        consensus.nBlocktimeDownscaleFactor = 1; // WATTx testnet: no downscaling
+        consensus.nCoinbaseMaturity = 10;  // WATTx testnet: 10 blocks (~20 min at 2min blocks)
+        consensus.nRBTCoinbaseMaturity = 10;
+        consensus.nSubsidyHalvingIntervalV2 = 1051200; // WATTx testnet: ~4 years at 2min blocks
         consensus.nMinValidatorStake = 20000 * COIN; // 20,000 WATTx minimum (same as mainnet)
 
         // WATTx Testnet: Same as mainnet (fair launch, no big rewards)
@@ -489,7 +489,7 @@ public:
         m_assumed_chain_state_size = 1;
 
         // WATTx Signet Genesis Block - Uses mainnet genesis
-        genesis = CreateMainnetGenesisBlock(1735430400, 0, 0x1f00ffff, 1, 378788);
+        genesis = CreateMainnetGenesisBlock(1735430400, 0, 0x1f00ffff, 1, 500000000);
 
         // Mine signet genesis (finds valid nonce) - same as mainnet but cached separately
         {
@@ -807,9 +807,21 @@ public:
         }
 
         // WATTx Regtest Genesis - Easy difficulty for testing (uses mainnet message)
-        genesis = CreateMainnetGenesisBlock(1735430400, 1, 0x207fffff, 1, 378788);
+        genesis = CreateMainnetGenesisBlock(1735430400, 0, 0x207fffff, 1, 500000000);
+
+        // Mine regtest genesis
+        arith_uint256 bnTarget;
+        bnTarget.SetCompact(genesis.nBits);
+        printf("Mining WATTx REGTEST genesis...\n");
+        for (genesis.nNonce = 0; genesis.nNonce < 0xFFFFFFFF; genesis.nNonce++) {
+            uint256 hash = genesis.GetHash();
+            if (UintToArith256(hash) <= bnTarget) {
+                printf("REGTEST FOUND! nNonce=%u\n", genesis.nNonce);
+                printf("hashGenesisBlock=%s\n", hash.GetHex().c_str());
+                break;
+            }
+        }
         consensus.hashGenesisBlock = genesis.GetHash();
-        // Regtest uses easy difficulty so hash differs from mainnet
 
         vFixedSeeds.clear(); //!< Regtest mode doesn't have any fixed seeds.
         vSeeds.clear();
