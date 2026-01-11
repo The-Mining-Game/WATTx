@@ -146,8 +146,15 @@ void MiningPage::setupUi()
     rxModeCombo->setCurrentIndex(0);  // Default to light mode
     rxModeCombo->setToolTip(tr("Full mode uses more memory but mines faster"));
 
+    // Safe mode checkbox - disables JIT compilation to prevent crashes
+    safeModeCheckbox = new QCheckBox(tr("Safe Mode"), this);
+    safeModeCheckbox->setChecked(true);  // Default to safe mode ON
+    safeModeCheckbox->setToolTip(tr("Disable JIT compilation for stability. Uncheck for faster mining if your system is stable."));
+
     rxLayout->addWidget(modeLabel);
     rxLayout->addWidget(rxModeCombo);
+    rxLayout->addSpacing(20);
+    rxLayout->addWidget(safeModeCheckbox);
     rxLayout->addStretch();
     mainLayout->addWidget(rxSettingsGroup);
 
@@ -503,11 +510,15 @@ void MiningPage::startMining()
     logToConsole(tr("=== WATTx RandomX Mining Started ==="));
     logToConsole(tr("Mining Address: %1").arg(address));
 
-    // Get mining mode from UI - use the stored member variable
+    // Get mining mode and safe mode from UI
     bool fullMode = rxModeCombo && rxModeCombo->currentIndex() == 1;
     int numThreads = cpuThreadsSpinBox->value();
+    bool safeMode = safeModeCheckbox && safeModeCheckbox->isChecked();
 
-    logToConsole(tr("Mode: %1, Threads: %2").arg(fullMode ? "Full (2GB)" : "Light (256MB)").arg(numThreads));
+    logToConsole(tr("Mode: %1, Threads: %2, Safe Mode: %3")
+        .arg(fullMode ? "Full (2GB)" : "Light (256MB)")
+        .arg(numThreads)
+        .arg(safeMode ? "ON" : "OFF"));
     logToConsole(tr(""));
 
     isMining = true;
@@ -518,7 +529,7 @@ void MiningPage::startMining()
     statusLabel->setStyleSheet("color: #FFA500; font-weight: bold;");
 
     // Start mining in background thread
-    std::thread miningThread([this, address, fullMode]() {
+    std::thread miningThread([this, address, fullMode, safeMode]() {
         int blocksFound = 0;
 
         // Initialize RandomX
@@ -563,11 +574,13 @@ void MiningPage::startMining()
         node::RandomXMiner& miner = node::GetRandomXMiner();
         auto mode = fullMode ? node::RandomXMiner::Mode::FULL : node::RandomXMiner::Mode::LIGHT;
 
-        QMetaObject::invokeMethod(this, [this, fullMode]() {
-            logToConsole(tr("Loading RandomX %1 mode...").arg(fullMode ? "Full (this may take a minute)" : "Light"));
+        QMetaObject::invokeMethod(this, [this, fullMode, safeMode]() {
+            logToConsole(tr("Loading RandomX %1 mode%2...")
+                .arg(fullMode ? "Full (this may take a minute)" : "Light")
+                .arg(safeMode ? " (Safe Mode - JIT disabled)" : ""));
         }, Qt::QueuedConnection);
 
-        if (!miner.Initialize(genesisHash.data(), 32, mode)) {
+        if (!miner.Initialize(genesisHash.data(), 32, mode, safeMode)) {
             QMetaObject::invokeMethod(this, [this]() {
                 logToConsole(tr("Error: Failed to initialize RandomX"));
                 statusLabel->setText(tr("Error: RandomX init failed"));
@@ -598,6 +611,14 @@ void MiningPage::startMining()
                 UniValue templateVal;
                 try {
                     templateVal = clientModel->node().executeRpc("getblocktemplate", params, "/");
+                } catch (const UniValue& rpcError) {
+                    // RPC errors are thrown as UniValue objects (via JSONRPCError)
+                    std::string errMsg = rpcError.exists("message") ? rpcError["message"].get_str() : rpcError.write();
+                    QMetaObject::invokeMethod(this, [this, errMsg]() {
+                        logToConsole(tr("getblocktemplate RPC error: %1").arg(QString::fromStdString(errMsg)));
+                    }, Qt::QueuedConnection);
+                    std::this_thread::sleep_for(std::chrono::seconds(5));
+                    continue;
                 } catch (const std::exception& rpcError) {
                     std::string errMsg = rpcError.what();
                     QMetaObject::invokeMethod(this, [this, errMsg]() {
@@ -747,12 +768,20 @@ void MiningPage::startMining()
                                 gapsCheckedLabel->setText(QString::number(sessionBlocksFound));
                                 logToConsole(tr("*** BLOCK %1 MINED! ***").arg(height));
                             }, Qt::QueuedConnection);
+                            // Wait for chain state to fully update after successful block submission
+                            std::this_thread::sleep_for(std::chrono::seconds(2));
                         } else {
                             std::string rejectReason = submitResult.isStr() ? submitResult.get_str() : submitResult.write();
                             QMetaObject::invokeMethod(this, [this, rejectReason]() {
                                 logToConsole(tr("Block rejected: %1").arg(QString::fromStdString(rejectReason)));
                             }, Qt::QueuedConnection);
                         }
+                    } catch (const UniValue& submitError) {
+                        // RPC errors are thrown as UniValue objects (via JSONRPCError)
+                        std::string errMsg = submitError.exists("message") ? submitError["message"].get_str() : submitError.write();
+                        QMetaObject::invokeMethod(this, [this, errMsg]() {
+                            logToConsole(tr("submitblock RPC error: %1").arg(QString::fromStdString(errMsg)));
+                        }, Qt::QueuedConnection);
                     } catch (const std::exception& submitError) {
                         std::string errMsg = submitError.what();
                         QMetaObject::invokeMethod(this, [this, errMsg]() {
@@ -764,6 +793,13 @@ void MiningPage::startMining()
                 // Small delay before next template
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
+            } catch (const UniValue& e) {
+                // RPC errors are thrown as UniValue objects (via JSONRPCError)
+                std::string errorMsg = e.exists("message") ? e["message"].get_str() : e.write();
+                QMetaObject::invokeMethod(this, [this, errorMsg]() {
+                    logToConsole(tr("Mining RPC error: %1").arg(QString::fromStdString(errorMsg)));
+                }, Qt::QueuedConnection);
+                std::this_thread::sleep_for(std::chrono::seconds(5));
             } catch (const std::exception& e) {
                 std::string errorMsg = e.what();
                 QMetaObject::invokeMethod(this, [this, errorMsg]() {

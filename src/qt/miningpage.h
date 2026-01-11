@@ -109,6 +109,9 @@ private:
     // RandomX mode selection
     QComboBox *rxModeCombo;
 
+    // Safe mode checkbox (disables JIT to prevent crashes)
+    QCheckBox *safeModeCheckbox;
+
     // Control button (single toggle button)
     QPushButton *miningToggleBtn;
 

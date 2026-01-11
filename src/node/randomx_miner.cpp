@@ -104,7 +104,7 @@ bool RandomXMiner::HasLargePages() {
     return false;
 }
 
-bool RandomXMiner::Initialize(const void* key, size_t keySize, Mode mode) {
+bool RandomXMiner::Initialize(const void* key, size_t keySize, Mode mode, bool safeMode) {
     std::lock_guard<std::mutex> lock(m_mutex);
 
     // Cleanup any existing context
@@ -113,6 +113,7 @@ bool RandomXMiner::Initialize(const void* key, size_t keySize, Mode mode) {
     }
 
     m_mode = mode;
+    m_safeMode = safeMode;
 
     // Determine flags
     unsigned flags = m_flags;
@@ -120,8 +121,16 @@ bool RandomXMiner::Initialize(const void* key, size_t keySize, Mode mode) {
         flags |= RANDOMX_FLAG_FULL_MEM;
     }
 
+    // Safe mode: disable JIT and AVX2 to prevent invalid opcode crashes
+    if (safeMode) {
+        LogPrintf("RandomX: Safe mode enabled - disabling JIT and AVX2\n");
+        flags &= ~RANDOMX_FLAG_JIT;
+        flags &= ~RANDOMX_FLAG_ARGON2_AVX2;
+        // Keep SSSE3 and HARD_AES as they are more stable
+    }
+
     // Allocate cache
-    LogPrintf("RandomX: Allocating cache...\n");
+    LogPrintf("RandomX: Allocating cache (flags=0x%x)...\n", flags);
     m_cache = randomx_alloc_cache(static_cast<randomx_flags>(flags));
     if (!m_cache) {
         LogPrintf("RandomX: Failed to allocate cache, trying without JIT...\n");
@@ -232,12 +241,23 @@ bool RandomXMiner::MeetsTarget(const uint256& hash, const uint256& target) {
 
 std::vector<unsigned char> RandomXMiner::SerializeBlockHeader(const CBlockHeader& header) {
     DataStream ss{};
+    // Serialize ALL block header fields (must match CBlockHeader::SERIALIZE_METHODS)
     ss << header.nVersion;
     ss << header.hashPrevBlock;
     ss << header.hashMerkleRoot;
     ss << header.nTime;
     ss << header.nBits;
     ss << header.nNonce;
+    // QTUM/WATTx state roots (required for EVM compatibility)
+    ss << header.hashStateRoot;
+    ss << header.hashUTXORoot;
+    // Proof-of-stake fields
+    ss << header.prevoutStake;
+    ss << header.vchBlockSigDlgt;
+    // Gapcoin legacy PoW fields (kept for block format compatibility)
+    ss << header.nShift;
+    ss << header.nAdder;
+    ss << header.nGapSize;
     // Convert std::byte to unsigned char
     std::vector<unsigned char> result(ss.size());
     std::memcpy(result.data(), ss.data(), ss.size());

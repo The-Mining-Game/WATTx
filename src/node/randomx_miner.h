@@ -65,9 +65,10 @@ public:
      * @param key The initialization key (usually merkle root of recent blocks)
      * @param keySize Size of the key in bytes
      * @param mode Mining mode (LIGHT or FULL)
+     * @param safeMode If true, disable JIT compilation (slower but more stable)
      * @return true if initialization succeeded
      */
-    bool Initialize(const void* key, size_t keySize, Mode mode = Mode::LIGHT);
+    bool Initialize(const void* key, size_t keySize, Mode mode = Mode::LIGHT, bool safeMode = false);
 
     /**
      * Reinitialize with a new key if the key has changed
@@ -190,6 +191,7 @@ private:
     // Configuration
     Mode m_mode{Mode::LIGHT};
     unsigned m_flags{0};
+    bool m_safeMode{false};
 };
 
 /**
