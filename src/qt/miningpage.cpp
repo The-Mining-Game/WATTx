@@ -711,8 +711,29 @@ void MiningPage::startMining()
                 // Add coinbase as first transaction
                 block.vtx.push_back(MakeTransactionRef(std::move(coinbaseTx)));
 
-                // Add transactions from template (skip for now - just coinbase)
-                // TODO: Parse and add transactions from template
+                // Add transactions from template
+                if (templateVal.exists("transactions") && templateVal["transactions"].isArray()) {
+                    const UniValue& txArray = templateVal["transactions"];
+                    for (size_t i = 0; i < txArray.size(); i++) {
+                        const UniValue& txObj = txArray[i];
+                        if (txObj.exists("data") && txObj["data"].isStr()) {
+                            std::string txHex = txObj["data"].get_str();
+                            CMutableTransaction tx;
+                            try {
+                                SpanReader{ParseHex(txHex)} >> TX_WITH_WITNESS(tx);
+                                block.vtx.push_back(MakeTransactionRef(std::move(tx)));
+                            } catch (const std::exception& e) {
+                                // Skip invalid transactions
+                                LogPrintf("GUI Mining: Failed to parse tx %zu: %s\n", i, e.what());
+                            }
+                        }
+                    }
+                    if (txArray.size() > 0) {
+                        QMetaObject::invokeMethod(this, [this, txArray]() {
+                            logToConsole(tr("Including %1 transactions from mempool").arg(txArray.size()));
+                        }, Qt::QueuedConnection);
+                    }
+                }
 
                 // Calculate merkle root
                 block.hashMerkleRoot = BlockMerkleRoot(block);
