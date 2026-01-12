@@ -782,19 +782,8 @@ bool SelectCoinsForStaking(const CWallet& wallet, CAmount &nTargetValue, std::se
         wallet.threads.join_all();
     }
 
-    // Check minimum validator stake requirement
-    CAmount nMinStake = Params().GetConsensus().nMinValidatorStake;
-    CAmount nTotalStakeable = 0;
-    for(const std::pair<const CWalletTx*,unsigned int> &output : vCoins)
-    {
-        nTotalStakeable += output.first->tx->vout[output.second].nValue;
-    }
-    if (nTotalStakeable < nMinStake)
-    {
-        LogPrintf("SelectCoinsForStaking: Insufficient stake. Have %s, need %s WATTx\n",
-                  FormatMoney(nTotalStakeable), FormatMoney(nMinStake));
-        return false;
-    }
+    // Note: nMinValidatorStake (20,000 WATTx) only applies to super stakers/validators
+    // Regular staking works with any amount of mature coins (10+ confirmations)
 
     setCoinsRet.clear();
     nValueRet = 0;

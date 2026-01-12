@@ -237,7 +237,7 @@ public:
         consensus.nSubsidyHalvingIntervalV2 = 1051200; // ~4 years at 2min blocks (525600 min/year * 2)
         consensus.nMinValidatorStake = 20000 * COIN; // 20,000 WATTx minimum for super staking validator
 
-        consensus.nLastPOWBlock = 0x7fffffff; // Allow indefinite PoW mining until hybrid consensus activation
+        consensus.nLastPOWBlock = 5000; // PoS enabled after block 5000, hybrid PoW/PoS from then on
         consensus.nLastBigReward = 0; // Fair launch - no big rewards, 0.08333333 WATTx from block 1
         consensus.nMPoSRewardRecipients = 10;
         consensus.nFirstMPoSBlock = consensus.nLastPOWBlock +
@@ -247,8 +247,8 @@ public:
 
         consensus.nFixUTXOCacheHFHeight = 0;
         consensus.nEnableHeaderSignatureHeight = 0;
-        consensus.nCheckpointSpan = consensus.nCoinbaseMaturity;
-        consensus.nRBTCheckpointSpan = consensus.nRBTCoinbaseMaturity;
+        consensus.nCheckpointSpan = 500; // Sync checkpoint span - don't use nCoinbaseMaturity (too restrictive)
+        consensus.nRBTCheckpointSpan = 500;
         consensus.delegationsAddress = uint160(ParseHex("0000000000000000000000000000000000000086"));
         consensus.historyStorageAddress = uint160(ParseHex("0000F90827F1C53a10cb7A02335B175320002935"));
         consensus.nStakeTimestampMask = 0; // 1-second precision for 1s blocks

@@ -209,7 +209,8 @@ RPCHelpMan getstakinginfo()
 
     obj.pushKV("enabled", gArgs.GetBoolArg("-staking", true));
     obj.pushKV("staking", staking);
-    obj.pushKV("minstake", ValueFromAmount(consensusParams.nMinValidatorStake));
+    obj.pushKV("minstake", ValueFromAmount(0)); // Regular staking has no minimum
+    obj.pushKV("minvalidatorstake", ValueFromAmount(consensusParams.nMinValidatorStake)); // Super staker minimum
     obj.pushKV("errors", pwallet->chain().getWarnings().original);
 
     if (BlockAssembler::m_last_block_num_txs) obj.pushKV("currentblocktx", *BlockAssembler::m_last_block_num_txs);

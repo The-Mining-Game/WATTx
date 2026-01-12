@@ -392,7 +392,7 @@ if(ENABLE_WALLET)
       bitcoin_wallet
       bitcoin_common
       bitcoin_util
-      wattx_validators
+      leveldb
       Boost::headers
     )
     install_binary_component(wattx-wallet HAS_MANPAGE)
