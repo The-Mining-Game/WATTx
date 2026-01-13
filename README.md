@@ -27,14 +27,14 @@ Network Parameters
 
 | Parameter | Value |
 |-----------|-------|
-| Block Time | 1 second |
-| Block Reward | ~0.083 WATTx (~50 WATTx/10 min) |
-| Halving Interval | 126,000,000 blocks (~4 years) |
+| Block Time | approx 2 minutes|
+| Block Reward | ~5 WATTx PoW / 5 Wattx PoS (~50 WATTx/10 min) |
+| Halving Interval | 105,000,000 blocks (~4 years) |
 | Total Supply | ~21 million WATTx |
 | Min Validator Stake | 100,000 WATTx |
 | Min Delegation | 1,000 WATTx |
-| Mainnet Port | 18888 |
-| Testnet Port | 13888 |
+| Mainnet Port | 1337 |
+| Testnet Port | 11337 |
 
 Quick Start
 -----------
