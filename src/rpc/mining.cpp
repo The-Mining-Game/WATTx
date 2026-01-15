@@ -853,11 +853,7 @@ static RPCHelpMan getblocktemplate()
         time_start = GetTime();
 
         // Create new block
-        // WATTx Hybrid Consensus: Always create PoW templates for getblocktemplate
-        // After nLastPOWBlock, both PoW and PoS blocks are valid (50/50 hybrid consensus)
-        // PoS blocks are created by the wallet staker, not via getblocktemplate
-        bool fProofOfStake = false;
-
+        bool fProofOfStake = chainman.ActiveChain().Height() >= Params().GetConsensus().nLastPOWBlock ? true : false;
         block_template = miner.createNewBlock({}, fProofOfStake);
         CHECK_NONFATAL(block_template);
 
