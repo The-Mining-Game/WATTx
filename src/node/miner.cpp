@@ -493,9 +493,9 @@ bool BlockAssembler::AttemptToAddContractToBlock(CTxMemPool::txiter iter, uint64
     if (nTimeLimit != 0 && TicksSinceEpoch<std::chrono::seconds>(NodeClock::now()) >= nTimeLimit - nBytecodeTimeBuffer) {
         return false;
     }
-    if (gArgs.GetBoolArg("-disablecontractstaking", false))
+    if (pblock->IsProofOfStake() && gArgs.GetBoolArg("-disablecontractstaking", false))
     {
-        // Contract staking is disabled for the staker
+        // Contract staking is disabled for the staker (only affects PoS blocks)
         return false;
     }
     
