@@ -40,6 +40,7 @@ target_link_libraries(bitcoin_wallet
   PRIVATE
     core_interface
     bitcoin_common
+    wattx_validators
     univalue
     Boost::headers
     $<TARGET_NAME_IF_EXISTS:USDT::headers>
