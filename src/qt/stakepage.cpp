@@ -68,7 +68,7 @@ void StakePage::setWalletModel(WalletModel *model)
     if(model && model->getOptionsModel())
     {
         transactionView->setModel(model);
-        transactionView->chooseType(5);
+        transactionView->chooseType(6);  // Index 6 = Staked transactions
         if(model->wallet().privateKeysDisabled()) {
             ui->checkStake->setEnabled(node::ENABLE_HARDWARE_STAKE);
         }
