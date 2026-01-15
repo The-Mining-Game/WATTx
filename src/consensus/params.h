@@ -186,6 +186,9 @@ struct Params {
         return std::numeric_limits<int>::max();
     }
 
+    /** WATTx Hybrid Consensus: When set to 0, enables hybrid PoW/PoS from block 1.
+     *  Both PoW and PoS blocks are valid with equal rewards.
+     *  PoS becomes possible once coins reach maturity (coinbaseMaturity blocks). */
     int nLastPOWBlock;
     int nFirstMPoSBlock;
     int nMPoSRewardRecipients;

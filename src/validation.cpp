@@ -6225,10 +6225,10 @@ bool Chainstate::UpdateHashProof(const CBlock& block, BlockValidationState& stat
                 strprintf("UpdateHashProof() : missing PoS validator signature at height %d", nHeight));
         }
     } else {
-        // Legacy behavior: reject pure PoW after nLastPOWBlock
-        if (block.IsProofOfWork() && nHeight > consensusParams.nLastPOWBlock)
-            return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "reject-pow",
-                strprintf("UpdateHashProof() : reject proof-of-work at height %d", nHeight));
+        // WATTx Hybrid Consensus: After nLastPOWBlock, both PoW and PoS blocks are valid
+        // This enables 50/50 PoW/PoS hybrid consensus where miners and stakers compete equally
+        // Before nLastPOWBlock: PoW only
+        // After nLastPOWBlock: Hybrid PoW/PoS (both valid)
     }
 
     // Check coinstake timestamp
@@ -6408,10 +6408,8 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
                     strprintf("invalid Gapcoin PoW: %s", strError));
             }
         } else {
-            // Legacy behavior before hybrid activation
-            if (block.IsProofOfWork() && nHeight > consensusParams.nLastPOWBlock)
-                return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "reject-pow",
-                    strprintf("reject proof-of-work at height %d", nHeight));
+            // WATTx Hybrid Consensus: After nLastPOWBlock, both PoW and PoS blocks are valid
+            // No rejection of PoW blocks - miners and stakers compete equally for block rewards
         }
 
         if(block.IsProofOfStake())
@@ -6606,10 +6604,8 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
                 strprintf("%s: missing PoS validator signature at height %d", __func__, nHeight));
         }
     } else {
-        // Legacy: Check for the last proof of work block
-        if (block.IsProofOfWork() && nHeight > consensusParams.nLastPOWBlock)
-            return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "reject-pow",
-                strprintf("%s: reject proof-of-work at height %d", __func__, nHeight));
+        // WATTx Hybrid Consensus: After nLastPOWBlock, both PoW and PoS blocks are accepted
+        // This enables miners and stakers to compete equally for block rewards
     }
 
     // Check that the block satisfies synchronized checkpoint

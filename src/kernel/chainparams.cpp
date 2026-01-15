@@ -76,21 +76,22 @@ static CBlock CreateGenesisBlock(const char* pszTimestamp, const CScript& genesi
  * database.
  */
 
-// WATTx Mainnet Genesis - NYT World News 11/Jan/2026
+// WATTx Mainnet Genesis - Fresh chain Jan 2026
 static CBlock CreateMainnetGenesisBlock(uint32_t nTime, uint32_t nNonce, uint32_t nBits, int32_t nVersion, const CAmount& genesisReward)
+{
+    const char* pszTimestamp = "WATTx Mainnet Launch - Hybrid PoW/PoS Energy Blockchain - Jan 2026";
+    const CScript genesisOutputScript = CScript() << ParseHex("04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5f") << OP_CHECKSIG;
+    return CreateGenesisBlock(pszTimestamp, genesisOutputScript, nTime, nNonce, nBits, nVersion, genesisReward);
+}
+
+// WATTx Testnet Genesis - Original mainnet chain (NYT headline)
+static CBlock CreateTestnetGenesisBlock(uint32_t nTime, uint32_t nNonce, uint32_t nBits, int32_t nVersion, const CAmount& genesisReward)
 {
     const char* pszTimestamp = "NYT 11/Jan/2026 Tug of War at Top of the World - Svalbard";
     const CScript genesisOutputScript = CScript() << ParseHex("04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5f") << OP_CHECKSIG;
     return CreateGenesisBlock(pszTimestamp, genesisOutputScript, nTime, nNonce, nBits, nVersion, genesisReward);
 }
 
-// WATTx Testnet Genesis - Fresh chain for testing
-static CBlock CreateTestnetGenesisBlock(uint32_t nTime, uint32_t nNonce, uint32_t nBits, int32_t nVersion, const CAmount& genesisReward)
-{
-    const char* pszTimestamp = "WATTx Testnet Launch - Jan 2026 - Fast Sync Testing";
-    const CScript genesisOutputScript = CScript() << ParseHex("04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5f") << OP_CHECKSIG;
-    return CreateGenesisBlock(pszTimestamp, genesisOutputScript, nTime, nNonce, nBits, nVersion, genesisReward);
-}
 
 // WATTx Signet Genesis
 static CBlock CreateSigNetGenesisBlock(uint32_t nTime, uint32_t nNonce, uint32_t nBits, int32_t nVersion, const CAmount& genesisReward)
@@ -174,14 +175,23 @@ public:
         m_assumed_blockchain_size = 1;
         m_assumed_chain_state_size = 1;
 
-        // WATTx Mainnet Genesis Block - NYT World News 11/Jan/2026
-        // Message: "NYT 11/Jan/2026 Tug of War at Top of the World - Svalbard"
-        // Timestamp: 1768145874 (Sat Jan 11 2026)
-        // Nonce: 12122
-        genesis = CreateMainnetGenesisBlock(1768145874, 12122, 0x1f00ffff, 1, 500000000);
+        // WATTx Mainnet Genesis Block - Fresh chain Jan 2026
+        // Message: "WATTx Mainnet Launch - Hybrid PoW/PoS Energy Blockchain - Jan 2026"
+        // Timestamp: 1736985600 (Wed Jan 15 2026 20:00:00 UTC)
+        genesis = CreateMainnetGenesisBlock(1736985600, 0, 0x1f00ffff, 1, 500000000);
+
+        // Mine genesis block (find valid nonce)
+        {
+            arith_uint256 bnTarget;
+            bnTarget.SetCompact(genesis.nBits);
+            for (genesis.nNonce = 0; genesis.nNonce < 0xFFFFFFFF; genesis.nNonce++) {
+                uint256 hash = genesis.GetHash();
+                if (UintToArith256(hash) <= bnTarget) {
+                    break;
+                }
+            }
+        }
         consensus.hashGenesisBlock = genesis.GetHash();
-        assert(consensus.hashGenesisBlock == uint256{"0000a9cd583de9bbb051fea4e8ec1358e80b270ce08350cbb9e64b5b6eae6c14"});
-        assert(genesis.hashMerkleRoot == uint256{"47ef214c95164ba6cb2d773e15ff07d57b7b0ea4950326ad15b90c5e813b7569"});
 
         // WATTx seed nodes (to be configured)
         vSeeds.emplace_back("seed1.wattxchange.app");
@@ -199,14 +209,8 @@ public:
 
         bech32_hrp = "wx";
 
-        // WATTx mainnet fixed seed nodes
-        // Format: BIP155 (network_id, addr_len, addr_bytes, port_be)
-        // 188.25.168.149:1337 and 108.217.64.180:1337
-        static const uint8_t wattx_seeds[] = {
-            0x01,0x04,0xBC,0x19,0xA8,0x95,0x05,0x39,  // 188.25.168.149:1337
-            0x01,0x04,0x6C,0xD9,0x40,0xB4,0x05,0x39,  // 108.217.64.180:1337
-        };
-        vFixedSeeds = std::vector<uint8_t>(std::begin(wattx_seeds), std::end(wattx_seeds));
+        // WATTx mainnet - fresh chain, no fixed seeds yet
+        vFixedSeeds.clear();
 
         fDefaultConsistencyChecks = false;
         fMineBlocksOnDemand = false;
@@ -231,13 +235,13 @@ public:
 
         // WATTx-specific parameters
         consensus.nBlocktimeDownscaleFactor = 1; // No downscaling
-        consensus.nCoinbaseMaturity = 1; // WATTx: PoW rewards spendable after 1 confirmation
-        consensus.nRBTCoinbaseMaturity = 1;
+        consensus.nCoinbaseMaturity = 500; // WATTx: PoW/PoS rewards mature after 500 blocks for security
+        consensus.nRBTCoinbaseMaturity = 500;
         consensus.nStakeMinConfirmations = 10; // WATTx: Coins need 10 confirmations to stake
         consensus.nSubsidyHalvingIntervalV2 = 1051200; // ~4 years at 2min blocks (525600 min/year * 2)
         consensus.nMinValidatorStake = 20000 * COIN; // 20,000 WATTx minimum for super staking validator
 
-        consensus.nLastPOWBlock = 5000; // PoS enabled after block 5000, hybrid PoW/PoS from then on
+        consensus.nLastPOWBlock = 0; // Hybrid PoW/PoS from block 1 - both valid with equal 50/50 rewards (PoS possible once coins mature)
         consensus.nLastBigReward = 0; // Fair launch - no big rewards, 0.08333333 WATTx from block 1
         consensus.nMPoSRewardRecipients = 10;
         consensus.nFirstMPoSBlock = consensus.nLastPOWBlock +
@@ -264,7 +268,8 @@ public:
 };
 
 /**
- * Testnet (v3): public test network which is reset from time to time.
+ * WATTx Testnet - Uses the original mainnet genesis block for existing chain compatibility
+ * Port: 1336, Seednode: 31.17.186.148
  */
 class CTestNetParams : public CChainParams {
 public:
@@ -272,22 +277,19 @@ public:
         m_chain_type = ChainType::TESTNET;
         consensus.signet_blocks = false;
         consensus.signet_challenge.clear();
-        consensus.nSubsidyHalvingInterval = 985500; // qtum halving every 4 years
-        consensus.script_flag_exceptions.emplace( // BIP16 exception
-            uint256{"0000e803ee215c0684ca0d2f9220594d3f828617972aad66feb2ba51f5e14222"}, SCRIPT_VERIFY_NONE);
+        consensus.nSubsidyHalvingInterval = 1051200; // WATTx halving every ~4 years at 2min blocks
         consensus.BIP34Height = 0;
-        consensus.BIP34Hash = uint256{"0000e803ee215c0684ca0d2f9220594d3f828617972aad66feb2ba51f5e14222"};
-        consensus.BIP65Height = 0; // 00000000007f6655f22f98e72ed80d8b06dc761d5da09df0fa1dc4be4f861eb6
-        consensus.BIP66Height = 0; // 000000002104c8c45e99a8853285a3b592602a3ccde2b832481da85e9e4ba182
-        consensus.CSVHeight = 6048; // 00000000025e930139bac5c6c31a403776da130831ab85be56578f3fa75369bb
-        consensus.SegwitHeight = 6048; // 00000000002b980fcd729daaa248fd9316a5200e9b367f4ff2c42453e84201ca
-        consensus.MinBIP9WarningHeight = 8064; // segwit activation height + miner confirmation window
-        // WATTx: Enable all EVM upgrades from genesis
+        consensus.BIP34Hash = uint256{};
+        consensus.BIP65Height = 0;
+        consensus.BIP66Height = 0;
+        consensus.CSVHeight = 0;
+        consensus.SegwitHeight = 0;
+        consensus.MinBIP9WarningHeight = 0;
         consensus.QIP5Height = 0;
         consensus.QIP6Height = 0;
-        consensus.QIP7Height = 0;  // Constantinople (SHR opcode)
+        consensus.QIP7Height = 0;
         consensus.QIP9Height = 0;
-        consensus.nOfflineStakeHeight = 0;
+        consensus.nOfflineStakeHeight = 1;
         consensus.nReduceBlocktimeHeight = 0;
         consensus.nMuirGlacierHeight = 0;
         consensus.nLondonHeight = 0;
@@ -295,71 +297,69 @@ public:
         consensus.nCancunHeight = 0;
         consensus.nPectraHeight = 0;
         consensus.powLimit = uint256{"0000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
-        consensus.posLimit = uint256{"0000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
-        consensus.QIP9PosLimit = uint256{"0000000000001fffffffffffffffffffffffffffffffffffffffffffffffffff"}; // The new POS-limit activated after QIP9
-        consensus.RBTPosLimit = uint256{"0000000000003fffffffffffffffffffffffffffffffffffffffffffffffffff"};
-        consensus.nPowTargetTimespan = 1200; // 10 blocks at 2min = 20 minutes
+        consensus.posLimit = uint256{"00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+        consensus.QIP9PosLimit = uint256{"0000000000001fffffffffffffffffffffffffffffffffffffffffffffffffff"};
+        consensus.RBTPosLimit = uint256{"0000000fffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+        consensus.nPowTargetTimespan = 1200;
         consensus.nPowTargetTimespanV2 = 1200;
         consensus.nRBTPowTargetTimespan = 1200;
-        consensus.nPowTargetSpacing = 120; // WATTx testnet: 2 minutes per block (same as mainnet)
+        consensus.nPowTargetSpacing = 120; // 2 minutes per block
         consensus.nRBTPowTargetSpacing = 120;
         consensus.fPowAllowMinDifficultyBlocks = false;
         consensus.enforce_BIP94 = false;
         consensus.fPowNoRetargeting = true;
         consensus.fPoSNoRetargeting = false;
-        consensus.nRuleChangeActivationThreshold = 1512; // 75% for testchains
-        consensus.nMinerConfirmationWindow = 2016; // nPowTargetTimespan / nPowTargetSpacing
+        consensus.nRuleChangeActivationThreshold = 540;
+        consensus.nMinerConfirmationWindow = 600;
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].bit = 28;
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
-        consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].min_activation_height = 0; // No activation delay
+        consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].min_activation_height = 0;
 
-        // Deployment of Taproot (BIPs 340-342)
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].bit = 2;
-        consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nStartTime = 0;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nStartTime = Consensus::BIP9Deployment::ALWAYS_ACTIVE;
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
-        // Min block number for activation, the number must be divisible by 2016
-        consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 1967616;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 0;
 
-        consensus.nMinimumChainWork = uint256{};  // WATTx testnet: no minimum for fresh chain
-        consensus.defaultAssumeValid = uint256{};  // WATTx testnet: no assume valid for fresh chain
+        consensus.nMinimumChainWork = uint256{};
+        consensus.defaultAssumeValid = uint256{};
 
-        pchMessageStart[0] = 0x0d;
-        pchMessageStart[1] = 0x22;
-        pchMessageStart[2] = 0x15;
-        pchMessageStart[3] = 0x06;
-        nDefaultPort = 11337;
-        nPruneAfterHeight = 1000;
-        m_assumed_blockchain_size = 11;
+        // WATTx Testnet network magic bytes (same as old mainnet for compatibility)
+        pchMessageStart[0] = 0x57; // 'W'
+        pchMessageStart[1] = 0x41; // 'A'
+        pchMessageStart[2] = 0x54; // 'T'
+        pchMessageStart[3] = 0x58; // 'X'
+        nDefaultPort = 1337;  // Same as old mainnet for compatibility
+        nPruneAfterHeight = 100000;
+        m_assumed_blockchain_size = 1;
         m_assumed_chain_state_size = 1;
 
-        // WATTx Testnet Genesis Block - Fresh chain for immediate sync
-        // Message: "WATTx Testnet Launch - Jan 2026 - Fast Sync Testing"
-        // Timestamp: 1736035200 (Sat Jan 4 2026)
-        // Nonce: 229304
-        genesis = CreateTestnetGenesisBlock(1736035200, 229304, 0x1f00ffff, 1, 500000000);
+        // WATTx Testnet Genesis - SAME as original mainnet for chain compatibility
+        // This allows the existing blockchain to continue as testnet
+        genesis = CreateTestnetGenesisBlock(1768145874, 12122, 0x1f00ffff, 1, 500000000);
         consensus.hashGenesisBlock = genesis.GetHash();
-        assert(consensus.hashGenesisBlock == uint256{"000051d2ae90ec304f7a735985a894f1b7b25061fda9d945a2df882b0442aed3"});
-        assert(genesis.hashMerkleRoot == uint256{"7e7f6df20a55469d87e183aedb2a726d984b519bbd33828e62121a242044d372"});
+        assert(consensus.hashGenesisBlock == uint256{"0000a9cd583de9bbb051fea4e8ec1358e80b270ce08350cbb9e64b5b6eae6c14"});
+        assert(genesis.hashMerkleRoot == uint256{"47ef214c95164ba6cb2d773e15ff07d57b7b0ea4950326ad15b90c5e813b7569"});
 
-        vFixedSeeds.clear();
+        // WATTx Testnet seednode
         vSeeds.clear();
-        // WATTx testnet - isolated mode (no external seeds for now)
-        // When ready for public testnet, add: vSeeds.emplace_back("testnet-seed1.wattxchange.app");
+        vSeeds.emplace_back("31.17.186.148");
 
-        // WATTx testnet addresses start with 'w' (base58 prefix 135)
-        base58Prefixes[PUBKEY_ADDRESS] = std::vector<unsigned char>(1,135);
-        base58Prefixes[SCRIPT_ADDRESS] = std::vector<unsigned char>(1,137);
-        base58Prefixes[SECRET_KEY] =     std::vector<unsigned char>(1,239);
-        base58Prefixes[EXT_PUBLIC_KEY] = {0x04, 0x35, 0x87, 0xCF};
-        base58Prefixes[EXT_SECRET_KEY] = {0x04, 0x35, 0x83, 0x94};
-        // Dilithium (quantum-resistant) testnet addresses start with 'D' (base58 prefix 30)
-        base58Prefixes[DILITHIUM_ADDRESS] = std::vector<unsigned char>(1,30);
+        // WATTx addresses start with 'W' (same as original mainnet for compatibility)
+        base58Prefixes[PUBKEY_ADDRESS] = std::vector<unsigned char>(1,73);
+        base58Prefixes[SCRIPT_ADDRESS] = std::vector<unsigned char>(1,75);
+        base58Prefixes[SECRET_KEY] =     std::vector<unsigned char>(1,128);
+        base58Prefixes[EXT_PUBLIC_KEY] = {0x04, 0x88, 0xB2, 0x1E};
+        base58Prefixes[EXT_SECRET_KEY] = {0x04, 0x88, 0xAD, 0xE4};
+        base58Prefixes[DILITHIUM_ADDRESS] = std::vector<unsigned char>(1,58);
 
-        bech32_hrp = "wt"; // WATTx testnet bech32 prefix
+        bech32_hrp = "wx";
 
-        // No fixed seeds - WATTx testnet runs in isolated mode
-        // vFixedSeeds = std::vector<uint8_t>(std::begin(chainparams_seed_test), std::end(chainparams_seed_test));
+        // Fixed seed: 31.17.186.148:1336
+        static const uint8_t wattx_testnet_seeds[] = {
+            0x01,0x04,0x1F,0x11,0xBA,0x94,0x05,0x38,  // 31.17.186.148:1336
+        };
+        vFixedSeeds = std::vector<uint8_t>(std::begin(wattx_testnet_seeds), std::end(wattx_testnet_seeds));
 
         fDefaultConsistencyChecks = false;
         fMineBlocksOnDemand = false;
@@ -368,7 +368,6 @@ public:
 
         checkpointData = {
             {
-                // Will be updated after mining testnet genesis
             }
         };
 
@@ -377,34 +376,31 @@ public:
         };
 
         chainTxData = ChainTxData{
-            .nTime    = 1736035200,
+            .nTime    = 1768145874,
             .tx_count = 0,
             .dTxRate  = 0,
         };
 
-        consensus.nBlocktimeDownscaleFactor = 1; // WATTx testnet: no downscaling
-        consensus.nCoinbaseMaturity = 1;  // WATTx testnet: PoW rewards spendable after 1 confirmation
+        consensus.nBlocktimeDownscaleFactor = 1;
+        consensus.nCoinbaseMaturity = 1;  // Match old mainnet for chain compatibility (spendable after 1 conf)
         consensus.nRBTCoinbaseMaturity = 1;
-        consensus.nStakeMinConfirmations = 10; // WATTx testnet: Coins need 10 confirmations to stake
-        consensus.nSubsidyHalvingIntervalV2 = 1051200; // WATTx testnet: ~4 years at 2min blocks
-        consensus.nMinValidatorStake = 20000 * COIN; // 20,000 WATTx minimum (same as mainnet)
+        consensus.nStakeMinConfirmations = 1;
+        consensus.nSubsidyHalvingIntervalV2 = 1051200;
+        consensus.nMinValidatorStake = 20000 * COIN;
 
-        // WATTx Testnet: Same as mainnet (fair launch, no big rewards)
-        consensus.nLastPOWBlock = 0x7fffffff;  // Allow indefinite PoW mining until hybrid consensus activation (same as mainnet)
-        consensus.nLastBigReward = 0;  // Fair launch - no big rewards (same as mainnet)
+        consensus.nLastPOWBlock = 0; // Hybrid PoW/PoS from block 1
+        consensus.nLastBigReward = 0;
         consensus.nMPoSRewardRecipients = 10;
-        consensus.nFirstMPoSBlock = consensus.nLastPOWBlock +
-                                    consensus.nMPoSRewardRecipients +
-                                    consensus.nCoinbaseMaturity;
-        consensus.nLastMPoSBlock = 0;   // Disable MPoS, use tiered PoS (same as mainnet)
+        consensus.nFirstMPoSBlock = consensus.nMPoSRewardRecipients + consensus.nCoinbaseMaturity;
+        consensus.nLastMPoSBlock = 0;
 
         consensus.nFixUTXOCacheHFHeight = 0;
         consensus.nEnableHeaderSignatureHeight = 0;
-        consensus.nCheckpointSpan = consensus.nCoinbaseMaturity;
-        consensus.nRBTCheckpointSpan = consensus.nRBTCoinbaseMaturity;
-        consensus.delegationsAddress = uint160(ParseHex("0000000000000000000000000000000000000086")); // Same as mainnet
-        consensus.historyStorageAddress = uint160(ParseHex("0000F90827F1C53a10cb7A02335B175320002935")); // EVM block hash history contract address
-        consensus.nStakeTimestampMask = 0;  // Allow staking every second
+        consensus.nCheckpointSpan = 500;
+        consensus.nRBTCheckpointSpan = 500;
+        consensus.delegationsAddress = uint160(ParseHex("0000000000000000000000000000000000000086"));
+        consensus.historyStorageAddress = uint160(ParseHex("0000F90827F1C53a10cb7A02335B175320002935"));
+        consensus.nStakeTimestampMask = 0;
         consensus.nRBTStakeTimestampMask = 0;
     }
 };
@@ -535,7 +531,7 @@ public:
         consensus.nSubsidyHalvingIntervalV2 = consensus.nBlocktimeDownscaleFactor*985500; // qtum halving every 4 years (nSubsidyHalvingInterval * nBlocktimeDownscaleFactor)
         consensus.nMinValidatorStake = 100000 * COIN; // 100,000 WATTx minimum to stake
 
-        consensus.nLastPOWBlock = 5000;
+        consensus.nLastPOWBlock = 0; // Hybrid PoW/PoS from block 1
         consensus.nLastBigReward = 0; // Fair launch - same as mainnet (0.08333333 WATTx per block)
         consensus.nMPoSRewardRecipients = 10;
         consensus.nFirstMPoSBlock = 5000;
@@ -681,7 +677,7 @@ public:
         consensus.nSubsidyHalvingIntervalV2 = consensus.nBlocktimeDownscaleFactor*985500; // qtum halving every 4 years (nSubsidyHalvingInterval * nBlocktimeDownscaleFactor)
         consensus.nMinValidatorStake = 100000 * COIN; // 100,000 WATTx minimum to stake
 
-        consensus.nLastPOWBlock = 0x7fffffff;
+        consensus.nLastPOWBlock = 0; // Hybrid PoW/PoS from block 1
         consensus.nLastBigReward = 0; // Fair launch (0.08333333 WATTx per block)
         consensus.nMPoSRewardRecipients = 10;
         consensus.nFirstMPoSBlock = 5000;
@@ -793,11 +789,9 @@ public:
             consensus.vDeployments[deployment_pos].min_activation_height = version_bits_params.min_activation_height;
         }
 
-        // WATTx Regtest Genesis - Easy difficulty for testing (uses mainnet message)
-        // Nonce: 0
-        genesis = CreateMainnetGenesisBlock(1735430400, 0, 0x207fffff, 1, 500000000);
+        // WATTx Regtest Genesis - Easy difficulty for testing
+        genesis = CreateTestnetGenesisBlock(1735430400, 0, 0x207fffff, 1, 500000000);
         consensus.hashGenesisBlock = genesis.GetHash();
-        assert(consensus.hashGenesisBlock == uint256{"1b80932a0c893b97ea8f5d1601d9cd797cd2a5fd7f2f6064eb06901ff99c8bd4"});
 
         vFixedSeeds.clear(); //!< Regtest mode doesn't have any fixed seeds.
         vSeeds.clear();
@@ -844,7 +838,7 @@ public:
         consensus.nSubsidyHalvingIntervalV2 = consensus.nBlocktimeDownscaleFactor*985500; // qtum halving every 4 years (nSubsidyHalvingInterval * nBlocktimeDownscaleFactor)
         consensus.nMinValidatorStake = 10 * COIN; // Lower for regtest (10 WATTx)
 
-        consensus.nLastPOWBlock = 0x7fffffff;
+        consensus.nLastPOWBlock = 0; // Hybrid PoW/PoS from block 1
         consensus.nLastBigReward = 0; // Fair launch (0.08333333 WATTx per block)
         consensus.nMPoSRewardRecipients = 10;
         consensus.nFirstMPoSBlock = 5000;
@@ -1038,11 +1032,9 @@ void CChainParams::UpdateDifficultyChangeBlockHeight(int nHeight)
     consensus.fPowAllowMinDifficultyBlocks = false;
     consensus.fPowNoRetargeting = true;
     consensus.fPoSNoRetargeting = false;
-    consensus.nLastPOWBlock = 5000;
+    consensus.nLastPOWBlock = 0; // Hybrid PoW/PoS from block 1
     consensus.nMPoSRewardRecipients = 10;
-    consensus.nFirstMPoSBlock = consensus.nLastPOWBlock + 
-                                consensus.nMPoSRewardRecipients + 
-                                consensus.nCoinbaseMaturity;
+    consensus.nFirstMPoSBlock = consensus.nCoinbaseMaturity + consensus.nMPoSRewardRecipients;
     consensus.nLastMPoSBlock = 0;
 }
 
