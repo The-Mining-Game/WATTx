@@ -167,10 +167,15 @@ QList<TransactionRecord> TransactionRecord::decomposeTransaction(const interface
                     sub.type = TransactionRecord::RecvFromOther;
                     sub.address = mapValue["from"];
                 }
-                if (wtx.is_coinbase || wtx.is_coinstake)
+                if (wtx.is_coinbase)
                 {
-                    // Generated
+                    // Mined
                     sub.type = TransactionRecord::Generated;
+                }
+                else if (wtx.is_coinstake)
+                {
+                    // Staked
+                    sub.type = TransactionRecord::Staked;
                 }
 
                 parts.append(sub);
@@ -213,8 +218,8 @@ void TransactionRecord::updateStatus(const interfaces::WalletTxStatus& wtx, cons
     status.depth = wtx.depth_in_main_chain;
     status.m_cur_block_hash = block_hash;
 
-    // For generated transactions, determine maturity
-    if (type == TransactionRecord::Generated) {
+    // For generated/staked transactions, determine maturity
+    if (type == TransactionRecord::Generated || type == TransactionRecord::Staked) {
         if (wtx.blocks_to_maturity > 0)
         {
             status.status = TransactionStatus::Immature;
