@@ -259,8 +259,8 @@ if(ENABLE_WALLET)
       paymentserver.h
       psbtoperationsdialog.cpp
       psbtoperationsdialog.h
-      qrctoken.cpp
-      qrctoken.h
+      wrctoken.cpp
+      wrctoken.h
       qrimagewidget.cpp
       qrimagewidget.h
       receivecoinsdialog.cpp
@@ -291,6 +291,8 @@ if(ENABLE_WALLET)
       sendtokenpage.h
       signverifymessagedialog.cpp
       signverifymessagedialog.h
+      soliditycompiler.cpp
+      soliditycompiler.h
       superstakeritemwidget.cpp
       superstakeritemwidget.h
       superstakerlistwidget.cpp

@@ -18,10 +18,13 @@
 #include <qt/sendcoinsdialog.h>
 #include <qt/styleSheet.h>
 #include <qt/hardwaresigntx.h>
+#include <qt/soliditycompiler.h>
 #include <interfaces/node.h>
 #include <node/interface_ui.h>
 
 #include <QRegularExpressionValidator>
+#include <QMessageBox>
+#include <QCoreApplication>
 
 namespace CreateContract_NS
 {
@@ -93,6 +96,16 @@ CreateContract::CreateContract(const PlatformStyle *platformStyle, QWidget *pare
     connect(ui->textEditBytecode, &QValidatedTextEdit::textChanged, this, &CreateContract::on_updateCreateButton);
     connect(ui->textEditInterface, &QValidatedTextEdit::textChanged, this, &CreateContract::on_newContractABI);
     connect(ui->stackedWidget, &QStackedWidget::currentChanged, this, &CreateContract::on_updateCreateButton);
+
+    // Solidity compilation connections
+    connect(ui->pushButtonCompile, &QPushButton::clicked, this, &CreateContract::on_compileClicked);
+    connect(ui->plainTextEditSource, &QPlainTextEdit::textChanged, this, &CreateContract::on_sourceCodeChanged);
+    connect(ui->comboBoxContract, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &CreateContract::on_contractSelected);
+
+    // Initialize compilation state
+    m_sourceModified = false;
+    ui->comboBoxContract->setEnabled(false);
+    ui->labelCompileStatus->setText("");
 
     // Set bytecode validator
     QRegularExpression regEx;
@@ -173,6 +186,15 @@ void CreateContract::on_clearAllClicked()
     ui->lineEditSenderAddress->setCurrentIndex(-1);
     ui->textEditInterface->clear();
     m_tabInfo->clear();
+
+    // Clear Solidity source
+    ui->plainTextEditSource->clear();
+    ui->comboBoxContract->clear();
+    ui->comboBoxContract->setEnabled(false);
+    ui->labelCompileStatus->setText("");
+    m_compiledContracts.clear();
+    m_lastCompiledSource.clear();
+    m_sourceModified = false;
 }
 
 void CreateContract::on_createContractClicked()
@@ -338,4 +360,101 @@ QString CreateContract::toDataHex(int func, QString& errorMessage)
         errorMessage = ContractUtil::errorMessage(function, errors, true);
     }
     return "";
+}
+
+void CreateContract::on_compileClicked()
+{
+    QString sourceCode = ui->plainTextEditSource->toPlainText();
+
+    if (sourceCode.trimmed().isEmpty()) {
+        ui->labelCompileStatus->setStyleSheet("color: red;");
+        ui->labelCompileStatus->setText(tr("No source code"));
+        return;
+    }
+
+    ui->labelCompileStatus->setStyleSheet("color: gray;");
+    ui->labelCompileStatus->setText(tr("Compiling..."));
+
+    // Force UI update
+    QCoreApplication::processEvents();
+
+    // Compile the source code
+    SolidityCompiler::CompileResult result = SolidityCompiler::compile(sourceCode);
+
+    if (!result.success) {
+        ui->labelCompileStatus->setStyleSheet("color: red;");
+        ui->labelCompileStatus->setText(tr("Compilation failed"));
+
+        // Show error message
+        QMessageBox::warning(this, tr("Compilation Error"), result.errorMessage);
+        return;
+    }
+
+    // Store compiled contracts
+    m_compiledContracts.clear();
+    QMap<QString, SolidityCompiler::ContractData> contracts = SolidityCompiler::getContracts(sourceCode);
+
+    for (auto it = contracts.begin(); it != contracts.end(); ++it) {
+        m_compiledContracts[it.key()] = qMakePair(it.value().bytecode, it.value().abi);
+    }
+
+    // Update contract selector
+    ui->comboBoxContract->clear();
+    ui->comboBoxContract->addItems(result.contractNames);
+    ui->comboBoxContract->setEnabled(result.contractNames.size() > 1);
+
+    // Select the compiled contract
+    int idx = ui->comboBoxContract->findText(result.selectedContract);
+    if (idx >= 0) {
+        ui->comboBoxContract->setCurrentIndex(idx);
+    }
+
+    // Populate bytecode and ABI fields
+    ui->textEditBytecode->setPlainText(result.bytecode);
+    ui->textEditInterface->setPlainText(result.abi);
+
+    // Update status
+    ui->labelCompileStatus->setStyleSheet("color: green;");
+    QString statusText = tr("Compiled");
+    if (!result.warnings.isEmpty()) {
+        statusText += QString(" (%1 warning%2)").arg(result.warnings.size())
+                      .arg(result.warnings.size() > 1 ? "s" : "");
+    }
+    ui->labelCompileStatus->setText(statusText);
+
+    // Show warnings if any
+    if (!result.warnings.isEmpty()) {
+        QString warningText = result.warnings.join("\n");
+        QMessageBox::information(this, tr("Compilation Warnings"), warningText);
+    }
+
+    m_lastCompiledSource = sourceCode;
+    m_sourceModified = false;
+}
+
+void CreateContract::on_sourceCodeChanged()
+{
+    m_sourceModified = true;
+
+    if (!ui->plainTextEditSource->toPlainText().trimmed().isEmpty()) {
+        ui->labelCompileStatus->setStyleSheet("color: orange;");
+        ui->labelCompileStatus->setText(tr("Modified"));
+    } else {
+        ui->labelCompileStatus->setText("");
+    }
+}
+
+void CreateContract::on_contractSelected(int index)
+{
+    if (index < 0 || ui->comboBoxContract->count() == 0) {
+        return;
+    }
+
+    QString contractName = ui->comboBoxContract->currentText();
+
+    if (m_compiledContracts.contains(contractName)) {
+        QPair<QString, QString> data = m_compiledContracts[contractName];
+        ui->textEditBytecode->setPlainText(data.first);
+        ui->textEditInterface->setPlainText(data.second);
+    }
 }

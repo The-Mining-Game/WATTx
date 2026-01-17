@@ -2,8 +2,10 @@
 #define CREATECONTRACT_H
 
 #include <QWidget>
+#include <QMap>
 
 class PlatformStyle;
+class SolidityCompiler;
 class WalletModel;
 class ClientModel;
 class ExecRPCCommand;
@@ -39,6 +41,9 @@ public Q_SLOTS:
     void on_gasInfoChanged(quint64 blockGasLimit, quint64 minGasPrice, quint64 nGasPrice);
     void on_updateCreateButton();
     void on_newContractABI();
+    void on_compileClicked();
+    void on_sourceCodeChanged();
+    void on_contractSelected(int index);
 
 private Q_SLOTS:
     void updateDisplayUnit();
@@ -57,6 +62,11 @@ private:
     TabBarInfo* m_tabInfo;
     int m_results;
     bool bCreateUnsigned = false;
+
+    // Solidity compilation state
+    QString m_lastCompiledSource;
+    bool m_sourceModified;
+    QMap<QString, QPair<QString, QString>> m_compiledContracts; // name -> (bytecode, abi)
 };
 
 #endif // CREATECONTRACT_H
