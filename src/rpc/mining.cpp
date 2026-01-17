@@ -880,6 +880,7 @@ static RPCHelpMan getblocktemplate()
     std::vector<CAmount> tx_sigops{block_template->getTxSigops()};
 
     int i = 0;
+    int non_coinbase_index = 0;  // Track non-coinbase transaction index for fees/sigops
     for (const auto& it : block.vtx) {
         const CTransaction& tx = *it;
         uint256 txHash = tx.GetHash();
@@ -902,9 +903,10 @@ static RPCHelpMan getblocktemplate()
         }
         entry.pushKV("depends", std::move(deps));
 
-        int index_in_template = i - 1;
-        entry.pushKV("fee", tx_fees.at(index_in_template));
-        int64_t nTxSigOps{tx_sigops.at(index_in_template)};
+        // Use non_coinbase_index for fees/sigops arrays (which don't include coinbase)
+        entry.pushKV("fee", tx_fees.at(non_coinbase_index));
+        int64_t nTxSigOps{tx_sigops.at(non_coinbase_index)};
+        non_coinbase_index++;
         if (fPreSegWit) {
             CHECK_NONFATAL(nTxSigOps % WITNESS_SCALE_FACTOR == 0);
             nTxSigOps /= WITNESS_SCALE_FACTOR;
