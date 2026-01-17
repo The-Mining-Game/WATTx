@@ -1,5 +1,5 @@
-#ifndef QRCTOKEN_H
-#define QRCTOKEN_H
+#ifndef WRCTOKEN_H
+#define WRCTOKEN_H
 
 #include <qt/sendtokenpage.h>
 #include <qt/receivetokenpage.h>
@@ -17,16 +17,16 @@ class PlatformStyle;
 class QMenu;
 
 namespace Ui {
-class QRCToken;
+class WRCToken;
 }
 
-class QRCToken : public QWidget
+class WRCToken : public QWidget
 {
     Q_OBJECT
 
 public:
-    explicit QRCToken(const PlatformStyle *platformStyle, QWidget *parent = 0);
-    ~QRCToken();
+    explicit WRCToken(const PlatformStyle *platformStyle, QWidget *parent = 0);
+    ~WRCToken();
 
     void setModel(WalletModel *_model);
     void setClientModel(ClientModel *clientModel);
@@ -54,7 +54,7 @@ public Q_SLOTS:
     void on_addToken();
 
 private:
-    Ui::QRCToken *ui;
+    Ui::WRCToken *ui;
     SendTokenPage* m_sendTokenPage;
     ReceiveTokenPage* m_receiveTokenPage;
     AddTokenPage* m_addTokenPage;
@@ -71,4 +71,4 @@ private:
     TokenListWidget* m_tokenList;
 };
 
-#endif // QRCTOKEN_H
+#endif // WRCTOKEN_H

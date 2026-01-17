@@ -22,7 +22,7 @@
 #include <qt/createcontract.h>
 #include <qt/sendtocontract.h>
 #include <qt/callcontract.h>
-#include <qt/qrctoken.h>
+#include <qt/wrctoken.h>
 #include <qt/restoredialog.h>
 #include <qt/stakepage.h>
 #include <qt/miningpage.h>
@@ -90,8 +90,8 @@ WalletView::WalletView(WalletModel* wallet_model, const PlatformStyle* _platform
     callContractPage = new CallContract(platformStyle);
     callContractPage->setModel(walletModel);
 
-    QRCTokenPage = new QRCToken(platformStyle);
-    QRCTokenPage->setModel(walletModel);
+    WRCTokenPage = new WRCToken(platformStyle);
+    WRCTokenPage->setModel(walletModel);
 
     stakePage = new StakePage(platformStyle);
     stakePage->setWalletModel(walletModel);
@@ -107,7 +107,7 @@ WalletView::WalletView(WalletModel* wallet_model, const PlatformStyle* _platform
     addWidget(createContractPage);
     addWidget(sendToContractPage);
     addWidget(callContractPage);
-    addWidget(QRCTokenPage);
+    addWidget(WRCTokenPage);
     addWidget(stakePage);
     addWidget(miningPage);
     addWidget(delegationPage);
@@ -141,8 +141,8 @@ WalletView::WalletView(WalletModel* wallet_model, const PlatformStyle* _platform
     connect(createContractPage, &CreateContract::message, this, &WalletView::message);
     // Pass through messages from sendToContractPage
     connect(sendToContractPage, &SendToContract::message, this, &WalletView::message);
-    // Pass through messages from QRCTokenPage
-    connect(QRCTokenPage, &QRCToken::message, this, &WalletView::message);
+    // Pass through messages from WRCTokenPage
+    connect(WRCTokenPage, &WRCToken::message, this, &WalletView::message);
     // Pass through messages from delegationPage
     connect(delegationPage, &DelegationPage::message, this, &WalletView::message);
     // Pass through messages from superStakerPage
@@ -181,7 +181,7 @@ void WalletView::setClientModel(ClientModel *_clientModel)
     createContractPage->setClientModel(_clientModel);
     sendToContractPage->setClientModel(_clientModel);
     callContractPage->setClientModel(_clientModel);
-    QRCTokenPage->setClientModel(_clientModel);
+    WRCTokenPage->setClientModel(_clientModel);
     stakePage->setClientModel(_clientModel);
     miningPage->setClientModel(_clientModel);
     delegationPage->setClientModel(_clientModel);
@@ -289,7 +289,7 @@ void WalletView::gotoCallContractPage()
 
 void WalletView::gotoTokenPage()
 {
-    setCurrentWidget(QRCTokenPage);
+    setCurrentWidget(WRCTokenPage);
 }
 
 void WalletView::gotoStakePage()

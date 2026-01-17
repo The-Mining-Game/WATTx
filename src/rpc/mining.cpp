@@ -852,8 +852,9 @@ static RPCHelpMan getblocktemplate()
         CBlockIndex* pindexPrevNew = chainman.m_blockman.LookupBlockIndex(tip);
         time_start = GetTime();
 
-        // Create new block
-        bool fProofOfStake = chainman.ActiveChain().Height() >= Params().GetConsensus().nLastPOWBlock ? true : false;
+        // Create new block - WATTx Hybrid Consensus: Always create PoW templates for miners
+        // PoS blocks are created via staking, not getblocktemplate
+        bool fProofOfStake = false;
         block_template = miner.createNewBlock({}, fProofOfStake);
         CHECK_NONFATAL(block_template);
 
@@ -985,6 +986,18 @@ static RPCHelpMan getblocktemplate()
     result.pushKV("transactions", std::move(transactions));
     result.pushKV("coinbaseaux", std::move(aux));
     result.pushKV("coinbasevalue", (int64_t)block.vtx[0]->vout[0].nValue);
+
+    // WATTx: Include all coinbase outputs for gas refunds
+    // This allows external miners to construct a proper coinbase with gas refund outputs
+    UniValue coinbaseOutputs(UniValue::VARR);
+    for (const auto& out : block.vtx[0]->vout) {
+        UniValue outObj(UniValue::VOBJ);
+        outObj.pushKV("value", out.nValue);
+        outObj.pushKV("scriptPubKey", HexStr(out.scriptPubKey));
+        coinbaseOutputs.push_back(outObj);
+    }
+    result.pushKV("coinbaseoutputs", coinbaseOutputs);
+
     result.pushKV("longpollid", tip.GetHex() + ToString(nTransactionsUpdatedLast));
     result.pushKV("target", hashTarget.GetHex());
     result.pushKV("mintime", GetMinimumTime(pindexPrev, consensusParams.DifficultyAdjustmentInterval(height)));

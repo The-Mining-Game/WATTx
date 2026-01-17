@@ -2736,9 +2736,8 @@ bool PeerManagerImpl::CheckPoSHeadersAreContinuous(const std::vector<CBlockHeade
     const Consensus::Params& consensusParams = m_chainparams.GetConsensus();
     for (const CBlockHeader& header : headers)
     {
-        //reject proof of work at height consensusParams.nLastPOWBlock
-        if (header.IsProofOfWork() && nHeight > consensusParams.nLastPOWBlock)
-            return false;
+        // WATTx Hybrid Consensus: After nLastPOWBlock, both PoW and PoS blocks are valid
+        // No rejection of PoW headers - miners and stakers compete equally
 
         // Check coinstake timestamp
         if (header.IsProofOfStake() && !CheckCoinStakeTimestamp(header.GetBlockTime(), nHeight, consensusParams))

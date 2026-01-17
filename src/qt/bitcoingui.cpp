@@ -362,12 +362,12 @@ void BitcoinGUI::createActions()
     delegationAction = new QAction(tr("Delegations"), this);
     superStakerAction = new QAction(tr("Super Staking"), this);
 
-    QRCTokenAction = new QAction(platformStyle->MultiStatesIcon(":/icons/qrctoken"), tr("&QRC Tokens"), this);
-    QRCTokenAction->setStatusTip(tr("QRC Tokens (send, receive or add Tokens in list)"));
-    QRCTokenAction->setToolTip(QRCTokenAction->statusTip());
-    QRCTokenAction->setCheckable(true);
-    QRCTokenAction->setShortcut(QKeySequence(QStringLiteral("Alt+5")));
-    tabGroup->addAction(QRCTokenAction);
+    WRCTokenAction = new QAction(platformStyle->MultiStatesIcon(":/icons/wrctoken"), tr("&WRC Tokens"), this);
+    WRCTokenAction->setStatusTip(tr("WRC Tokens (send, receive or add Tokens in list)"));
+    WRCTokenAction->setToolTip(WRCTokenAction->statusTip());
+    WRCTokenAction->setCheckable(true);
+    WRCTokenAction->setShortcut(QKeySequence(QStringLiteral("Alt+5")));
+    tabGroup->addAction(WRCTokenAction);
 #ifdef ENABLE_WALLET
     // These showNormalIfMinimized are needed because Send Coins and Receive Coins
     // can be triggered from the tray menu, and need to show the GUI to be useful.
@@ -385,8 +385,8 @@ void BitcoinGUI::createActions()
     connect(sendToContractAction, SIGNAL(triggered()), this, SLOT(gotoSendToContractPage()));
     connect(callContractAction, SIGNAL(triggered()), this, SLOT(showNormalIfMinimized()));
     connect(callContractAction, SIGNAL(triggered()), this, SLOT(gotoCallContractPage()));
-    connect(QRCTokenAction, SIGNAL(triggered()), this, SLOT(showNormalIfMinimized()));
-    connect(QRCTokenAction, SIGNAL(triggered()), this, SLOT(gotoTokenPage()));
+    connect(WRCTokenAction, SIGNAL(triggered()), this, SLOT(showNormalIfMinimized()));
+    connect(WRCTokenAction, SIGNAL(triggered()), this, SLOT(gotoTokenPage()));
     connect(stakeAction, &QAction::triggered, [this]{ showNormalIfMinimized(); });
     connect(stakeAction, &QAction::triggered, this, &BitcoinGUI::gotoStakePage);
     connect(miningAction, &QAction::triggered, [this]{ showNormalIfMinimized(); });
@@ -735,7 +735,7 @@ void BitcoinGUI::createToolBars()
         walletStakeActions.append(delegationAction);
         walletStakeActions.append(superStakerAction);
         appNavigationBar->mapGroup(walletStakeAction, walletStakeActions);
-        appNavigationBar->addAction(QRCTokenAction);
+        appNavigationBar->addAction(WRCTokenAction);
         appNavigationBar->buildUi();
         overviewAction->setChecked(true);
     }
@@ -995,7 +995,7 @@ void BitcoinGUI::setWalletActionsEnabled(bool enabled)
     receiveCoinsAction->setEnabled(enabled);
     historyAction->setEnabled(enabled);
     smartContractAction->setEnabled(enabled);
-    QRCTokenAction->setEnabled(enabled);
+    WRCTokenAction->setEnabled(enabled);
     encryptWalletAction->setEnabled(enabled);
     backupWalletAction->setEnabled(enabled);
     restoreWalletAction->setEnabled(enabled);
@@ -1170,7 +1170,7 @@ void BitcoinGUI::gotoHistoryPage()
 
 void BitcoinGUI::gotoTokenPage()
 {
-    QRCTokenAction->setChecked(true);
+    WRCTokenAction->setChecked(true);
     if (walletFrame) walletFrame->gotoTokenPage();
 }
 

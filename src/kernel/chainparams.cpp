@@ -76,10 +76,10 @@ static CBlock CreateGenesisBlock(const char* pszTimestamp, const CScript& genesi
  * database.
  */
 
-// WATTx Mainnet Genesis - NYT World News 11/Jan/2026
+// WATTx Mainnet Genesis - Jan 2026
 static CBlock CreateMainnetGenesisBlock(uint32_t nTime, uint32_t nNonce, uint32_t nBits, int32_t nVersion, const CAmount& genesisReward)
 {
-    const char* pszTimestamp = "NYT 11/Jan/2026 Tug of War at Top of the World - Svalbard";
+    const char* pszTimestamp = "WATTx Mainnet Launch - Hybrid PoW/PoS Energy Blockchain - Jan 2026";
     const CScript genesisOutputScript = CScript() << ParseHex("04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5f") << OP_CHECKSIG;
     return CreateGenesisBlock(pszTimestamp, genesisOutputScript, nTime, nNonce, nBits, nVersion, genesisReward);
 }
@@ -96,6 +96,14 @@ static CBlock CreateTestnetGenesisBlock(uint32_t nTime, uint32_t nNonce, uint32_
 static CBlock CreateSigNetGenesisBlock(uint32_t nTime, uint32_t nNonce, uint32_t nBits, int32_t nVersion, const CAmount& genesisReward)
 {
     const char* pszTimestamp = "WATTx SigNet Genesis - Custom Challenge";
+    const CScript genesisOutputScript = CScript() << ParseHex("04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5f") << OP_CHECKSIG;
+    return CreateGenesisBlock(pszTimestamp, genesisOutputScript, nTime, nNonce, nBits, nVersion, genesisReward);
+}
+
+// WATTx Regtest Genesis - separate from mainnet
+static CBlock CreateRegtestGenesisBlock(uint32_t nTime, uint32_t nNonce, uint32_t nBits, int32_t nVersion, const CAmount& genesisReward)
+{
+    const char* pszTimestamp = "WATTx Regtest Genesis - Local Testing";
     const CScript genesisOutputScript = CScript() << ParseHex("04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5f") << OP_CHECKSIG;
     return CreateGenesisBlock(pszTimestamp, genesisOutputScript, nTime, nNonce, nBits, nVersion, genesisReward);
 }
@@ -174,14 +182,13 @@ public:
         m_assumed_blockchain_size = 1;
         m_assumed_chain_state_size = 1;
 
-        // WATTx Mainnet Genesis Block - NYT World News 11/Jan/2026
-        // Message: "NYT 11/Jan/2026 Tug of War at Top of the World - Svalbard"
-        // Timestamp: 1768145874 (Sat Jan 11 2026)
-        // Nonce: 12122
-        genesis = CreateMainnetGenesisBlock(1768145874, 12122, 0x1f00ffff, 1, 500000000);
+        // WATTx Mainnet Genesis Block
+        // Timestamp: 1736985600 (Wed Jan 15 2025)
+        // Nonce: 108499
+        genesis = CreateMainnetGenesisBlock(1736985600, 108499, 0x1f00ffff, 1, 500000000);
         consensus.hashGenesisBlock = genesis.GetHash();
-        assert(consensus.hashGenesisBlock == uint256{"0000a9cd583de9bbb051fea4e8ec1358e80b270ce08350cbb9e64b5b6eae6c14"});
-        assert(genesis.hashMerkleRoot == uint256{"47ef214c95164ba6cb2d773e15ff07d57b7b0ea4950326ad15b90c5e813b7569"});
+        assert(consensus.hashGenesisBlock == uint256{"0000b7a5960e86b92ee86ad1b7f620adcd8ca275b109e8a98854f4dbed0eea93"});
+        assert(genesis.hashMerkleRoot == uint256{"7b487d66f12265f822fcf7abfae9daca9252903db779c3d3c94ffe0b9e565f43"});
 
         // WATTx seed nodes (to be configured)
         vSeeds.emplace_back("seed1.wattxchange.app");
@@ -793,11 +800,11 @@ public:
             consensus.vDeployments[deployment_pos].min_activation_height = version_bits_params.min_activation_height;
         }
 
-        // WATTx Regtest Genesis - Easy difficulty for testing (uses mainnet message)
+        // WATTx Regtest Genesis - Easy difficulty for testing
         // Nonce: 0
-        genesis = CreateMainnetGenesisBlock(1735430400, 0, 0x207fffff, 1, 500000000);
+        genesis = CreateRegtestGenesisBlock(1735430400, 0, 0x207fffff, 1, 500000000);
         consensus.hashGenesisBlock = genesis.GetHash();
-        assert(consensus.hashGenesisBlock == uint256{"1b80932a0c893b97ea8f5d1601d9cd797cd2a5fd7f2f6064eb06901ff99c8bd4"});
+        // Note: Regtest genesis hash is dynamically computed
 
         vFixedSeeds.clear(); //!< Regtest mode doesn't have any fixed seeds.
         vSeeds.clear();

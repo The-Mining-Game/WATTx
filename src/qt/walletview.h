@@ -22,7 +22,7 @@ class AddressBookPage;
 class CreateContract;
 class SendToContract;
 class CallContract;
-class QRCToken;
+class WRCToken;
 class StakePage;
 class MiningPage;
 class DelegationPage;
@@ -75,7 +75,7 @@ private:
     CreateContract* createContractPage;
     SendToContract* sendToContractPage;
     CallContract* callContractPage;
-    QRCToken* QRCTokenPage;
+    WRCToken* WRCTokenPage;
     StakePage *stakePage;
     MiningPage *miningPage;
     DelegationPage* delegationPage;

@@ -663,12 +663,11 @@ void MiningPage::startMining()
                     logToConsole(tr("Got template for height %1").arg(height));
                 }, Qt::QueuedConnection);
 
-                // Create coinbase transaction paying to mining address
+                // Create coinbase transaction with all outputs from template (including gas refunds)
                 CMutableTransaction coinbaseTx;
                 coinbaseTx.vin.resize(1);
                 coinbaseTx.vin[0].prevout.SetNull();
                 coinbaseTx.vin[0].scriptSig = CScript() << height << OP_0;
-                coinbaseTx.vout.resize(1);
 
                 // Decode mining address to script
                 CTxDestination dest = DecodeDestination(address.toStdString());
@@ -679,8 +678,36 @@ void MiningPage::startMining()
                     std::this_thread::sleep_for(std::chrono::seconds(5));
                     continue;
                 }
-                coinbaseTx.vout[0].scriptPubKey = GetScriptForDestination(dest);
-                coinbaseTx.vout[0].nValue = coinbaseValue;
+
+                // WATTx: Use coinbaseoutputs from template to include gas refunds
+                if (templateVal.exists("coinbaseoutputs") && templateVal["coinbaseoutputs"].isArray()) {
+                    const UniValue& outputs = templateVal["coinbaseoutputs"];
+                    coinbaseTx.vout.resize(outputs.size());
+                    for (size_t i = 0; i < outputs.size(); i++) {
+                        const UniValue& out = outputs[i];
+                        if (i == 0) {
+                            // First output goes to mining address
+                            coinbaseTx.vout[0].scriptPubKey = GetScriptForDestination(dest);
+                            coinbaseTx.vout[0].nValue = coinbaseValue;
+                        } else {
+                            // Other outputs (gas refunds) use template values
+                            coinbaseTx.vout[i].nValue = out["value"].getInt<int64_t>();
+                            std::string scriptHex = out["scriptPubKey"].get_str();
+                            std::vector<unsigned char> scriptData = ParseHex(scriptHex);
+                            coinbaseTx.vout[i].scriptPubKey = CScript(scriptData.begin(), scriptData.end());
+                        }
+                    }
+                    if (outputs.size() > 1) {
+                        QMetaObject::invokeMethod(this, [this, outputs]() {
+                            logToConsole(tr("Including %1 gas refund outputs in coinbase").arg(outputs.size() - 1));
+                        }, Qt::QueuedConnection);
+                    }
+                } else {
+                    // Fallback: simple coinbase with just mining reward
+                    coinbaseTx.vout.resize(1);
+                    coinbaseTx.vout[0].scriptPubKey = GetScriptForDestination(dest);
+                    coinbaseTx.vout[0].nValue = coinbaseValue;
+                }
 
                 // Create block
                 CBlock block;

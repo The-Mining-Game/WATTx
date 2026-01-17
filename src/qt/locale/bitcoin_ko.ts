@@ -442,12 +442,12 @@ Signing is only possible with addresses of the type 'legacy'.</source>
         <translation type="unfinished">거래 기록 조회</translation>
     </message>
     <message>
-        <source>&amp;QRC Tokens</source>
-        <translation type="unfinished">QRC 토큰</translation>
+        <source>&amp;WRC Tokens</source>
+        <translation type="unfinished">WRC 토큰</translation>
     </message>
     <message>
-        <source>QRC Tokens (send, receive or add Tokens in list)</source>
-        <translation type="unfinished">QRC 토큰 (입출금 또는 리스트에 추가)</translation>
+        <source>WRC Tokens (send, receive or add Tokens in list)</source>
+        <translation type="unfinished">WRC 토큰 (입출금 또는 리스트에 추가)</translation>
     </message>
     <message>
         <source>E&amp;xit</source>
@@ -2822,7 +2822,7 @@ BIP70의 광범위한 보안 결함으로 인해 모든 가맹점에서는 지�
     </message>
 </context>
 <context>
-    <name>QRCToken</name>
+    <name>WRCToken</name>
     <message>
         <source>Form</source>
         <translation type="unfinished">서식</translation>

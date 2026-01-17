@@ -5,9 +5,11 @@
 #include <stratum/stratum_server.h>
 
 #include <arith_uint256.h>
+#include <chainparams.h>
 #include <consensus/merkle.h>
 #include <interfaces/mining.h>
 #include <logging.h>
+#include <node/randomx_miner.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <random.h>
@@ -68,9 +70,12 @@ bool StratumServer::Start(const StratumConfig& config, interfaces::Mining* minin
         return false;
     }
 
-    // Set socket options
+    // Set socket options for address reuse
     int opt = 1;
     setsockopt(m_listen_socket, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+#ifdef SO_REUSEPORT
+    setsockopt(m_listen_socket, SOL_SOCKET, SO_REUSEPORT, (const char*)&opt, sizeof(opt));
+#endif
 
     // Bind to address
     struct sockaddr_in server_addr;
@@ -233,22 +238,30 @@ void StratumServer::ClientThread(int client_id) {
         if (bytes_read > 0) {
             buffer[bytes_read] = '\0';
 
-            std::lock_guard<std::mutex> lock(m_clients_mutex);
-            auto it = m_clients.find(client_id);
-            if (it == m_clients.end()) break;
+            // Collect complete messages while holding the lock
+            std::vector<std::string> messages;
+            {
+                std::lock_guard<std::mutex> lock(m_clients_mutex);
+                auto it = m_clients.find(client_id);
+                if (it == m_clients.end()) break;
 
-            it->second->recv_buffer += buffer;
-            it->second->last_activity = GetTime();
+                it->second->recv_buffer += buffer;
+                it->second->last_activity = GetTime();
 
-            // Process complete messages (newline-delimited JSON)
-            size_t pos;
-            while ((pos = it->second->recv_buffer.find('\n')) != std::string::npos) {
-                std::string message = it->second->recv_buffer.substr(0, pos);
-                it->second->recv_buffer.erase(0, pos + 1);
-
-                if (!message.empty()) {
-                    HandleMessage(client_id, message);
+                // Extract complete messages (newline-delimited JSON)
+                size_t pos;
+                while ((pos = it->second->recv_buffer.find('\n')) != std::string::npos) {
+                    std::string message = it->second->recv_buffer.substr(0, pos);
+                    it->second->recv_buffer.erase(0, pos + 1);
+                    if (!message.empty()) {
+                        messages.push_back(message);
+                    }
                 }
+            }
+
+            // Process messages without holding the lock to avoid deadlock
+            for (const auto& message : messages) {
+                HandleMessage(client_id, message);
             }
         } else if (bytes_read == 0) {
             // Connection closed
@@ -311,14 +324,19 @@ void StratumServer::HandleMessage(int client_id, const std::string& message) {
                 id = request["id"].write();
             }
         }
-        if (request.exists("params") && request["params"].isArray()) {
-            const UniValue& arr = request["params"];
-            for (size_t i = 0; i < arr.size(); i++) {
-                if (arr[i].isStr()) {
-                    params.push_back(arr[i].get_str());
-                } else {
-                    params.push_back(arr[i].write());
+        if (request.exists("params")) {
+            if (request["params"].isArray()) {
+                const UniValue& arr = request["params"];
+                for (size_t i = 0; i < arr.size(); i++) {
+                    if (arr[i].isStr()) {
+                        params.push_back(arr[i].get_str());
+                    } else {
+                        params.push_back(arr[i].write());
+                    }
                 }
+            } else if (request["params"].isObject()) {
+                // XMRig sends params as JSON object, store as single JSON string
+                params.push_back(request["params"].write());
             }
         }
 
@@ -328,7 +346,8 @@ void StratumServer::HandleMessage(int client_id, const std::string& message) {
             HandleSubscribe(client_id, id, params);
         } else if (method == "mining.authorize") {
             HandleAuthorize(client_id, id, params);
-        } else if (method == "mining.submit") {
+        } else if (method == "mining.submit" || method == "submit") {
+            // XMRig uses "submit" without "mining." prefix
             HandleSubmit(client_id, id, params);
         } else if (method == "login" || method == "getjob") {
             // XMRig-style login
@@ -404,6 +423,11 @@ void StratumServer::HandleAuthorize(int client_id, const std::string& id, const 
 
 void StratumServer::HandleGetJob(int client_id, const std::string& id, const std::vector<std::string>& params) {
     // XMRig-style login/getjob - combined subscribe+authorize+getjob
+    LogPrintf("Stratum: HandleGetJob called for client %d, id=%s, params.size=%d\n", client_id, id, params.size());
+    for (size_t i = 0; i < params.size(); i++) {
+        LogPrintf("Stratum: params[%d]=%s\n", i, params[i].substr(0, 200));
+    }
+
     std::string login;
     std::string pass;
 
@@ -420,16 +444,22 @@ void StratumServer::HandleGetJob(int client_id, const std::string& id, const std
         }
     }
 
+    LogPrintf("Stratum: HandleGetJob - parsed login=%s\n", login.empty() ? "(empty)" : login.substr(0, 50));
+
     std::string session_id;
     {
         std::lock_guard<std::mutex> lock(m_clients_mutex);
         auto it = m_clients.find(client_id);
-        if (it == m_clients.end()) return;
+        if (it == m_clients.end()) {
+            LogPrintf("Stratum: HandleGetJob - client %d not found!\n", client_id);
+            return;
+        }
         it->second->subscribed = true;
         it->second->authorized = true;
         it->second->wallet_address = login.empty() ? m_config.default_wallet : login;
         it->second->worker_name = "xmrig";
         session_id = it->second->session_id;
+        LogPrintf("Stratum: HandleGetJob - client %d configured, session_id=%s\n", client_id, session_id.substr(0, 16));
     }
 
     // Build XMRig-style response with job
@@ -438,6 +468,7 @@ void StratumServer::HandleGetJob(int client_id, const std::string& id, const std
         std::lock_guard<std::mutex> lock(m_jobs_mutex);
         job = m_current_job;
     }
+    LogPrintf("Stratum: HandleGetJob - got job %s at height %d, blob_size=%d\n", job.job_id, job.height, job.blob.size());
 
     std::ostringstream response;
     response << "{\"id\":" << id << ",\"jsonrpc\":\"2.0\",\"result\":{";
@@ -446,13 +477,16 @@ void StratumServer::HandleGetJob(int client_id, const std::string& id, const std
     response << "\"blob\":\"" << job.blob << "\",";
     response << "\"job_id\":\"" << job.job_id << "\",";
     response << "\"target\":\"" << job.target << "\",";
+    response << "\"algo\":\"rx/0\",";  // RandomX algorithm
     response << "\"height\":" << job.height << ",";
     response << "\"seed_hash\":\"" << job.seed_hash << "\"";
     response << "},";
     response << "\"status\":\"OK\"";
     response << "},\"error\":null}\n";
 
-    SendToClient(client_id, response.str());
+    std::string resp = response.str();
+    LogPrintf("Stratum: HandleGetJob - sending response (%d bytes): %s\n", resp.size(), resp.substr(0, 300));
+    SendToClient(client_id, resp);
     LogPrintf("Stratum: Client %d logged in (XMRig style)\n", client_id);
 }
 
@@ -536,26 +570,83 @@ void StratumServer::CreateNewJob() {
         // Store the block template for later submission
         job.block_template = std::shared_ptr<interfaces::BlockTemplate>(block_template.release());
 
-        // Create blob (serialized block header for mining)
-        DataStream ss{};
-        ss << block.nVersion;
-        ss << block.hashPrevBlock;
-        ss << block.hashMerkleRoot;
-        ss << block.nTime;
-        ss << block.nBits;
-        ss << block.nNonce;
-        job.blob = HexStr(ss);
+        // Create XMRig-compatible blob (76 bytes for Monero format)
+        // XMRig expects nonce at bytes 39-42, we'll use this as a nonce generator
+        // Structure:
+        // - bytes 0-34: first 35 bytes of block header hash
+        // - bytes 35-38: timestamp (4 bytes)
+        // - bytes 39-42: nonce placeholder (XMRig modifies here)
+        // - bytes 43-75: remaining 33 bytes of data
+
+        // Get the real serialized header for validation
+        auto fullHeader = node::RandomXMiner::SerializeBlockHeader(block);
+
+        // Create Monero-compatible blob for XMRig
+        std::vector<unsigned char> miningBlob(76, 0);
+
+        // Fill with deterministic data derived from block
+        // Use prevBlock hash (32 bytes) for first part
+        std::memcpy(miningBlob.data(), block.hashPrevBlock.data(), 32);
+
+        // Bytes 32-34: version (3 bytes)
+        miningBlob[32] = block.nVersion & 0xFF;
+        miningBlob[33] = (block.nVersion >> 8) & 0xFF;
+        miningBlob[34] = (block.nVersion >> 16) & 0xFF;
+
+        // Bytes 35-38: timestamp
+        miningBlob[35] = block.nTime & 0xFF;
+        miningBlob[36] = (block.nTime >> 8) & 0xFF;
+        miningBlob[37] = (block.nTime >> 16) & 0xFF;
+        miningBlob[38] = (block.nTime >> 24) & 0xFF;
+
+        // Bytes 39-42: nonce placeholder (will be modified by XMRig)
+        miningBlob[39] = 0;
+        miningBlob[40] = 0;
+        miningBlob[41] = 0;
+        miningBlob[42] = 0;
+
+        // Bytes 43-75: merkle root (first 33 bytes)
+        std::memcpy(miningBlob.data() + 43, block.hashMerkleRoot.data(), 32);
+        miningBlob[75] = block.nBits & 0xFF;
+
+        job.blob = HexStr(miningBlob);
 
         // Calculate target from bits
         arith_uint256 target;
         target.SetCompact(block.nBits);
-        job.target = target.GetHex();
-        // For XMRig, use truncated target (last 8 bytes reversed)
-        if (job.target.length() >= 16) {
-            job.target = job.target.substr(job.target.length() - 16);
-        }
 
-        // Seed hash (use genesis hash for RandomX)
+        // XMRig target format:
+        // - 4-8 bytes in little-endian hex
+        // - Represents the threshold: if hash (as 256-bit LE number) <= target, share is valid
+        // - Lower target = higher difficulty
+        //
+        // Our target is a 256-bit number with many leading zeros.
+        // nBits format: 0xNNXXXXXX where NN is exponent, XXXXXX is mantissa
+        // target = mantissa * 2^(8*(exponent-3))
+        //
+        // For XMRig, we need to provide a target that when the hash is below it,
+        // represents valid work. Since we're using XMRig as a nonce generator,
+        // we'll use an easier target so it submits frequently, then validate ourselves.
+        //
+        // Set a moderate share difficulty - let XMRig submit every few seconds
+        // Easy target = high value like "ffffffff" means almost any hash is accepted
+        // Medium target = something like "00000fff00000000"
+        //
+        // Use a very easy share target so XMRig submits frequently
+        // We do the real validation server-side with the actual WATTx target
+        // "b88d0600" = difficulty ~1000, shares every few seconds
+        // "00ffffff" = difficulty ~16M, shares every ~10 seconds at 2kH/s
+        // "ffffffff" = difficulty 1, instant shares
+        job.target = "b88d0600";  // ~1000 difficulty - XMRig submits frequently
+
+        LogPrintf("Stratum: Real target (nBits=0x%08x) = %s, share target = %s\n",
+                  block.nBits, target.GetHex(), job.target);
+
+        LogPrintf("Stratum: Created job blob=%d bytes, target=%s, fullHeader=%d bytes\n",
+                  miningBlob.size(), job.target, fullHeader.size());
+
+        // Seed hash - for RandomX, use genesis block hash as key
+        // Note: The actual seed should be based on epoch, but for simplicity use prev block
         job.seed_hash = block.hashPrevBlock.GetHex();
 
         // Store job
@@ -597,6 +688,7 @@ void StratumServer::SendJob(int client_id, const StratumJob& job) {
     msg << "\"blob\":\"" << job.blob << "\",";
     msg << "\"job_id\":\"" << job.job_id << "\",";
     msg << "\"target\":\"" << job.target << "\",";
+    msg << "\"algo\":\"rx/0\",";  // RandomX algorithm
     msg << "\"height\":" << job.height << ",";
     msg << "\"seed_hash\":\"" << job.seed_hash << "\"";
     msg << "}}\n";
@@ -623,7 +715,7 @@ bool StratumServer::ValidateAndSubmitShare(int client_id, const std::string& job
     }
 
     try {
-        // Parse nonce
+        // Parse nonce (XMRig sends 4 bytes in little-endian hex)
         uint32_t nonce = 0;
         if (nonce_hex.length() == 8) {
             // 4 bytes hex = 8 chars, little endian
@@ -634,19 +726,46 @@ bool StratumServer::ValidateAndSubmitShare(int client_id, const std::string& job
             }
         }
 
+        LogPrintf("Stratum: Validating share - job_id=%s nonce=0x%08x result=%s\n",
+                  job_id, nonce, result_hex.substr(0, 16));
+
         // Get block from template for validation
         CBlock block = job.block_template->getBlock();
         block.nNonce = nonce;
 
-        // Get block hash
-        uint256 hash = block.GetHash();
+        // Ensure RandomX is initialized with the genesis block hash
+        const CChainParams& chainParams = Params();
+        uint256 genesisHash = chainParams.GenesisBlock().GetHash();
+
+        auto& miner = node::GetRandomXMiner();
+        if (!miner.IsInitialized()) {
+            LogPrintf("Stratum: Initializing RandomX for validation...\n");
+            if (!miner.Initialize(genesisHash.data(), 32, node::RandomXMiner::Mode::LIGHT)) {
+                LogPrintf("Stratum: Failed to initialize RandomX\n");
+                return false;
+            }
+        }
+
+        // Compute RandomX hash of the full serialized header
+        auto headerData = node::RandomXMiner::SerializeBlockHeader(block);
+
+        uint256 hash;
+        miner.CalculateHash(headerData.data(), headerData.size(), hash.data());
 
         // Check against target
         arith_uint256 target;
         target.SetCompact(block.nBits);
 
-        if (UintToArith256(hash) > target) {
-            LogPrintf("Stratum: Share above target\n");
+        arith_uint256 hashArith = UintToArith256(hash);
+
+        LogPrintf("Stratum: Hash=%s target=%s\n",
+                  hash.GetHex().substr(0, 16) + "...",
+                  target.GetHex().substr(0, 16) + "...");
+
+        if (hashArith > target) {
+            // Share above target - this is expected most of the time since
+            // XMRig is solving a different puzzle
+            LogPrintf("Stratum: Share above target (hash > target)\n");
             return false;
         }
 
