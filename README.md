@@ -10,11 +10,11 @@ Mine using any of 7 supported algorithms:
 |-----------|-----------------|
 | SHA256d | Bitcoin ASICs |
 | Scrypt | Litecoin miners |
-| Ethash | Ethereum Classic miners |
 | RandomX | CPU miners (Monero) |
+| Ethash | Ethereum Classic miners |
 | Equihash | Zcash miners |
-| X11 | Dash miners |
 | kHeavyHash | Kaspa miners |
+| X11 | Dash miners |
 
 ### Privacy Features
 - **Cross-Chain Privacy Pools** - Anonymous cross-chain USDT transfers with Monero-style privacy
