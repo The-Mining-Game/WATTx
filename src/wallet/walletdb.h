@@ -31,6 +31,12 @@ class CTokenTx;
 class CDelegationInfo;
 class CSuperStakerInfo;
 
+// Privacy forward declarations
+struct CStealthAddressData;
+struct CStealthPayment;
+struct CPrivacyOutputInfo;
+struct CFcmpOutputInfo;
+
 /**
  * Overview of wallet database classes:
  *
@@ -97,6 +103,16 @@ extern const std::string TOKENTX;
 extern const std::string CONTRACTDATA;
 extern const std::string DELEGATION;
 extern const std::string SUPERSTAKER;
+
+// Privacy database keys
+extern const std::string STEALTH_ADDR;
+extern const std::string STEALTH_PAYMENT;
+extern const std::string STEALTH_KEY;
+extern const std::string PRIVACY_OUTPUT;
+extern const std::string PRIVACY_KEYIMAGE;
+extern const std::string FCMP_OUTPUT;
+extern const std::string FCMP_KEYIMAGE;
+extern const std::string FCMP_SPENT_KI;
 
 // Keys in this set pertain only to the legacy wallet (LegacyScriptPubKeyMan) and are removed during migration from legacy to descriptors.
 extern const std::unordered_set<std::string> LEGACY_TYPES;
@@ -239,6 +255,9 @@ public:
     WalletBatch(const WalletBatch&) = delete;
     WalletBatch& operator=(const WalletBatch&) = delete;
 
+    //! Access the underlying database batch (for prefix cursor iteration)
+    DatabaseBatch& GetBatch() { return *m_batch; }
+
     bool WriteName(const std::string& strAddress, const std::string& strName);
     bool EraseName(const std::string& strAddress);
 
@@ -308,6 +327,21 @@ public:
     bool WriteContractData(const std::string &address, const std::string &key, const std::string &value);
     /// Erase contract data tuple from wallet database
     bool EraseContractData(const std::string &address, const std::string &key);
+
+    //! Privacy persistence methods
+    bool WriteStealthAddress(const uint256& hash, const CStealthAddressData& data);
+    bool EraseStealthAddress(const uint256& hash);
+    bool WriteStealthPayment(const COutPoint& outpoint, const CStealthPayment& payment);
+    bool EraseStealthPayment(const COutPoint& outpoint);
+    bool WriteStealthKey(const COutPoint& outpoint, const std::vector<unsigned char>& encKey);
+    bool ReadStealthKey(const COutPoint& outpoint, std::vector<unsigned char>& encKey);
+    bool WritePrivacyOutput(const COutPoint& outpoint, const CPrivacyOutputInfo& info);
+    bool ErasePrivacyOutput(const COutPoint& outpoint);
+    bool WritePrivacyKeyImage(const uint256& hash, const COutPoint& outpoint);
+    bool WriteFcmpOutput(const COutPoint& outpoint, const CFcmpOutputInfo& info);
+    bool EraseFcmpOutput(const COutPoint& outpoint);
+    bool WriteFcmpKeyImage(const uint256& hash, const COutPoint& outpoint);
+    bool WriteFcmpSpentKeyImage(const uint256& hash, const uint256& txHash);
 
     DBErrors LoadWallet(CWallet* pwallet);
 

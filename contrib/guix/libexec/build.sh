@@ -258,7 +258,7 @@ mkdir -p "$DISTSRC"
     case "$HOST" in
         *mingw*)
             cmake --build build -j "$JOBS" -t deploy ${V:+--verbose}
-            mv build/qtum-win64-setup.exe "${OUTDIR}/${DISTNAME}-win64-setup-unsigned.exe"
+            mv build/wattx-win64-setup.exe "${OUTDIR}/${DISTNAME}-win64-setup-unsigned.exe"
             ;;
     esac
 
@@ -303,9 +303,9 @@ mkdir -p "$DISTSRC"
                 ;;
         esac
 
-        # copy over the example qtum.conf file. if contrib/devtools/gen-bitcoin-conf.sh
-        # has not been run before buildling, this file will be a stub
-        cp "${DISTSRC}/share/examples/qtum.conf" "${DISTNAME}/"
+        # copy over the example wattx.conf file. if contrib/devtools/gen-bitcoin-conf.sh
+        # has not been run before building, this file will be a stub
+        cp "${DISTSRC}/share/examples/wattx.conf" "${DISTNAME}/"
 
         cp -r "${DISTSRC}/share/rpcauth" "${DISTNAME}/share/"
 
@@ -368,7 +368,7 @@ mkdir -p "$DISTSRC"
             ;;
         *darwin*)
             cmake --build build --target deploy ${V:+--verbose}
-            mv build/dist/Qtum-Core.zip "${OUTDIR}/${DISTNAME}-${HOST}-unsigned.zip"
+            mv build/dist/WATTx-Core.zip "${OUTDIR}/${DISTNAME}-${HOST}-unsigned.zip"
             mkdir -p "unsigned-app-${HOST}"
             cp  --target-directory="unsigned-app-${HOST}" \
                 contrib/macdeploy/detached-sig-create.sh

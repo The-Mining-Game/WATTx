@@ -2943,6 +2943,14 @@ void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, c
     LOCK(cs_main);
     CNodeState *nodestate = State(pfrom.GetId());
 
+    LogPrintf("HeadersDirectFetchBlocks: last_header=%d CanDirectFetch=%d IBD=%d valid_tree=%d tip_work<header_work=%d inflight=%d peer=%d tip_work=%s header_work=%s\n",
+        last_header.nHeight, CanDirectFetch(), m_chainman.IsInitialBlockDownload(),
+        last_header.IsValid(BLOCK_VALID_TREE),
+        m_chainman.ActiveChain().Tip()->nChainWork < last_header.nChainWork,
+        (int)nodestate->vBlocksInFlight.size(), pfrom.GetId(),
+        m_chainman.ActiveChain().Tip()->nChainWork.ToString(),
+        last_header.nChainWork.ToString());
+
     if (CanDirectFetch() && last_header.IsValid(BLOCK_VALID_TREE) && m_chainman.ActiveChain().Tip()->nChainWork <= last_header.nChainWork) {
         std::vector<const CBlockIndex*> vToFetch;
         const CBlockIndex* pindexWalk{&last_header};
@@ -2992,6 +3000,39 @@ void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, c
                     // In any case, we want to download using a compact block, not a regular one
                     vGetData[0] = CInv(MSG_CMPCT_BLOCK, vGetData[0].hash);
                 }
+                MakeAndPushMessage(pfrom, NetMsgType::GETDATA, vGetData);
+            }
+        }
+    }
+
+    // During IBD, immediately request blocks using forward-walk from our tip.
+    // This is critical for PoS chains where CanDirectFetch() returns false
+    // (tip is old), and peers may disconnect before SendMessages can run.
+    if (!CanDirectFetch() && m_chainman.IsInitialBlockDownload() &&
+        last_header.IsValid(BLOCK_VALID_TREE) &&
+        m_chainman.ActiveChain().Tip()->nChainWork < last_header.nChainWork &&
+        nodestate->vBlocksInFlight.size() < MAX_BLOCKS_IN_TRANSIT_PER_PEER) {
+
+        std::vector<const CBlockIndex*> vToDownload;
+        NodeId staller = -1;
+        FindNextBlocksToDownload(peer,
+            MAX_BLOCKS_IN_TRANSIT_PER_PEER - static_cast<int>(nodestate->vBlocksInFlight.size()),
+            vToDownload, staller);
+
+        if (!vToDownload.empty()) {
+            std::vector<CInv> vGetData;
+            for (const CBlockIndex* pindex : vToDownload) {
+                if (nodestate->vBlocksInFlight.size() >= MAX_BLOCKS_IN_TRANSIT_PER_PEER) break;
+                uint32_t nFetchFlags = GetFetchFlags(peer);
+                vGetData.emplace_back(MSG_BLOCK | nFetchFlags, pindex->GetBlockHash());
+                BlockRequested(pfrom.GetId(), *pindex);
+                LogDebug(BCLog::NET, "IBD: requesting block %s (%d) from peer=%d\n",
+                        pindex->GetBlockHash().ToString(), pindex->nHeight, pfrom.GetId());
+            }
+            if (!vGetData.empty()) {
+                LogDebug(BCLog::NET, "IBD: direct fetching %zu blocks from tip toward %s (%d) peer=%d\n",
+                         vGetData.size(), last_header.GetBlockHash().ToString(),
+                         last_header.nHeight, pfrom.GetId());
                 MakeAndPushMessage(pfrom, NetMsgType::GETDATA, vGetData);
             }
         }
@@ -3169,10 +3210,13 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
     // At this point, the headers connect to something in our block index.
     // Do anti-DoS checks to determine if we should process or store for later
     // processing.
+    LogPrintf("ProcessHeadersMessage: already_validated_work=%d headers_count=%zu chain_start=%d peer=%d\n",
+        already_validated_work, headers.size(), chain_start_header ? chain_start_header->nHeight : -1, pfrom.GetId());
     if (!already_validated_work && TryLowWorkHeadersSync(peer, pfrom,
                 chain_start_header, headers)) {
         // If we successfully started a low-work headers sync, then there
         // should be no headers to process any further.
+        LogPrintf("ProcessHeadersMessage: LOW WORK intercepted! Headers cleared for peer=%d\n", pfrom.GetId());
         Assume(headers.empty());
         return;
     }

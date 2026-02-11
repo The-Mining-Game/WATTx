@@ -30,6 +30,7 @@
 #include <util/translation.h>
 #include <wallet/coincontrol.h>
 #include <wallet/wallet.h> // for CRecipient
+#include <privacy/stealth.h>
 #include <qt/qtumhwitool.h>
 
 #include <stdint.h>
@@ -261,7 +262,17 @@ void WalletModel::updateWatchOnlyFlag(bool fHaveWatchonly)
 
 bool WalletModel::validateAddress(const QString& address) const
 {
-    return IsValidDestinationString(address.toStdString());
+    // Accept standard addresses
+    if (IsValidDestinationString(address.toStdString())) {
+        return true;
+    }
+    // Accept stealth addresses (sx1... prefix)
+    std::string addrStr = address.toStdString();
+    if (addrStr.substr(0, 3) == "sx1") {
+        auto stealthAddr = privacy::CStealthAddress::FromString(addrStr);
+        return stealthAddr.has_value();
+    }
+    return false;
 }
 
 WalletModel::SendCoinsReturn WalletModel::prepareTransaction(WalletModelTransaction &transaction, const CCoinControl& coinControl)
@@ -400,6 +411,52 @@ void WalletModel::sendCoins(WalletModelTransaction& transaction)
     }
 
     checkBalanceChanged(m_wallet->getBalances()); // update balance immediately, otherwise there could be a short noticeable delay until pollBalanceChanged hits
+}
+
+WalletModel::PrivateSendResult WalletModel::sendPrivateTransaction(
+    const QList<SendCoinsRecipient>& recipients)
+{
+    PrivateSendResult result;
+    result.success = false;
+    result.fee = 0;
+
+    if (recipients.isEmpty()) {
+        result.error = tr("No recipients specified");
+        return result;
+    }
+
+    // Build recipient list for privacy send
+    std::vector<std::pair<std::string, CAmount>> privRecipients;
+    for (const auto& rcp : recipients) {
+        privRecipients.push_back({rcp.address.toStdString(), rcp.amount});
+    }
+
+    // Call the wallet interface for multi-recipient private send
+    std::string txid, error;
+    CAmount fee = 0;
+    if (!m_wallet->sendPrivateBatch(privRecipients, txid, fee, error)) {
+        result.error = QString::fromStdString(error);
+        return result;
+    }
+
+    result.success = true;
+    result.txid = QString::fromStdString(txid);
+    result.fee = fee;
+
+    // Update address book for recipients
+    for (const auto& rcp : recipients) {
+        std::string strAddress = rcp.address.toStdString();
+        std::string strLabel = rcp.label.toStdString();
+        if (!strLabel.empty()) {
+            CTxDestination dest = DecodeDestination(strAddress);
+            if (IsValidDestination(dest)) {
+                m_wallet->setAddressBook(dest, strLabel, wallet::AddressPurpose::SEND);
+            }
+        }
+    }
+
+    checkBalanceChanged(m_wallet->getBalances());
+    return result;
 }
 
 OptionsModel* WalletModel::getOptionsModel() const

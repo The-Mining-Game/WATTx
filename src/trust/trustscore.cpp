@@ -69,18 +69,6 @@ TrustTier ValidatorInfo::GetTrustTier(const Consensus::Params& params) const {
     return TrustTier::NONE;
 }
 
-int ValidatorInfo::GetRewardMultiplier(const Consensus::Params& params) const {
-    TrustTier tier = GetTrustTier(params);
-
-    switch (tier) {
-        case TrustTier::PLATINUM: return params.nPlatinumRewardMultiplier;
-        case TrustTier::GOLD:     return params.nGoldRewardMultiplier;
-        case TrustTier::SILVER:   return params.nSilverRewardMultiplier;
-        case TrustTier::BRONZE:   return params.nBronzeRewardMultiplier;
-        default:                  return 0; // No reward if not eligible
-    }
-}
-
 bool ValidatorInfo::MeetsMinimumStake(const Consensus::Params& params) const {
     return stakeAmount >= params.nMinValidatorStake;
 }
@@ -271,14 +259,6 @@ TrustTier TrustScoreManager::GetValidatorTier(const CKeyID& validatorId) const {
         return TrustTier::NONE;
     }
     return info->GetTrustTier(consensusParams);
-}
-
-int TrustScoreManager::GetValidatorRewardMultiplier(const CKeyID& validatorId) const {
-    const ValidatorInfo* info = GetValidator(validatorId);
-    if (!info) {
-        return 0;
-    }
-    return info->GetRewardMultiplier(consensusParams);
 }
 
 bool TrustScoreManager::IsValidatorEligible(const CKeyID& validatorId) const {

@@ -71,6 +71,7 @@
 #include <wallet/types.h>
 #include <wallet/walletdb.h>
 #include <wallet/walletutil.h>
+#include <privacy/fcmp_consensus.h>
 
 #include <algorithm>
 #include <cassert>
@@ -1609,6 +1610,14 @@ void CWallet::blockConnected(ChainstateRole role, const interfaces::BlockInfo& b
     for (size_t index = 0; index < block.data->vtx.size(); index++) {
         SyncTransaction(block.data->vtx[index], TxStateConfirmed{block.hash, block.height, static_cast<int>(index), hasDelegation});
         transactionRemovedFromMempool(block.data->vtx[index], MemPoolRemovalReason::BLOCK);
+    }
+
+    // Scan block for privacy payments (stealth and FCMP)
+    if (m_stealth_manager) {
+        m_stealth_manager->ScanBlockForPayments(*block.data, block.height);
+    }
+    if (m_fcmp_manager) {
+        m_fcmp_manager->ScanBlockForFcmpOutputs(*block.data, block.height);
     }
 }
 
@@ -3601,6 +3610,20 @@ std::shared_ptr<CWallet> CWallet::Create(WalletContext& context, const std::stri
         walletInstance->WalletLogPrintf("setKeyPool.size() = %u\n",      walletInstance->GetKeyPoolSize());
         walletInstance->WalletLogPrintf("mapWallet.size() = %u\n",       walletInstance->mapWallet.size());
         walletInstance->WalletLogPrintf("m_address_book.size() = %u\n",  walletInstance->m_address_book.size());
+    }
+
+    // Initialize privacy managers (stealth addresses, FCMP, ring signatures)
+    walletInstance->InitPrivacyManagers();
+
+    // Connect the wallet's FCMP manager to the global consensus curve tree
+    if (privacy::IsFcmpStateAvailable()) {
+        CFcmpWalletManager* fcmp_mgr = walletInstance->GetFcmpWalletManager();
+        if (fcmp_mgr) {
+            auto global_tree = privacy::GetFcmpState().GetCurveTree();
+            fcmp_mgr->SetCurveTree(global_tree);
+            walletInstance->WalletLogPrintf("FCMP: Connected wallet to global curve tree (size=%u)\n",
+                global_tree ? global_tree->GetOutputCount() : 0);
+        }
     }
 
     return walletInstance;

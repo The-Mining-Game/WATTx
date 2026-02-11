@@ -11,7 +11,9 @@ namespace fcmp {
 
 std::vector<uint8_t> FcmpProver::GenerateProof(
     const curvetree::OutputTuple& output,
-    uint64_t leaf_index
+    uint64_t leaf_index,
+    const ed25519::Scalar& secret_key,
+    const ed25519::Scalar& rerandomizer
 ) {
     // Get the branch (Merkle path) for this output
     auto branch_opt = m_tree->GetBranch(leaf_index);
@@ -62,14 +64,16 @@ std::vector<uint8_t> FcmpProver::GenerateProof(
     std::vector<uint8_t> proof(max_proof_size);
     size_t actual_size = 0;
 
-    // Generate proof
+    // Generate proof with secret key and rerandomizer
     int32_t result = fcmp_prove(
         proof.data(),
         &actual_size,
         max_proof_size,
         root.data.data(),
         output_bytes.data(),
-        &fcmp_branch
+        &fcmp_branch,
+        secret_key.data.data(),
+        rerandomizer.data.data()
     );
 
     if (result != FCMP_SUCCESS) {

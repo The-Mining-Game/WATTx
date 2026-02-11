@@ -1,0 +1,156 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>PrivacyPage</class>
+ <widget class="QWidget" name="PrivacyPage">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>760</width>
+    <height>580</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>Privacy Dashboard</string>
+  </property>
+  <layout class="QVBoxLayout" name="mainLayout">
+   <property name="leftMargin"><number>20</number></property>
+   <property name="topMargin"><number>10</number></property>
+   <property name="rightMargin"><number>20</number></property>
+   <property name="bottomMargin"><number>10</number></property>
+
+   <!-- Balance Section -->
+   <item>
+    <layout class="QGridLayout" name="balanceGrid">
+     <item row="0" column="0">
+      <widget class="QLabel" name="labelTransparentTitle">
+       <property name="text"><string>Transparent Balance:</string></property>
+       <property name="font"><font><bold>true</bold></font></property>
+      </widget>
+     </item>
+     <item row="0" column="1">
+      <widget class="QLabel" name="labelTransparentBalance">
+       <property name="text"><string>0.00000000 WTX</string></property>
+      </widget>
+     </item>
+     <item row="1" column="0">
+      <widget class="QLabel" name="labelPrivateTitle">
+       <property name="text"><string>Private Balance (Ring-CT):</string></property>
+       <property name="font"><font><bold>true</bold></font></property>
+      </widget>
+     </item>
+     <item row="1" column="1">
+      <widget class="QLabel" name="labelPrivateBalance">
+       <property name="text"><string>0.00000000 WTX</string></property>
+      </widget>
+     </item>
+     <item row="2" column="0">
+      <widget class="QLabel" name="labelFcmpTitle">
+       <property name="text"><string>FCMP Balance:</string></property>
+       <property name="font"><font><bold>true</bold></font></property>
+      </widget>
+     </item>
+     <item row="2" column="1">
+      <widget class="QLabel" name="labelFcmpBalance">
+       <property name="text"><string>0.00000000 WTX</string></property>
+      </widget>
+     </item>
+    </layout>
+   </item>
+
+   <!-- Shield Section -->
+   <item>
+    <layout class="QHBoxLayout" name="shieldLayout">
+     <item>
+      <widget class="QLabel" name="labelShieldAmount">
+       <property name="text"><string>Amount to shield:</string></property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLineEdit" name="shieldAmountEdit">
+       <property name="placeholderText"><string>0.00</string></property>
+       <property name="maximumWidth"><number>200</number></property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QComboBox" name="shieldTypeCombo">
+       <item><property name="text"><string>FCMP</string></property></item>
+       <item><property name="text"><string>Ring-CT</string></property></item>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="shieldButton">
+       <property name="text"><string>Shield Funds</string></property>
+      </widget>
+     </item>
+     <item><spacer name="shieldSpacer"><property name="orientation"><enum>Qt::Horizontal</enum></property></spacer></item>
+    </layout>
+   </item>
+
+   <!-- Private Outputs Section -->
+   <item>
+    <widget class="QLabel" name="labelOutputsTitle">
+     <property name="text"><string>Private Outputs</string></property>
+     <property name="font"><font><bold>true</bold></font></property>
+    </widget>
+   </item>
+   <item>
+    <widget class="QTreeWidget" name="outputsTree">
+     <property name="rootIsDecorated"><bool>false</bool></property>
+     <property name="alternatingRowColors"><bool>true</bool></property>
+     <property name="maximumHeight"><number>180</number></property>
+     <column><property name="text"><string>Type</string></property></column>
+     <column><property name="text"><string>Amount</string></property></column>
+     <column><property name="text"><string>Confirmations</string></property></column>
+     <column><property name="text"><string>Status</string></property></column>
+    </widget>
+   </item>
+
+   <!-- Stealth Addresses Section -->
+   <item>
+    <widget class="QLabel" name="labelAddressesTitle">
+     <property name="text"><string>Your Stealth Addresses</string></property>
+     <property name="font"><font><bold>true</bold></font></property>
+    </widget>
+   </item>
+   <item>
+    <layout class="QHBoxLayout" name="generateLayout">
+     <item>
+      <widget class="QLabel" name="labelNewAddress">
+       <property name="text"><string>Label:</string></property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLineEdit" name="stealthLabelEdit">
+       <property name="placeholderText"><string>Optional label for new address</string></property>
+       <property name="maximumWidth"><number>250</number></property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="generateStealthButton">
+       <property name="text"><string>Generate Stealth Address</string></property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="copyAddressButton">
+       <property name="text"><string>Copy Address</string></property>
+      </widget>
+     </item>
+     <item><spacer name="generateSpacer"><property name="orientation"><enum>Qt::Horizontal</enum></property></spacer></item>
+    </layout>
+   </item>
+   <item>
+    <widget class="QTreeWidget" name="stealthAddressTree">
+     <property name="rootIsDecorated"><bool>false</bool></property>
+     <property name="alternatingRowColors"><bool>true</bool></property>
+     <column><property name="text"><string>Label</string></property></column>
+     <column><property name="text"><string>Stealth Address</string></property></column>
+     <column><property name="text"><string>Created</string></property></column>
+    </widget>
+   </item>
+
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

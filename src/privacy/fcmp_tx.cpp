@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <privacy/fcmp_tx.h>
+#include <privacy/fcmp/fcmp_wrapper.h>
 #include <privacy/privacy.h>  // For IsKeyImageSpent
 #include <privacy/ed25519/ed25519_types.h>
 #include <privacy/ed25519/pedersen.h>
@@ -220,28 +221,19 @@ std::vector<CFcmpInput> CFcmpTransactionBuilder::BuildInputs() {
         ed25519::Scalar rerandomizer;
         fcmpInput.inputTuple = ReRandomizeInput(inputData.output, rerandomizer);
 
-        // Generate membership proof
-#ifdef HAVE_FCMP
+        // Generate membership proof via Rust FFI
         try {
+            fcmp::FcmpContext ctx;
             fcmp::FcmpProver prover(m_tree);
-            auto proofBytes = prover.GenerateProof(inputData.output, inputData.leafIndex);
+            auto proofBytes = prover.GenerateProof(
+                inputData.output, inputData.leafIndex,
+                inputData.secretKey, rerandomizer
+            );
             fcmpInput.membershipProof = CFcmpProof(std::move(proofBytes), m_tree->GetRoot());
         } catch (const std::exception& e) {
             // Proof generation failed
             return {};
         }
-#else
-        // Placeholder proof for testing without FCMP library
-        fcmpInput.membershipProof.version = 1;
-        fcmpInput.membershipProof.treeRoot = m_tree->GetRoot();
-        fcmpInput.membershipProof.proofData.resize(64, 0);
-        // Fill with hash of input data for deterministic testing
-        HashWriter proofHasher{};
-        proofHasher << inputData.leafIndex;
-        proofHasher << inputData.output.O.data;
-        uint256 proofHash = proofHasher.GetHash();
-        std::memcpy(fcmpInput.membershipProof.proofData.data(), proofHash.begin(), 32);
-#endif
 
         // Generate SA+L signature
         fcmpInput.salSignature = GenerateSALSignature(
@@ -308,31 +300,27 @@ bool VerifyFcmpInput(
         return false;
     }
 
-    // 4. Verify FCMP proof
-#ifdef HAVE_FCMP
-    fcmp::FcmpContext ctx;
-    fcmp::FcmpVerifier verifier(treeRoot);
+    // 4. Verify FCMP proof via Rust FFI
+    {
+        fcmp::FcmpContext ctx;
+        fcmp::FcmpVerifier verifier(treeRoot);
 
-    // Convert input tuple to FFI format
-    FcmpInput ffiInput;
-    std::memcpy(ffiInput.o_tilde, input.inputTuple.O_tilde.data.data(), 32);
-    std::memcpy(ffiInput.o_tilde + 32, input.inputTuple.O_tilde.data.data(), 32); // y coord placeholder
-    std::memcpy(ffiInput.i_tilde, input.inputTuple.I_tilde.data.data(), 32);
-    std::memcpy(ffiInput.i_tilde + 32, input.inputTuple.I_tilde.data.data(), 32);
-    std::memcpy(ffiInput.r, input.inputTuple.R.data.data(), 32);
-    std::memcpy(ffiInput.r + 32, input.inputTuple.R.data.data(), 32);
-    std::memcpy(ffiInput.c_tilde, input.inputTuple.C_tilde.data.data(), 32);
-    std::memcpy(ffiInput.c_tilde + 32, input.inputTuple.C_tilde.data.data(), 32);
+        // Convert input tuple to FFI format
+        FcmpInput ffiInput;
+        std::memset(&ffiInput, 0, sizeof(ffiInput));
+        std::memcpy(ffiInput.o_tilde, input.inputTuple.O_tilde.data.data(), 32);
+        std::memcpy(ffiInput.o_tilde + 32, input.inputTuple.O_tilde.data.data(), 32);
+        std::memcpy(ffiInput.i_tilde, input.inputTuple.I_tilde.data.data(), 32);
+        std::memcpy(ffiInput.i_tilde + 32, input.inputTuple.I_tilde.data.data(), 32);
+        std::memcpy(ffiInput.r, input.inputTuple.R.data.data(), 32);
+        std::memcpy(ffiInput.r + 32, input.inputTuple.R.data.data(), 32);
+        std::memcpy(ffiInput.c_tilde, input.inputTuple.C_tilde.data.data(), 32);
+        std::memcpy(ffiInput.c_tilde + 32, input.inputTuple.C_tilde.data.data(), 32);
 
-    if (!verifier.Verify(ffiInput, input.membershipProof.proofData)) {
-        return false;
+        if (!verifier.Verify(ffiInput, input.membershipProof.proofData)) {
+            return false;
+        }
     }
-#else
-    // Placeholder verification - check proof isn't empty
-    if (input.membershipProof.proofData.empty()) {
-        return false;
-    }
-#endif
 
     return true;
 }

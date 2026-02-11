@@ -4,6 +4,7 @@
 
 #include <wallet/privacy_wallet.h>
 #include <wallet/wallet.h>
+#include <wallet/walletdb.h>
 #include <hash.h>
 #include <logging.h>
 #include <script/script.h>
@@ -80,10 +81,15 @@ CPrivacyTransactionResult CPrivacyWalletManager::CreatePrivacyTransaction(
     // Add change output if needed
     CAmount change = inputTotal - totalOutput - params.fee;
     if (change > 0) {
-        // Create change output to self
-        // In production, would use a new stealth address from wallet
-        // For now, use first recipient address as placeholder
-        if (!recipients.empty()) {
+        // Create change output to our own stealth address
+        auto* stealthMgr = m_wallet->GetStealthAddressManager();
+        if (stealthMgr && stealthMgr->HasStealthAddresses()) {
+            auto addresses = stealthMgr->GetStealthAddresses();
+            if (!addresses.empty()) {
+                builder.AddOutput(addresses[0].address, change);
+            }
+        } else if (!recipients.empty()) {
+            // Fallback: use first recipient address (should not happen in practice)
             builder.AddOutput(recipients[0].first, change);
         }
     }
@@ -226,6 +232,13 @@ bool CPrivacyWalletManager::AddPrivacyOutput(const CPrivacyOutputInfo& output)
         m_keyImages[output.keyImageHash] = output.outpoint;
     }
 
+    // Persist immediately
+    WalletBatch batch(m_wallet->GetDatabase());
+    batch.WritePrivacyOutput(output.outpoint, output);
+    if (!output.keyImageHash.IsNull()) {
+        batch.WritePrivacyKeyImage(output.keyImageHash, output.outpoint);
+    }
+
     LogPrintf("Added privacy output: %s:%d, amount=%d\n",
               output.outpoint.hash.ToString(), output.outpoint.n, output.amount);
     return true;
@@ -240,6 +253,10 @@ bool CPrivacyWalletManager::MarkPrivacyOutputSpent(const COutPoint& outpoint, co
     }
 
     it->second.spent = true;
+
+    // Persist change
+    WalletBatch batch(m_wallet->GetDatabase());
+    batch.WritePrivacyOutput(outpoint, it->second);
 
     LogPrintf("Marked privacy output as spent: %s:%d in tx %s\n",
               outpoint.hash.ToString(), outpoint.n, spendingTx.ToString());
@@ -325,15 +342,66 @@ privacy::CKeyImage CPrivacyWalletManager::GenerateKeyImage(const CKey& privKey) 
 
 bool CPrivacyWalletManager::Load()
 {
-    // Stub - would load from wallet database
-    LogPrintf("Privacy wallet manager: load (stub)\n");
+    LOCK(cs_privacy);
+
+    WalletBatch batch(m_wallet->GetDatabase(), false);
+
+    // Load privacy outputs via prefix cursor
+    {
+        DataStream prefix;
+        prefix << DBKeys::PRIVACY_OUTPUT;
+        auto cursor = batch.GetBatch().GetNewPrefixCursor(prefix);
+        if (cursor) {
+            DataStream ssKey, ssValue;
+            while (cursor->Next(ssKey, ssValue) == DatabaseCursor::Status::MORE) {
+                std::string type;
+                ssKey >> type;
+                Txid hash;
+                uint32_t n;
+                ssKey >> hash;
+                ssKey >> n;
+
+                CPrivacyOutputInfo info;
+                ssValue >> info;
+                info.outpoint = COutPoint(hash, n);
+                m_privacyOutputs[info.outpoint] = info;
+
+                // Rebuild key image index from loaded outputs
+                if (!info.keyImageHash.IsNull()) {
+                    m_keyImages[info.keyImageHash] = info.outpoint;
+                }
+            }
+        }
+    }
+
+    LogPrintf("Privacy wallet manager: loaded %d outputs, %d key images\n",
+              m_privacyOutputs.size(), m_keyImages.size());
     return true;
 }
 
 bool CPrivacyWalletManager::Save()
 {
-    // Stub - would save to wallet database
-    LogPrintf("Privacy wallet manager: save (stub)\n");
+    LOCK(cs_privacy);
+
+    WalletBatch batch(m_wallet->GetDatabase());
+
+    // Save all privacy outputs
+    for (const auto& [outpoint, info] : m_privacyOutputs) {
+        if (!batch.WritePrivacyOutput(outpoint, info)) {
+            LogPrintf("Error: Failed to save privacy output to DB\n");
+            return false;
+        }
+    }
+
+    // Save key image mappings
+    for (const auto& [hash, outpoint] : m_keyImages) {
+        if (!batch.WritePrivacyKeyImage(hash, outpoint)) {
+            LogPrintf("Error: Failed to save privacy key image to DB\n");
+            return false;
+        }
+    }
+
+    LogPrintf("Privacy wallet manager: saved %d outputs\n", m_privacyOutputs.size());
     return true;
 }
 

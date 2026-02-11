@@ -99,22 +99,6 @@ bool CheckValidatorTrustTier(const CKeyID& validatorId, trust::TrustScoreManager
  */
 trust::TrustTier GetStakerTrustTier(const CScript& scriptPubKey, trust::TrustScoreManager& trustManager);
 
-/**
- * Calculate the block reward with trust tier multiplier applied
- * @param nBaseReward The base block reward in satoshis
- * @param tier The validator's trust tier
- * @param params Consensus parameters
- * @return The adjusted reward with tier multiplier
- */
-CAmount CalculateTieredBlockReward(CAmount nBaseReward, trust::TrustTier tier, const Consensus::Params& params);
-
-/**
- * Get the reward multiplier for a trust tier
- * @param tier The trust tier
- * @param params Consensus parameters
- * @return Multiplier as percentage (100 = 1.0x, 150 = 1.5x)
- */
-int GetTierRewardMultiplier(trust::TrustTier tier, const Consensus::Params& params);
 
 /**
  * Check if trust tier system is active at given height

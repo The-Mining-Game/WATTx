@@ -4,10 +4,13 @@
 
 #include <wallet/fcmp_wallet.h>
 #include <wallet/wallet.h>
+#include <wallet/walletdb.h>
+#include <privacy/fcmp/fcmp_wrapper.h>
 #include <privacy/ed25519/pedersen.h>
 #include <privacy/stealth.h>
 #include <hash.h>
 #include <logging.h>
+#include <script/script.h>
 #include <util/time.h>
 
 #include <algorithm>
@@ -164,11 +167,32 @@ CFcmpTransactionResult CFcmpWalletManager::CreateFcmpTransaction(
     // Add change output if needed
     if (changeAmount > 0) {
         // Get our own stealth address for change
-        // For now, create a simple change output
-        privacy::CPrivacyOutput changeOutput;
+        auto* stealthMgr = m_wallet->GetStealthAddressManager();
+        privacy::CStealthAddress changeAddr;
+        bool haveChangeAddr = false;
 
-        // Generate random key for change (we'll track this separately)
+        if (stealthMgr && stealthMgr->HasStealthAddresses()) {
+            auto addresses = stealthMgr->GetStealthAddresses();
+            if (!addresses.empty()) {
+                changeAddr = addresses[0].address;
+                haveChangeAddr = true;
+            }
+        }
+
+        // Generate stealth destination for change
+        privacy::CPrivacyOutput changeOutput;
         ed25519::Scalar changeBlinding = ed25519::Scalar::Random();
+
+        if (haveChangeAddr) {
+            CKey changeEphemeral;
+            changeEphemeral.MakeNewKey(true);
+            privacy::GenerateStealthDestination(
+                changeAddr,
+                changeEphemeral,
+                changeOutput.stealthOutput
+            );
+        }
+
         auto changeCommitment = ed25519::PedersenCommitment::CommitAmount(
             static_cast<uint64_t>(changeAmount),
             changeBlinding
@@ -185,8 +209,26 @@ CFcmpTransactionResult CFcmpWalletManager::CreateFcmpTransaction(
 
         result.privacyTx.privacyOutputs.push_back(changeOutput);
 
-        // TODO: Create proper change output with stealth address
-        // and add to our tracked outputs
+        // Track change output as our own FCMP output
+        if (haveChangeAddr) {
+            CFcmpOutputInfo changeInfo;
+            changeInfo.amount = changeAmount;
+            changeInfo.blinding = changeBlinding;
+            changeInfo.blockHeight = -1;
+            changeInfo.spent = false;
+            changeInfo.nTime = GetTime();
+
+            // Derive key for change using stealth protocol
+            std::optional<ed25519::Scalar> changePk;
+            changeInfo.outputTuple = CreateOutputTuple(changeAddr, changeAmount, changeInfo.blinding, changePk);
+            if (changePk) {
+                changeInfo.privKey = *changePk;
+            }
+
+            auto changeKI = GenerateKeyImage(changeInfo.privKey, changeInfo.outputTuple.O);
+            changeInfo.keyImageHash = changeKI.GetHash();
+            // Will be added after tx confirms
+        }
     }
 
     // Verify the transaction
@@ -282,29 +324,20 @@ CFcmpShieldResult CFcmpWalletManager::CreateShieldTransaction(
     result.standardTx = MakeTransactionRef(std::move(mtx));
     result.fee = fee;
 
-    // If this is our own stealth address, track the output
+    // Store output info in result for caller to persist after TX confirmation
+    result.outputTuple = outputTuple;
+    result.blinding = blinding;
+
     if (privKey) {
-        CFcmpOutputInfo outputInfo;
-        outputInfo.amount = amount;
-        outputInfo.privKey = *privKey;
-        outputInfo.blinding = blinding;
-        outputInfo.outputTuple = outputTuple;
-        outputInfo.blockHeight = -1; // Unconfirmed
-        outputInfo.spent = false;
-        outputInfo.nTime = GetTime();
+        result.hasPrivKey = true;
+        result.privKey = *privKey;
 
-        // Generate key image
         auto keyImage = GenerateKeyImage(*privKey, outputTuple.O);
-        outputInfo.keyImageHash = keyImage.GetHash();
+        result.keyImageHash = keyImage.GetHash();
 
-        // Leaf index will be assigned when added to tree
         if (m_curveTree) {
-            result.leafIndex = m_curveTree->GetOutputCount(); // Next index
+            result.leafIndex = m_curveTree->GetOutputCount();
         }
-        outputInfo.treeLeafIndex = result.leafIndex;
-
-        // Note: Output will be added when transaction confirms
-        // For now, store pending info
     }
 
     result.success = true;
@@ -368,6 +401,13 @@ bool CFcmpWalletManager::AddFcmpOutput(const CFcmpOutputInfo& output)
         m_keyImages[output.keyImageHash] = output.outpoint;
     }
 
+    // Persist immediately
+    WalletBatch batch(m_wallet->GetDatabase());
+    batch.WriteFcmpOutput(output.outpoint, output);
+    if (!output.keyImageHash.IsNull()) {
+        batch.WriteFcmpKeyImage(output.keyImageHash, output.outpoint);
+    }
+
     LogPrintf("FCMP: Added output %s: %d satoshis at leaf %lu\n",
               output.outpoint.ToString(), output.amount, output.treeLeafIndex);
 
@@ -388,6 +428,13 @@ bool CFcmpWalletManager::MarkFcmpOutputSpent(const COutPoint& outpoint, const ui
     // Track the spending
     if (!it->second.keyImageHash.IsNull()) {
         m_spentKeyImages[it->second.keyImageHash] = spendingTxHash;
+    }
+
+    // Persist changes
+    WalletBatch batch(m_wallet->GetDatabase());
+    batch.WriteFcmpOutput(outpoint, it->second);
+    if (!it->second.keyImageHash.IsNull()) {
+        batch.WriteFcmpSpentKeyImage(it->second.keyImageHash, spendingTxHash);
     }
 
     LogPrintf("FCMP: Marked output %s as spent in tx %s\n",
@@ -529,10 +576,107 @@ int CFcmpWalletManager::ScanTransactionForFcmpOutputs(
     const CTransaction& tx,
     int blockHeight)
 {
-    // TODO: Implement scanning for FCMP outputs
-    // This would parse the transaction for privacy data and check if
-    // any outputs belong to our stealth addresses
-    return 0;
+    LOCK(cs_fcmp);
+
+    int found = 0;
+    uint256 txid = tx.GetHash();
+
+    // Get the stealth address manager to check ownership
+    auto* stealthMgr = m_wallet->GetStealthAddressManager();
+    if (!stealthMgr || !stealthMgr->HasStealthAddresses()) return 0;
+
+    auto stealthAddresses = stealthMgr->GetStealthAddresses();
+
+    // Look for OP_RETURN outputs with "FCMP" marker containing (O, I, C) tuples
+    for (uint32_t i = 0; i < tx.vout.size(); i++) {
+        const CTxOut& txout = tx.vout[i];
+        if (!txout.scriptPubKey.IsUnspendable()) continue;
+
+        // Parse OP_RETURN data
+        CScript::const_iterator it = txout.scriptPubKey.begin();
+        opcodetype opcode;
+        std::vector<unsigned char> data;
+
+        if (!txout.scriptPubKey.GetOp(it, opcode) || opcode != OP_RETURN) continue;
+        if (!txout.scriptPubKey.GetOp(it, opcode, data)) continue;
+
+        // Check for "FCMP" marker (4 bytes) + O(32) + I(32) + C(32) = 100 bytes minimum
+        if (data.size() < 100) continue;
+        if (data[0] != 'F' || data[1] != 'C' || data[2] != 'M' || data[3] != 'P') continue;
+
+        // Extract O, I, C points
+        ed25519::Point O, I, C;
+        std::memcpy(O.data.data(), data.data() + 4, 32);
+        std::memcpy(I.data.data(), data.data() + 36, 32);
+        std::memcpy(C.data.data(), data.data() + 68, 32);
+
+        // Check if ephemeral key R is appended (for stealth detection)
+        CPubKey ephemeralPubKey;
+        if (data.size() >= 133) {
+            // R is a 33-byte compressed pubkey after O,I,C
+            std::vector<unsigned char> rData(data.begin() + 100, data.begin() + 133);
+            CPubKey candidate(rData);
+            if (candidate.IsFullyValid()) {
+                ephemeralPubKey = candidate;
+            }
+        }
+
+        // Try to detect ownership via stealth address scanning
+        if (!ephemeralPubKey.IsValid()) continue;
+
+        for (const auto& addrData : stealthAddresses) {
+            // Build a stealth output to scan
+            privacy::CStealthOutput stealthOut;
+            stealthOut.ephemeral = privacy::CEphemeralData(ephemeralPubKey, 0);
+            stealthOut.outputIndex = i;
+
+            CKey derivedKey;
+            if (privacy::ScanStealthOutput(stealthOut, addrData.scanPrivKey,
+                                            addrData.address.spendPubKey, derivedKey)) {
+                // We own this output! Create FCMP output record
+                CFcmpOutputInfo outputInfo;
+                outputInfo.outpoint = COutPoint(Txid::FromUint256(txid), i);
+                outputInfo.amount = txout.nValue; // For shielding txs, amount is in the transparent input
+                outputInfo.outputTuple.O = O;
+                outputInfo.outputTuple.I = I;
+                outputInfo.outputTuple.C = C;
+                outputInfo.blockHeight = blockHeight;
+                outputInfo.spent = false;
+                outputInfo.nTime = GetTime();
+
+                // Derive Ed25519 private key from secp256k1 derived key
+                // Use hash of derived key as Ed25519 scalar
+                uint256 keyHash = Hash(std::vector<uint8_t>(UCharCast(derivedKey.begin()), UCharCast(derivedKey.end())));
+                outputInfo.privKey = ed25519::Scalar::FromBytesModOrder(
+                    std::vector<uint8_t>(keyHash.begin(), keyHash.end()));
+
+                // Store blinding factor (we need to reconstruct from commitment)
+                outputInfo.blinding = ed25519::Scalar::Random(); // Sender would communicate this
+
+                // Compute key image hash
+                auto keyImage = GenerateKeyImage(outputInfo.privKey, O);
+                outputInfo.keyImageHash = keyImage.GetHash();
+
+                // Assign tree leaf index
+                if (m_curveTree) {
+                    outputInfo.treeLeafIndex = m_curveTree->GetOutputCount();
+                }
+
+                // Add to tracked outputs
+                if (AddFcmpOutput(outputInfo)) {
+                    // Persist immediately
+                    WalletBatch batch(m_wallet->GetDatabase());
+                    batch.WriteFcmpOutput(outputInfo.outpoint, outputInfo);
+                    batch.WriteFcmpKeyImage(outputInfo.keyImageHash, outputInfo.outpoint);
+                    found++;
+                }
+
+                break; // One match per OP_RETURN
+            }
+        }
+    }
+
+    return found;
 }
 
 int CFcmpWalletManager::ScanBlockForFcmpOutputs(
@@ -552,19 +696,94 @@ int CFcmpWalletManager::ScanBlockForFcmpOutputs(
 
 bool CFcmpWalletManager::Load()
 {
-    // TODO: Load from wallet database
-    // WalletBatch batch(m_wallet->GetDatabase());
-    // batch.ReadFcmpOutputs(m_fcmpOutputs);
-    // batch.ReadFcmpKeyImages(m_keyImages, m_spentKeyImages);
+    LOCK(cs_fcmp);
+
+    WalletBatch batch(m_wallet->GetDatabase(), false);
+
+    // Load FCMP outputs via prefix cursor
+    {
+        DataStream prefix;
+        prefix << DBKeys::FCMP_OUTPUT;
+        auto cursor = batch.GetBatch().GetNewPrefixCursor(prefix);
+        if (cursor) {
+            DataStream ssKey, ssValue;
+            while (cursor->Next(ssKey, ssValue) == DatabaseCursor::Status::MORE) {
+                std::string type;
+                ssKey >> type;
+                Txid hash;
+                uint32_t n;
+                ssKey >> hash;
+                ssKey >> n;
+
+                CFcmpOutputInfo info;
+                ssValue >> info;
+                info.outpoint = COutPoint(hash, n);
+                m_fcmpOutputs[info.outpoint] = info;
+
+                // Rebuild key image index
+                if (!info.keyImageHash.IsNull()) {
+                    m_keyImages[info.keyImageHash] = info.outpoint;
+                }
+            }
+        }
+    }
+
+    // Load spent key images
+    {
+        DataStream prefix;
+        prefix << DBKeys::FCMP_SPENT_KI;
+        auto cursor = batch.GetBatch().GetNewPrefixCursor(prefix);
+        if (cursor) {
+            DataStream ssKey, ssValue;
+            while (cursor->Next(ssKey, ssValue) == DatabaseCursor::Status::MORE) {
+                std::string type;
+                ssKey >> type;
+                uint256 kiHash;
+                ssKey >> kiHash;
+
+                uint256 txHash;
+                ssValue >> txHash;
+                m_spentKeyImages[kiHash] = txHash;
+            }
+        }
+    }
+
+    LogPrintf("FCMP wallet manager: loaded %d outputs, %d spent key images\n",
+              m_fcmpOutputs.size(), m_spentKeyImages.size());
     return true;
 }
 
 bool CFcmpWalletManager::Save()
 {
-    // TODO: Save to wallet database
-    // WalletBatch batch(m_wallet->GetDatabase());
-    // batch.WriteFcmpOutputs(m_fcmpOutputs);
-    // batch.WriteFcmpKeyImages(m_keyImages, m_spentKeyImages);
+    LOCK(cs_fcmp);
+
+    WalletBatch batch(m_wallet->GetDatabase());
+
+    // Save all FCMP outputs
+    for (const auto& [outpoint, info] : m_fcmpOutputs) {
+        if (!batch.WriteFcmpOutput(outpoint, info)) {
+            LogPrintf("Error: Failed to save FCMP output to DB\n");
+            return false;
+        }
+    }
+
+    // Save key image mappings
+    for (const auto& [hash, outpoint] : m_keyImages) {
+        if (!batch.WriteFcmpKeyImage(hash, outpoint)) {
+            LogPrintf("Error: Failed to save FCMP key image to DB\n");
+            return false;
+        }
+    }
+
+    // Save spent key images
+    for (const auto& [hash, txHash] : m_spentKeyImages) {
+        if (!batch.WriteFcmpSpentKeyImage(hash, txHash)) {
+            LogPrintf("Error: Failed to save FCMP spent key image to DB\n");
+            return false;
+        }
+    }
+
+    LogPrintf("FCMP wallet manager: saved %d outputs\n", m_fcmpOutputs.size());
     return true;
 }
 
@@ -588,28 +807,54 @@ curvetree::OutputTuple CFcmpWalletManager::CreateOutputTuple(
 {
     curvetree::OutputTuple tuple;
 
-    // Generate ephemeral key
+    // Generate ephemeral key for DKSAP
     CKey ephemeralKey;
     ephemeralKey.MakeNewKey(true);
 
-    // Derive one-time address
-    // O = Hs(r*V)*G + S where V is view pubkey, S is spend pubkey
-    // For Ed25519, we use similar derivation
+    // Generate stealth destination using DKSAP protocol
+    privacy::CStealthOutput stealthOut;
+    if (!privacy::GenerateStealthDestination(stealthAddr, ephemeralKey, stealthOut)) {
+        // Fallback: use random key if stealth derivation fails
+        auto kp = ed25519::KeyPair::Generate();
+        tuple.O = kp.public_key;
+        privKey = std::nullopt;
+    } else {
+        // Convert secp256k1 one-time pubkey to Ed25519 point
+        // Hash the derived pubkey bytes to get an Ed25519 scalar, then compute O = scalar * G
+        std::vector<uint8_t> pubKeyBytes(stealthOut.oneTimePubKey.begin(), stealthOut.oneTimePubKey.end());
+        uint256 keyHash = Hash(pubKeyBytes);
+        ed25519::Scalar outputScalar = ed25519::Scalar::FromBytesModOrder(
+            std::vector<uint8_t>(keyHash.begin(), keyHash.end()));
+        tuple.O = outputScalar * ed25519::Point::BasePoint();
 
-    // Simplified: Use random point for now
-    // TODO: Proper stealth address derivation for Ed25519
-    auto kp = ed25519::KeyPair::Generate();
-    tuple.O = kp.public_key;
+        // Check if we own this stealth address to store private key
+        auto* stealthMgr = m_wallet->GetStealthAddressManager();
+        if (stealthMgr) {
+            auto stealthAddresses = stealthMgr->GetStealthAddresses();
+            for (const auto& addrData : stealthAddresses) {
+                if (addrData.address.scanPubKey == stealthAddr.scanPubKey &&
+                    addrData.address.spendPubKey == stealthAddr.spendPubKey) {
+                    // We own this address - derive spending key
+                    CKey derivedKey;
+                    if (privacy::DeriveStealthSpendingKey(addrData.scanPrivKey, addrData.spendPrivKey,
+                                                          ephemeralKey.GetPubKey(), 0, derivedKey)) {
+                        // Convert secp256k1 key to Ed25519 scalar
+                        std::vector<uint8_t> keyBytes(UCharCast(derivedKey.begin()), UCharCast(derivedKey.end()));
+                        uint256 privHash = Hash(keyBytes);
+                        privKey = ed25519::Scalar::FromBytesModOrder(
+                            std::vector<uint8_t>(privHash.begin(), privHash.end()));
+                    }
+                    break;
+                }
+            }
+        }
+    }
 
-    // If we're sending to ourselves, store the private key
-    // (in practice, check if we own the stealth address)
-    privKey = std::nullopt;
-
-    // I = Hp(O) - key image base
+    // I = Hp(O) - key image point
     std::vector<uint8_t> toHash(tuple.O.data.begin(), tuple.O.data.end());
     tuple.I = ed25519::Point::HashToPoint(toHash);
 
-    // C = amount*H + blinding*G
+    // C = amount*H + blinding*G (Pedersen commitment)
     blinding = ed25519::Scalar::Random();
     auto commitment = ed25519::PedersenCommitment::CommitAmount(
         static_cast<uint64_t>(amount),
@@ -695,10 +940,13 @@ std::optional<privacy::CFcmpInput> CFcmpWalletManager::BuildFcmpInput(
         return std::nullopt;
     }
 
-#ifdef HAVE_FCMP
     try {
+        privacy::fcmp::FcmpContext ctx;
         privacy::fcmp::FcmpProver prover(m_curveTree);
-        auto proofBytes = prover.GenerateProof(output.outputTuple, output.treeLeafIndex);
+        auto proofBytes = prover.GenerateProof(
+            output.outputTuple, output.treeLeafIndex,
+            output.privKey, rerandomizer
+        );
         fcmpInput.membershipProof = privacy::CFcmpProof(
             std::move(proofBytes),
             m_curveTree->GetRoot()
@@ -707,17 +955,6 @@ std::optional<privacy::CFcmpInput> CFcmpWalletManager::BuildFcmpInput(
         LogPrintf("FCMP: Proof generation failed: %s\n", e.what());
         return std::nullopt;
     }
-#else
-    // Placeholder proof for testing
-    fcmpInput.membershipProof.version = 1;
-    fcmpInput.membershipProof.treeRoot = m_curveTree->GetRoot();
-    fcmpInput.membershipProof.proofData.resize(64, 0);
-    HashWriter hasher{};
-    hasher << output.treeLeafIndex;
-    hasher << output.outputTuple.O.data;
-    uint256 proofHash = hasher.GetHash();
-    std::memcpy(fcmpInput.membershipProof.proofData.data(), proofHash.begin(), 32);
-#endif
 
     // Generate SA+L signature
     // c = H(R || I_tilde || O_tilde || message)

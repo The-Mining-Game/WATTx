@@ -221,6 +221,8 @@ size_t fcmp_proof_size(uint32_t num_inputs, uint32_t num_layers);
  * @param tree_root Tree root point (32 bytes)
  * @param output Output tuple (96 bytes: O || I || C)
  * @param branch Branch/path data
+ * @param secret_key Secret key for Schnorr proof (32 bytes)
+ * @param rerandomizer Rerandomization scalar (32 bytes)
  * @return FCMP_SUCCESS on success
  */
 int32_t fcmp_prove(
@@ -229,7 +231,9 @@ int32_t fcmp_prove(
     size_t proof_max_len,
     const uint8_t* tree_root,
     const uint8_t* output,
-    const FcmpBranch* branch
+    const FcmpBranch* branch,
+    const uint8_t* secret_key,
+    const uint8_t* rerandomizer
 );
 
 /**

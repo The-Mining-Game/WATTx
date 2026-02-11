@@ -238,8 +238,6 @@ bool CreateCoinStakeFromMine(CWallet& wallet, unsigned int nBits, const CAmount&
             // The validator gets their share in the coinstake
             nCredit += nValidatorReward;
 
-            // Apply trust tier multiplier to validator reward
-            // (This is handled in CalculateTieredBlockReward in pos.cpp)
         }
         else if(pindexPrev->nHeight < consensusParams.nFirstMPoSBlock || pindexPrev->nHeight >= consensusParams.nLastMPoSBlock)
         {

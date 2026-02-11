@@ -37,9 +37,9 @@
 #include <optional>
 #include <vector>
 
-class CWallet;
-
 namespace wallet {
+
+class CWallet;
 
 /**
  * @brief FCMP output owned by wallet
@@ -132,6 +132,21 @@ struct CFcmpShieldResult
 
     // Leaf index in curve tree for the new output
     uint64_t leafIndex{0};
+
+    // Output tuple stored in curve tree
+    curvetree::OutputTuple outputTuple;
+
+    // Private key for the output (needed for spending)
+    ed25519::Scalar privKey;
+
+    // Blinding factor
+    ed25519::Scalar blinding;
+
+    // Key image hash
+    uint256 keyImageHash;
+
+    // Whether the wallet owns the output private key
+    bool hasPrivKey{false};
 
     // Success flag
     bool success{false};

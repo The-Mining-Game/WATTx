@@ -47,6 +47,10 @@ const CBlockIndex* GetLastBlockIndex(const CBlockIndex* pindex, bool fProofOfSta
 inline arith_uint256 GetLimit(int nHeight, const Consensus::Params& params, bool fProofOfStake)
 {
     if(fProofOfStake) {
+        // After PoS difficulty fix: use tighter limit to prevent fast blocks
+        if(nHeight >= params.nPoSDifficultyFixHeight) {
+            return UintToArith256(params.FixedRBTPosLimit);
+        }
         if(nHeight < params.QIP9Height) {
             return UintToArith256(params.posLimit);
         } else if(nHeight < params.nReduceBlocktimeHeight) {
@@ -145,7 +149,12 @@ unsigned int CalculateNextWorkRequired(const CBlockIndex* pindexLast, int64_t nF
         if (nActualSpacing > nTargetSpacing * 20)
             nActualSpacing = nTargetSpacing * 20;
         uint32_t stakeTimestampMask=params.StakeTimestampMask(nHeight);
-        bnNew = mul_exp(bnNew, 2 * (nActualSpacing - nTargetSpacing) / (stakeTimestampMask + 1), (nInterval + 1) * nTargetSpacing / (stakeTimestampMask + 1));
+
+        // After PoS difficulty fix: use 4x multiplier for faster convergence
+        // Pre-fix: 2x multiplier adjusted only ~0.08% when blocks were 12x too fast
+        // Post-fix: 4x multiplier with mask=15 gives ~27% adjustment per block
+        int64_t nAdjustmentMultiplier = (nHeight >= params.nPoSDifficultyFixHeight && fProofOfStake) ? 4 : 2;
+        bnNew = mul_exp(bnNew, nAdjustmentMultiplier * (nActualSpacing - nTargetSpacing) / (stakeTimestampMask + 1), (nInterval + 1) * nTargetSpacing / (stakeTimestampMask + 1));
     }
 
     if (bnNew <= 0 || bnNew > bnTargetLimit)

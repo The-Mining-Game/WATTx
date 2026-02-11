@@ -120,11 +120,6 @@ public:
     TrustTier GetTrustTier(const Consensus::Params& params) const;
 
     /**
-     * Get reward multiplier based on trust tier (percentage, 100 = 1.0x)
-     */
-    int GetRewardMultiplier(const Consensus::Params& params) const;
-
-    /**
      * Check if validator meets minimum stake requirement
      */
     bool MeetsMinimumStake(const Consensus::Params& params) const;
@@ -249,11 +244,6 @@ public:
      * Get trust tier for a validator
      */
     TrustTier GetValidatorTier(const CKeyID& validatorId) const;
-
-    /**
-     * Get reward multiplier for a validator
-     */
-    int GetValidatorRewardMultiplier(const CKeyID& validatorId) const;
 
     /**
      * Check if a validator is eligible to stake

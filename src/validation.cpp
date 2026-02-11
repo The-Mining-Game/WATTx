@@ -2889,7 +2889,7 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
     if (privacy::IsFcmpStateAvailable() && privacy::GetFcmpState().IsInitialized()) {
         if (!privacy::GetFcmpState().DisconnectBlock(block, pindex)) {
             LogPrintf("FCMP: Failed to disconnect block %d from FCMP state\n", pindex->nHeight);
-            // Note: Non-fatal for now
+            return DISCONNECT_FAILED;
         }
     }
 
@@ -4614,7 +4614,8 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         privacy::IsFcmpStateAvailable() && privacy::GetFcmpState().IsInitialized()) {
         if (!privacy::GetFcmpState().ConnectBlock(block, pindex)) {
             LogPrintf("FCMP: Failed to connect block %d for FCMP state\n", pindex->nHeight);
-            // Note: Non-fatal for now - FCMP is optional until fully activated
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-fcmp-connect",
+                                 strprintf("FCMP state update failed at block %d", pindex->nHeight));
         }
     }
 

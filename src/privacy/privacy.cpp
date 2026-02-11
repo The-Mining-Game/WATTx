@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <privacy/privacy.h>
+#include <privacy/fcmp_consensus.h>
 #include <privacy/ed25519/ed25519_types.h>
 #include <hash.h>
 #include <consensus/params.h>
@@ -13,28 +14,46 @@
 
 namespace privacy {
 
-// Key image tracking (in production, this would be in the UTXO database)
-static std::map<uint256, uint256> g_spentKeyImages; // keyImage hash -> tx hash
-static std::mutex g_keyImageMutex;
+// In-memory fallback for when the persistent LevelDB store isn't available
+// (test environment, pre-FCMP activation, early startup)
+static std::mutex g_fallbackKeyImageMutex;
+static std::map<std::vector<unsigned char>, uint256> g_fallbackKeyImages;
 
 bool IsKeyImageSpent(const CKeyImage& keyImage)
 {
-    std::lock_guard<std::mutex> lock(g_keyImageMutex);
-    return g_spentKeyImages.count(keyImage.GetHash()) > 0;
+    // Try persistent LevelDB-backed database first
+    if (IsFcmpStateAvailable()) {
+        return GetFcmpState().IsKeyImageSpent(keyImage);
+    }
+    // Fallback to in-memory tracking
+    std::lock_guard<std::mutex> lock(g_fallbackKeyImageMutex);
+    return g_fallbackKeyImages.count(keyImage.data) > 0;
 }
 
 bool MarkKeyImageSpent(const CKeyImage& keyImage, const uint256& txHash)
 {
-    std::lock_guard<std::mutex> lock(g_keyImageMutex);
-    auto result = g_spentKeyImages.emplace(keyImage.GetHash(), txHash);
-    return result.second; // true if inserted, false if already exists
+    // Try persistent LevelDB-backed database first
+    if (IsFcmpStateAvailable()) {
+        auto* db = GetFcmpState().GetKeyImageDB();
+        if (db) {
+            return db->MarkSpent(keyImage, txHash, 0);
+        }
+    }
+    // Fallback to in-memory tracking
+    std::lock_guard<std::mutex> lock(g_fallbackKeyImageMutex);
+    if (g_fallbackKeyImages.count(keyImage.data) > 0) {
+        return false; // Already spent
+    }
+    g_fallbackKeyImages[keyImage.data] = txHash;
+    return true;
 }
 
 size_t GetMinRingSize(int height)
 {
     // Minimum ring size increases over time for better privacy
-    if (height < 100000) return 3;
-    if (height < 500000) return 7;
+    // Privacy activates at block 210,000
+    if (height < 210000) return 3;
+    if (height < 420000) return 7;
     return 11;
 }
 

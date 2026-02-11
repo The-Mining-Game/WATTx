@@ -150,9 +150,10 @@ public:
     virtual std::optional<TreeNode> GetNode(const TreeIndex& index) = 0;
     virtual bool DeleteNode(const TreeIndex& index) = 0;
 
-    // Store/retrieve output tuples by leaf index
+    // Store/retrieve/delete output tuples by leaf index
     virtual bool StoreOutput(uint64_t index, const OutputTuple& output) = 0;
     virtual std::optional<OutputTuple> GetOutput(uint64_t index) = 0;
+    virtual bool DeleteOutput(uint64_t index) = 0;
 
     // Store/retrieve tree metadata
     virtual bool StoreMetadata(const std::string& key, const std::vector<uint8_t>& value) = 0;
@@ -178,6 +179,7 @@ public:
 
     bool StoreOutput(uint64_t index, const OutputTuple& output) override;
     std::optional<OutputTuple> GetOutput(uint64_t index) override;
+    bool DeleteOutput(uint64_t index) override;
 
     bool StoreMetadata(const std::string& key, const std::vector<uint8_t>& value) override;
     std::optional<std::vector<uint8_t>> GetMetadata(const std::string& key) override;
@@ -245,6 +247,10 @@ public:
 
     // Check if an output exists at the given index
     bool HasOutput(uint64_t index) const;
+
+    // Remove the last N outputs from the tree (for reorg handling)
+    // Returns true on success
+    bool RemoveLastN(uint64_t count);
 
     // ========== Branch/Proof Operations ==========
 

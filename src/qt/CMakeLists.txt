@@ -308,6 +308,10 @@ if(ENABLE_WALLET)
       superstakerpage.h
       messagingpage.cpp
       messagingpage.h
+      privacypage.cpp
+      privacypage.h
+      trusttierpage.cpp
+      trusttierpage.h
       chatbubblewidget.cpp
       chatbubblewidget.h
       tokendescdialog.cpp

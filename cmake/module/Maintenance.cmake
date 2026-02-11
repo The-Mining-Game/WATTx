@@ -23,7 +23,7 @@ function(add_maintenance_targets)
     return()
   endif()
 
-  foreach(target IN ITEMS qtumd qtum-qt qtum-cli qtum-tx qtum-util qtum-wallet test_qtum bench_qtum)
+  foreach(target IN ITEMS wattxd wattx-qt wattx-cli wattx-tx wattx-util wattx-wallet test_wattx bench_wattx)
     if(TARGET ${target})
       list(APPEND executables $<TARGET_FILE:${target}>)
     endif()
@@ -43,31 +43,31 @@ function(add_maintenance_targets)
 endfunction()
 
 function(add_windows_deploy_target)
-  if(MINGW AND TARGET qtum-qt AND TARGET qtumd AND TARGET qtum-cli AND TARGET qtum-tx AND TARGET qtum-wallet AND TARGET qtum-util AND TARGET test_qtum)
+  if(MINGW AND TARGET wattx-qt AND TARGET wattxd AND TARGET wattx-cli AND TARGET wattx-tx AND TARGET wattx-wallet AND TARGET wattx-util AND TARGET test_wattx)
     # TODO: Consider replacing this code with the CPack NSIS Generator.
     #       See https://cmake.org/cmake/help/latest/cpack_gen/nsis.html
     include(GenerateSetupNsi)
     generate_setup_nsi()
     add_custom_command(
-      OUTPUT ${PROJECT_BINARY_DIR}/qtum-win64-setup.exe
+      OUTPUT ${PROJECT_BINARY_DIR}/wattx-win64-setup.exe
       COMMAND ${CMAKE_COMMAND} -E make_directory ${PROJECT_BINARY_DIR}/release
-      COMMAND ${CMAKE_STRIP} $<TARGET_FILE:qtum-qt> -o ${PROJECT_BINARY_DIR}/release/$<TARGET_FILE_NAME:qtum-qt>
-      COMMAND ${CMAKE_STRIP} $<TARGET_FILE:qtumd> -o ${PROJECT_BINARY_DIR}/release/$<TARGET_FILE_NAME:qtumd>
-      COMMAND ${CMAKE_STRIP} $<TARGET_FILE:qtum-cli> -o ${PROJECT_BINARY_DIR}/release/$<TARGET_FILE_NAME:qtum-cli>
-      COMMAND ${CMAKE_STRIP} $<TARGET_FILE:qtum-tx> -o ${PROJECT_BINARY_DIR}/release/$<TARGET_FILE_NAME:qtum-tx>
-      COMMAND ${CMAKE_STRIP} $<TARGET_FILE:qtum-wallet> -o ${PROJECT_BINARY_DIR}/release/$<TARGET_FILE_NAME:qtum-wallet>
-      COMMAND ${CMAKE_STRIP} $<TARGET_FILE:qtum-util> -o ${PROJECT_BINARY_DIR}/release/$<TARGET_FILE_NAME:qtum-util>
-      COMMAND ${CMAKE_STRIP} $<TARGET_FILE:test_qtum> -o ${PROJECT_BINARY_DIR}/release/$<TARGET_FILE_NAME:test_qtum>
-      COMMAND makensis -V2 ${PROJECT_BINARY_DIR}/qtum-win64-setup.nsi
+      COMMAND ${CMAKE_STRIP} $<TARGET_FILE:wattx-qt> -o ${PROJECT_BINARY_DIR}/release/$<TARGET_FILE_NAME:wattx-qt>
+      COMMAND ${CMAKE_STRIP} $<TARGET_FILE:wattxd> -o ${PROJECT_BINARY_DIR}/release/$<TARGET_FILE_NAME:wattxd>
+      COMMAND ${CMAKE_STRIP} $<TARGET_FILE:wattx-cli> -o ${PROJECT_BINARY_DIR}/release/$<TARGET_FILE_NAME:wattx-cli>
+      COMMAND ${CMAKE_STRIP} $<TARGET_FILE:wattx-tx> -o ${PROJECT_BINARY_DIR}/release/$<TARGET_FILE_NAME:wattx-tx>
+      COMMAND ${CMAKE_STRIP} $<TARGET_FILE:wattx-wallet> -o ${PROJECT_BINARY_DIR}/release/$<TARGET_FILE_NAME:wattx-wallet>
+      COMMAND ${CMAKE_STRIP} $<TARGET_FILE:wattx-util> -o ${PROJECT_BINARY_DIR}/release/$<TARGET_FILE_NAME:wattx-util>
+      COMMAND ${CMAKE_STRIP} $<TARGET_FILE:test_wattx> -o ${PROJECT_BINARY_DIR}/release/$<TARGET_FILE_NAME:test_wattx>
+      COMMAND makensis -V2 ${PROJECT_BINARY_DIR}/wattx-win64-setup.nsi
       VERBATIM
     )
-    add_custom_target(deploy DEPENDS ${PROJECT_BINARY_DIR}/qtum-win64-setup.exe)
+    add_custom_target(deploy DEPENDS ${PROJECT_BINARY_DIR}/wattx-win64-setup.exe)
   endif()
 endfunction()
 
 function(add_macos_deploy_target)
-  if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND TARGET qtum-qt)
-    set(macos_app "Qtum-Qt.app")
+  if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND TARGET wattx-qt)
+    set(macos_app "WATTx-Qt.app")
     # Populate Contents subdirectory.
     configure_file(${PROJECT_SOURCE_DIR}/share/qt/Info.plist.in ${macos_app}/Contents/Info.plist NO_SOURCE_PERMISSIONS)
     file(CONFIGURE OUTPUT ${macos_app}/Contents/PkgInfo CONTENT "APPL????")
@@ -79,9 +79,9 @@ function(add_macos_deploy_target)
     )
 
     add_custom_command(
-      OUTPUT ${PROJECT_BINARY_DIR}/${macos_app}/Contents/MacOS/Qtum-Qt
-      COMMAND ${CMAKE_COMMAND} --install ${PROJECT_BINARY_DIR} --config $<CONFIG> --component qtum-qt --prefix ${macos_app}/Contents/MacOS --strip
-      COMMAND ${CMAKE_COMMAND} -E rename ${macos_app}/Contents/MacOS/bin/$<TARGET_FILE_NAME:qtum-qt> ${macos_app}/Contents/MacOS/Qtum-Qt
+      OUTPUT ${PROJECT_BINARY_DIR}/${macos_app}/Contents/MacOS/WATTx-Qt
+      COMMAND ${CMAKE_COMMAND} --install ${PROJECT_BINARY_DIR} --config $<CONFIG> --component wattx-qt --prefix ${macos_app}/Contents/MacOS --strip
+      COMMAND ${CMAKE_COMMAND} -E rename ${macos_app}/Contents/MacOS/bin/$<TARGET_FILE_NAME:wattx-qt> ${macos_app}/Contents/MacOS/WATTx-Qt
       COMMAND ${CMAKE_COMMAND} -E rm -rf ${macos_app}/Contents/MacOS/bin
       COMMAND ${CMAKE_COMMAND} -E rm -rf ${macos_app}/Contents/MacOS/share
       VERBATIM
@@ -92,7 +92,7 @@ function(add_macos_deploy_target)
       add_custom_command(
         OUTPUT ${PROJECT_BINARY_DIR}/${osx_volname}.zip
         COMMAND ${PYTHON_COMMAND} ${PROJECT_SOURCE_DIR}/contrib/macdeploy/macdeployqtplus ${macos_app} ${osx_volname} -translations-dir=${QT_TRANSLATIONS_DIR} -zip
-        DEPENDS ${PROJECT_BINARY_DIR}/${macos_app}/Contents/MacOS/Qtum-Qt
+        DEPENDS ${PROJECT_BINARY_DIR}/${macos_app}/Contents/MacOS/WATTx-Qt
         VERBATIM
       )
       add_custom_target(deploydir
@@ -103,13 +103,13 @@ function(add_macos_deploy_target)
       )
     else()
       add_custom_command(
-        OUTPUT ${PROJECT_BINARY_DIR}/dist/${macos_app}/Contents/MacOS/Qtum-Qt
+        OUTPUT ${PROJECT_BINARY_DIR}/dist/${macos_app}/Contents/MacOS/WATTx-Qt
         COMMAND OBJDUMP=${CMAKE_OBJDUMP} ${PYTHON_COMMAND} ${PROJECT_SOURCE_DIR}/contrib/macdeploy/macdeployqtplus ${macos_app} ${osx_volname} -translations-dir=${QT_TRANSLATIONS_DIR}
-        DEPENDS ${PROJECT_BINARY_DIR}/${macos_app}/Contents/MacOS/Qtum-Qt
+        DEPENDS ${PROJECT_BINARY_DIR}/${macos_app}/Contents/MacOS/WATTx-Qt
         VERBATIM
       )
       add_custom_target(deploydir
-        DEPENDS ${PROJECT_BINARY_DIR}/dist/${macos_app}/Contents/MacOS/Qtum-Qt
+        DEPENDS ${PROJECT_BINARY_DIR}/dist/${macos_app}/Contents/MacOS/WATTx-Qt
       )
 
       find_program(ZIP_COMMAND zip REQUIRED)
@@ -123,7 +123,7 @@ function(add_macos_deploy_target)
         DEPENDS ${PROJECT_BINARY_DIR}/dist/${osx_volname}.zip
       )
     endif()
-    add_dependencies(deploydir qtum-qt)
+    add_dependencies(deploydir wattx-qt)
     add_dependencies(deploy deploydir)
   endif()
 endfunction()

@@ -180,7 +180,7 @@ static RPCHelpMan getvalidator()
                         trust::TrustTier tier = info->GetTrustTier(Params().GetConsensus());
                         result.pushKV("trustTier", trust::TrustTierToString(tier));
                         result.pushKV("uptimePercent", info->GetUptimePercentage());
-                        result.pushKV("rewardMultiplier", info->GetRewardMultiplier(Params().GetConsensus()));
+                        result.pushKV("trustTierUptime", info->GetUptimePercentage());
                     }
                 }
             }
@@ -405,15 +405,8 @@ static RPCHelpMan gettrusttierinfo()
             thresholds.pushKV("gold", params.nGoldUptimeThreshold);
             thresholds.pushKV("platinum", params.nPlatinumUptimeThreshold);
 
-            UniValue multipliers(UniValue::VOBJ);
-            multipliers.pushKV("bronze", params.nBronzeRewardMultiplier);
-            multipliers.pushKV("silver", params.nSilverRewardMultiplier);
-            multipliers.pushKV("gold", params.nGoldRewardMultiplier);
-            multipliers.pushKV("platinum", params.nPlatinumRewardMultiplier);
-
             UniValue result(UniValue::VOBJ);
             result.pushKV("thresholds", thresholds);
-            result.pushKV("multipliers", multipliers);
             result.pushKV("minValidatorStake", ValueFromAmount(params.nMinValidatorStake));
             result.pushKV("heartbeatInterval", params.nHeartbeatInterval);
 

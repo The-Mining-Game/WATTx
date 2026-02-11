@@ -6,6 +6,7 @@
 #include <qt/test/util.h>
 
 #include <wallet/coincontrol.h>
+#include <wallet/wallet.h>
 #include <interfaces/chain.h>
 #include <interfaces/node.h>
 #include <key_io.h>

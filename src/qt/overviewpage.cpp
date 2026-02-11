@@ -305,6 +305,19 @@ void OverviewPage::setBalance(const interfaces::WalletBalances& balances)
         ui->labelStake->setText(BitcoinUnits::formatPrivacy(unit, balances.stake, BitcoinUnits::SeparatorStyle::ALWAYS, m_privacy));
         ui->labelTotal->setText(BitcoinUnits::formatWithPrivacy(unit, balances.balance + balances.unconfirmed_balance + balances.immature_balance + balances.stake, BitcoinUnits::SeparatorStyle::ALWAYS, m_privacy));
     }
+    // Include private balances (FCMP + Ring-CT) in the available and total display
+    CAmount fcmpBalance = walletModel->wallet().getFcmpBalance();
+    CAmount privacyBalance = walletModel->wallet().getPrivacyBalance();
+    CAmount totalPrivate = fcmpBalance + privacyBalance;
+
+    // Show combined balance (transparent + private) as "Available"
+    CAmount combinedAvailable = balances.balance + totalPrivate;
+    ui->labelBalance->setText(BitcoinUnits::formatPrivacy(unit, combinedAvailable, BitcoinUnits::SeparatorStyle::ALWAYS, m_privacy));
+
+    // Update total to include private
+    CAmount combinedTotal = combinedAvailable + balances.unconfirmed_balance + balances.immature_balance + balances.stake;
+    ui->labelTotal->setText(BitcoinUnits::formatWithPrivacy(unit, combinedTotal, BitcoinUnits::SeparatorStyle::ALWAYS, m_privacy));
+
     // only show immature (newly mined) balance if it's non-zero, so as not to complicate things
     // for the non-mining users
     bool showImmature = balances.immature_balance != 0;
@@ -417,6 +430,18 @@ void OverviewPage::setWalletModel(WalletModel *model)
 
     // check for presence of invalid tokens
     QTimer::singleShot(500, this, SLOT(checkForInvalidTokens()));
+
+    // Auto-shield: periodically check for transparent balance and shield to FCMP
+    auto* autoShieldTimer = new QTimer(this);
+    connect(autoShieldTimer, &QTimer::timeout, this, [this]() {
+        if (!walletModel) return;
+        interfaces::WalletBalances bal = walletModel->getCachedBalance();
+        if (bal.balance > 0) {
+            std::string error;
+            walletModel->wallet().shieldFunds(bal.balance, /*useFcmp=*/true, error);
+        }
+    });
+    autoShieldTimer->start(30000); // Check every 30 seconds
 }
 
 void OverviewPage::changeEvent(QEvent* e)

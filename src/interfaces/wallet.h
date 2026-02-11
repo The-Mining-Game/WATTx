@@ -464,6 +464,57 @@ public:
     //! Get HD key path
     virtual bool getHDKeyPath(const CTxDestination& dest, std::string& hdkeypath) = 0;
 
+    //////////////////////////////////////////////////
+    // WATTx Privacy Transaction Interface
+    //////////////////////////////////////////////////
+
+    //! Privacy output info for GUI display
+    struct PrivacyOutputInfo {
+        CAmount amount{0};
+        int confirmations{0};
+        bool spendable{false};
+        bool isFcmp{false};
+    };
+
+    //! Stealth address info for GUI display
+    struct StealthAddressInfo {
+        std::string label;
+        std::string address;
+        std::string created;
+    };
+
+    //! Get privacy (Ring-CT) balance
+    virtual CAmount getPrivacyBalance() { return 0; }
+
+    //! Get FCMP balance
+    virtual CAmount getFcmpBalance() { return 0; }
+
+    //! Get list of privacy outputs
+    virtual std::vector<PrivacyOutputInfo> getPrivacyOutputs() { return {}; }
+
+    //! Get list of FCMP outputs
+    virtual std::vector<PrivacyOutputInfo> getFcmpOutputs() { return {}; }
+
+    //! Shield transparent funds to private
+    virtual bool shieldFunds(CAmount amount, bool useFcmp, std::string& error) { error = "Not implemented"; return false; }
+
+    //! Send private transaction
+    virtual bool sendPrivate(const std::string& stealthAddr, CAmount amount, bool useFcmp, int ringSize, std::string& txid, std::string& error) { error = "Not implemented"; return false; }
+
+    //! Estimate fee for private transaction
+    virtual CAmount estimatePrivateFee(int numInputs, int numOutputs, bool useFcmp, int ringSize) { return 10000; }
+
+    //! Generate new stealth address
+    virtual bool generateStealthAddress(const std::string& label, std::string& address, std::string& error) { error = "Not implemented"; return false; }
+
+    //! Get list of stealth addresses
+    virtual std::vector<StealthAddressInfo> getStealthAddresses() { return {}; }
+
+    //! Send private FCMP transaction to multiple recipients
+    virtual bool sendPrivateBatch(const std::vector<std::pair<std::string, CAmount>>& recipients,
+                                   std::string& txid, CAmount& fee, std::string& error)
+    { error = "Not implemented"; return false; }
+
     //! Register handler for unload message.
     using UnloadFn = std::function<void()>;
     virtual std::unique_ptr<Handler> handleUnload(UnloadFn fn) = 0;

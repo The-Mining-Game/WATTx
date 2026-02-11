@@ -28,6 +28,7 @@ class MiningPage;
 class DelegationPage;
 class SuperStakerPage;
 class MessagingPage;
+class TrustTierPage;
 class WalletFrame;
 QT_BEGIN_NAMESPACE
 class QModelIndex;
@@ -82,6 +83,7 @@ private:
     DelegationPage* delegationPage;
     SuperStakerPage* superStakerPage;
     MessagingPage* messagingPage;
+    TrustTierPage* trustTierPage;
     TransactionView *transactionView;
 
     QProgressDialog* progressDialog{nullptr};
@@ -115,6 +117,8 @@ public Q_SLOTS:
     void gotoSuperStakerPage();
     /** Switch to messaging page */
     void gotoMessagingPage();
+    /** Switch to trust tier page */
+    void gotoTrustTierPage();
     /** Show Sign/Verify Message dialog and switch to sign message tab */
     void gotoSignMessageTab(QString addr = "");
     /** Show Sign/Verify Message dialog and switch to verify message tab */

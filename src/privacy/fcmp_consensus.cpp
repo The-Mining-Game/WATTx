@@ -5,6 +5,7 @@
 #include <privacy/fcmp_consensus.h>
 #include <privacy/fcmp_tx.h>
 #include <privacy/ed25519/pedersen.h>
+#include <privacy/curvetree/tree_db.h>
 #include <chain.h>
 #include <logging.h>
 #include <hash.h>
@@ -141,9 +142,10 @@ bool CFcmpConsensusState::Initialize(const fs::path& datadir, size_t cacheSize)
         fs::create_directories(keyImagePath);
         m_keyImageDB = std::make_unique<CFcmpKeyImageDB>(keyImagePath, cacheSize / 2);
 
-        // Initialize curve tree with memory storage
-        // TODO: Add persistent LevelDB storage for production
-        m_treeStorage = std::make_shared<curvetree::MemoryTreeStorage>();
+        // Initialize curve tree with persistent LevelDB storage
+        fs::path treeDbPath = datadir / "fcmp" / "curvetree";
+        fs::create_directories(treeDbPath);
+        m_treeStorage = std::make_shared<curvetree::LevelDBTreeStorage>(treeDbPath);
         m_curveTree = std::make_shared<curvetree::CurveTree>(m_treeStorage);
 
         m_initialized = true;
@@ -296,11 +298,13 @@ bool CFcmpConsensusState::DisconnectBlock(const CBlock& block, const CBlockIndex
     // Remove outputs from curve tree
     auto it = m_outputsAddedPerBlock.find(height);
     if (it != m_outputsAddedPerBlock.end() && it->second > 0) {
-        // Note: CurveTree needs a RemoveLastN method for proper reorg support
-        // For now, we'll need to rebuild from the last checkpoint
-        // This is a simplification - production would need proper reorg handling
-        LogPrintf("FCMP: Block %d disconnected. Would remove %lu outputs (reorg handling TBD)\n",
-                  height, it->second);
+        if (!m_curveTree->RemoveLastN(it->second)) {
+            LogPrintf("FCMP: Failed to remove %lu outputs from curve tree for block %d\n",
+                      it->second, height);
+            return false;
+        }
+        LogPrintf("FCMP: Block %d disconnected. Removed %lu outputs. Tree size: %lu\n",
+                  height, it->second, m_curveTree->GetOutputCount());
         m_outputsAddedPerBlock.erase(it);
     }
 
@@ -460,16 +464,31 @@ std::vector<curvetree::OutputTuple> CFcmpConsensusState::ExtractFcmpOutputs(cons
         const CTxOut& out = tx.vout[i];
 
         // Look for FCMP output marker in script
-        // Format: OP_RETURN <FCMP_MARKER> <O> <I> <C>
-        if (out.scriptPubKey.size() >= 98 && out.scriptPubKey[0] == OP_RETURN) {
-            // Check for FCMP marker "FCMP" (0x46434D50)
-            if (out.scriptPubKey.size() >= 102 &&
-                out.scriptPubKey[2] == 0x46 && out.scriptPubKey[3] == 0x43 &&
-                out.scriptPubKey[4] == 0x4D && out.scriptPubKey[5] == 0x50) {
+        // Format: OP_RETURN OP_PUSHDATA1 <len> <FCMP_MARKER:4> <O:32> <I:32> <C:32>
+        // Total: 1 + 1 + 1 + 4 + 96 = 103 bytes
+        if (out.scriptPubKey.size() >= 103 && out.scriptPubKey[0] == OP_RETURN) {
+            // Find the FCMP marker "FCMP" (0x46434D50)
+            // After OP_RETURN, there's a push opcode:
+            //   - For data < 76 bytes: single byte length at [1], data starts at [2]
+            //   - For data 76-255 bytes: OP_PUSHDATA1 at [1], length at [2], data starts at [3]
+            size_t dataOffset = 0;
+            if (out.scriptPubKey[1] == 0x4c) { // OP_PUSHDATA1
+                dataOffset = 3;
+            } else if (out.scriptPubKey[1] < 0x4c) { // Direct push
+                dataOffset = 2;
+            } else {
+                continue; // Unexpected encoding
+            }
+
+            if (out.scriptPubKey.size() < dataOffset + 100) continue; // Not enough data
+
+            // Check for FCMP marker
+            if (out.scriptPubKey[dataOffset] == 0x46 && out.scriptPubKey[dataOffset+1] == 0x43 &&
+                out.scriptPubKey[dataOffset+2] == 0x4D && out.scriptPubKey[dataOffset+3] == 0x50) {
 
                 curvetree::OutputTuple tuple;
                 // Extract O, I, C points (32 bytes each)
-                const uint8_t* data = out.scriptPubKey.data() + 6;
+                const uint8_t* data = out.scriptPubKey.data() + dataOffset + 4;
                 std::memcpy(tuple.O.data.data(), data, 32);
                 std::memcpy(tuple.I.data.data(), data + 32, 32);
                 std::memcpy(tuple.C.data.data(), data + 64, 32);
@@ -535,14 +554,19 @@ void ShutdownFcmpConsensus()
 
 bool HasFcmpInputs(const CTransaction& tx)
 {
-    // Check for FCMP input marker in witness or script
-    // FCMP transactions use a special version or witness format
-    for (const auto& vin : tx.vin) {
-        // Check witness for FCMP data
-        if (!tx.HasWitness()) continue;
+    // Check witness stack for FCMP marker bytes 0x46434D50 ("FCMP")
+    if (!tx.HasWitness()) {
+        return false;
+    }
 
-        // Look for FCMP marker in scriptWitness
-        // (Implementation depends on serialization format chosen)
+    for (const auto& vin : tx.vin) {
+        for (const auto& item : vin.scriptWitness.stack) {
+            if (item.size() >= 4 &&
+                item[0] == 0x46 && item[1] == 0x43 &&
+                item[2] == 0x4D && item[3] == 0x50) {
+                return true;
+            }
+        }
     }
 
     return false;

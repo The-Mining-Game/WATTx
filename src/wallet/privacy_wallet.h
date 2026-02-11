@@ -17,9 +17,9 @@
 #include <optional>
 #include <vector>
 
-class CWallet;
-
 namespace wallet {
+
+class CWallet;
 
 /**
  * @brief Privacy output owned by wallet

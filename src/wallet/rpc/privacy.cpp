@@ -22,19 +22,9 @@
 
 #include <univalue.h>
 
-// Global FCMP wallet managers (keyed by wallet name)
-static std::map<std::string, std::unique_ptr<wallet::CFcmpWalletManager>> g_fcmpManagers;
-static RecursiveMutex g_fcmpManagersMutex;
-
-// Helper to get or create FCMP wallet manager
+// Helper to get wallet's FCMP manager (initialized during wallet creation)
 static wallet::CFcmpWalletManager* GetFcmpManager(const std::shared_ptr<const wallet::CWallet>& pwallet) {
-    LOCK(g_fcmpManagersMutex);
-    const std::string walletName = pwallet->GetName();
-    if (g_fcmpManagers.find(walletName) == g_fcmpManagers.end()) {
-        g_fcmpManagers[walletName] = std::make_unique<wallet::CFcmpWalletManager>(
-            const_cast<wallet::CWallet*>(pwallet.get()));
-    }
-    return g_fcmpManagers[walletName].get();
+    return const_cast<wallet::CWallet*>(pwallet.get())->GetFcmpWalletManager();
 }
 
 namespace wallet {
@@ -52,6 +42,7 @@ static RPCHelpMan getnewstealthaddress()
                 {RPCResult::Type::STR, "address", "The new stealth address"},
                 {RPCResult::Type::STR, "scan_pubkey", "The scan public key (hex)"},
                 {RPCResult::Type::STR, "spend_pubkey", "The spend public key (hex)"},
+                {RPCResult::Type::STR, "label", "The label for the stealth address"},
             }
         },
         RPCExamples{
@@ -214,8 +205,10 @@ static RPCHelpMan decodestealthaddress()
             RPCResult::Type::OBJ, "", "",
             {
                 {RPCResult::Type::BOOL, "valid", "Whether the address is valid"},
-                {RPCResult::Type::STR, "scan_pubkey", "The scan public key (hex)"},
-                {RPCResult::Type::STR, "spend_pubkey", "The spend public key (hex)"},
+                {RPCResult::Type::STR, "scan_pubkey", /*optional=*/true, "The scan public key (hex)"},
+                {RPCResult::Type::STR, "spend_pubkey", /*optional=*/true, "The spend public key (hex)"},
+                {RPCResult::Type::STR, "label", /*optional=*/true, "The label for the stealth address"},
+                {RPCResult::Type::STR, "error", /*optional=*/true, "Error message if address is invalid"},
             }
         },
         RPCExamples{
@@ -504,8 +497,22 @@ static RPCHelpMan sendfcmp()
             }
 
             // Broadcast transaction
-            // TODO: Actually broadcast via wallet
-            // For now, just return the result
+            mapValue_t mapValue;
+            mapValue["comment"] = "FCMP private transaction";
+            const_cast<CWallet*>(pwallet.get())->CommitTransaction(result.standardTx, std::move(mapValue), {});
+
+            // Mark spent inputs by matching key images to our outputs
+            uint256 spendingTxHash = result.standardTx->GetHash();
+            auto allOutputs = fcmpManager->GetFcmpOutputs(false);
+            for (const auto& ki : result.keyImages) {
+                uint256 kiHash = ki.GetHash();
+                for (const auto& out : allOutputs) {
+                    if (out.keyImageHash == kiHash) {
+                        fcmpManager->MarkFcmpOutputSpent(out.outpoint, spendingTxHash);
+                        break;
+                    }
+                }
+            }
 
             UniValue ret(UniValue::VOBJ);
             ret.pushKV("txid", result.standardTx->GetHash().GetHex());
@@ -723,6 +730,33 @@ static RPCHelpMan shieldfcmp()
             mapValue["comment"] = "FCMP shield transaction";
 
             const_cast<CWallet*>(pwallet.get())->CommitTransaction(txResult->tx, std::move(mapValue), {});
+
+            // Register the FCMP output in the wallet so balance tracking works
+            if (shieldResult.hasPrivKey) {
+                // Find the OP_RETURN output index in the committed TX
+                int opReturnVout = -1;
+                for (size_t vi = 0; vi < txResult->tx->vout.size(); vi++) {
+                    if (txResult->tx->vout[vi].scriptPubKey.size() > 0 &&
+                        txResult->tx->vout[vi].scriptPubKey[0] == OP_RETURN) {
+                        opReturnVout = vi;
+                        break;
+                    }
+                }
+
+                CFcmpOutputInfo outputInfo;
+                outputInfo.outpoint = COutPoint(txResult->tx->GetHash(), opReturnVout >= 0 ? opReturnVout : 0);
+                outputInfo.amount = amount;
+                outputInfo.privKey = shieldResult.privKey;
+                outputInfo.blinding = shieldResult.blinding;
+                outputInfo.outputTuple = shieldResult.outputTuple;
+                outputInfo.treeLeafIndex = shieldResult.leafIndex;
+                outputInfo.keyImageHash = shieldResult.keyImageHash;
+                outputInfo.blockHeight = -1; // Will be updated when confirmed
+                outputInfo.spent = false;
+                outputInfo.nTime = GetTime();
+
+                fcmpManager->AddFcmpOutput(outputInfo);
+            }
 
             UniValue ret(UniValue::VOBJ);
             ret.pushKV("txid", txResult->tx->GetHash().GetHex());

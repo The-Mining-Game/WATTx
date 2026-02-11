@@ -83,12 +83,16 @@ public:
      *
      * @param output The output tuple (O, I, C)
      * @param leaf_index Index of the output in the tree
+     * @param secret_key Secret key for Schnorr proof construction
+     * @param rerandomizer Rerandomization scalar
      * @return Serialized proof bytes
      * @throws FcmpError on failure
      */
     std::vector<uint8_t> GenerateProof(
         const curvetree::OutputTuple& output,
-        uint64_t leaf_index
+        uint64_t leaf_index,
+        const ed25519::Scalar& secret_key,
+        const ed25519::Scalar& rerandomizer
     );
 
     /**

@@ -43,6 +43,7 @@ public:
 
     bool StoreOutput(uint64_t index, const OutputTuple& output) override;
     std::optional<OutputTuple> GetOutput(uint64_t index) override;
+    bool DeleteOutput(uint64_t index) override;
 
     bool StoreMetadata(const std::string& key, const std::vector<uint8_t>& value) override;
     std::optional<std::vector<uint8_t>> GetMetadata(const std::string& key) override;

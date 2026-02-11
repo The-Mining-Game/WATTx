@@ -29,6 +29,7 @@
 #include <qt/delegationpage.h>
 #include <qt/superstakerpage.h>
 #include <qt/messagingpage.h>
+#include <qt/trusttierpage.h>
 #include <qt/hardwaresigntxdialog.h>
 #include <qt/walletframe.h>
 #include <interfaces/node.h>
@@ -106,6 +107,9 @@ WalletView::WalletView(WalletModel* wallet_model, const PlatformStyle* _platform
     messagingPage = new MessagingPage(platformStyle);
     messagingPage->setWalletModel(walletModel);
 
+    trustTierPage = new TrustTierPage(platformStyle);
+    trustTierPage->setWalletModel(walletModel);
+
     addWidget(overviewPage);
     addWidget(transactionsPage);
     addWidget(createContractPage);
@@ -117,6 +121,7 @@ WalletView::WalletView(WalletModel* wallet_model, const PlatformStyle* _platform
     addWidget(delegationPage);
     addWidget(superStakerPage);
     addWidget(messagingPage);
+    addWidget(trustTierPage);
 
     connect(overviewPage, &OverviewPage::transactionClicked, this, &WalletView::transactionClicked);
     // Clicking on a transaction on the overview pre-selects the transaction on the transaction history page
@@ -152,6 +157,8 @@ WalletView::WalletView(WalletModel* wallet_model, const PlatformStyle* _platform
     connect(delegationPage, &DelegationPage::message, this, &WalletView::message);
     // Pass through messages from superStakerPage
     connect(superStakerPage, &SuperStakerPage::message, this, &WalletView::message);
+    // Pass through messages from trustTierPage
+    connect(trustTierPage, &TrustTierPage::message, this, &WalletView::message);
 
     connect(this, &WalletView::setPrivacy, overviewPage, &OverviewPage::setPrivacy);
     connect(this, &WalletView::setPrivacy, this, &WalletView::disableTransactionView);
@@ -192,6 +199,7 @@ void WalletView::setClientModel(ClientModel *_clientModel)
     delegationPage->setClientModel(_clientModel);
     superStakerPage->setClientModel(_clientModel);
     messagingPage->setClientModel(_clientModel);
+    trustTierPage->setClientModel(_clientModel);
     if (walletModel) walletModel->setClientModel(_clientModel);
 }
 
@@ -321,6 +329,11 @@ void WalletView::gotoSuperStakerPage()
 void WalletView::gotoMessagingPage()
 {
     setCurrentWidget(messagingPage);
+}
+
+void WalletView::gotoTrustTierPage()
+{
+    setCurrentWidget(trustTierPage);
 }
 
 void WalletView::gotoSignMessageTab(QString addr)

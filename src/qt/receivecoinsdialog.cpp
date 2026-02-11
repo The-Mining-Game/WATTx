@@ -86,19 +86,16 @@ void ReceiveCoinsDialog::setModel(WalletModel *_model)
 
         // Last 2 columns are set by the columnResizingFixer, when the table geometry is ready.
         columnResizingFixer = new GUIUtil::TableViewLastColumnResizingFixer(tableView, AMOUNT_MINIMUM_COLUMN_WIDTH, DATE_COLUMN_WIDTH, this);
-        // Populate address type dropdown and select default
-        auto add_address_type = [&](OutputType type, const QString& text, const QString& tooltip) {
-            const auto index = ui->addressType->count();
-            ui->addressType->addItem(text, (int) type);
-            ui->addressType->setItemData(index, tooltip, Qt::ToolTipRole);
-            if (model->wallet().getDefaultAddressType() == type) ui->addressType->setCurrentIndex(index);
-        };
-        add_address_type(OutputType::LEGACY, tr("Base58 (Legacy)"), tr("Not recommended due to higher fees and less protection against typos."));
-        add_address_type(OutputType::P2SH_SEGWIT, tr("Base58 (P2SH-SegWit)"), tr("Generates an address compatible with older wallets."));
-        add_address_type(OutputType::BECH32, tr("Bech32 (SegWit)"), tr("Generates a native segwit address (BIP-173). Some old wallets don't support it."));
-        if (model->wallet().taprootEnabled()) {
-            add_address_type(OutputType::BECH32M, tr("Bech32m (Taproot)"), tr("Bech32m (BIP-350) is an upgrade to Bech32, wallet support is still limited."));
+        // Privacy by default: always use stealth addresses
+        // Hide the address type dropdown — all receives are private
+        ui->addressType->hide();
+        if (ui->addressType->parentWidget()) {
+            // Also hide the label if it exists
+            QLabel* addressTypeLabel = ui->addressType->parentWidget()->findChild<QLabel*>("addressTypeLabel");
+            if (addressTypeLabel) addressTypeLabel->hide();
         }
+        ui->addressType->addItem(tr("Stealth (Private)"), 99);
+        ui->addressType->setCurrentIndex(0);
 
         // Set the button to be enabled or disabled based on whether the wallet can give out new addresses.
         ui->receiveButton->setEnabled(model->wallet().canGetAddresses());
@@ -150,39 +147,22 @@ void ReceiveCoinsDialog::on_receiveButton_clicked()
     if(!model || !model->getOptionsModel() || !model->getAddressTableModel() || !model->getRecentRequestsTableModel())
         return;
 
-    QString address;
     QString label = ui->reqLabel->text();
-    /* Generate new receiving address */
-    const OutputType address_type = (OutputType)ui->addressType->currentData().toInt();
-    address = model->getAddressTableModel()->addRow(AddressTableModel::Receive, label, "", address_type);
 
-    switch(model->getAddressTableModel()->getEditStatus())
-    {
-    case AddressTableModel::EditStatus::OK: {
-        // Success
+    // Privacy by default: always generate stealth address
+    std::string stealthAddr, error;
+    if (model->wallet().generateStealthAddress(label.toStdString(), stealthAddr, error)) {
+        QString address = QString::fromStdString(stealthAddr);
+
         SendCoinsRecipient _info(address, label,
             ui->reqAmount->value(), ui->reqMessage->text());
 
-        /* Store request for later reference */
         model->getRecentRequestsTableModel()->addNewRequest(_info);
         info = _info;
-        break;
-    }
-    case AddressTableModel::EditStatus::WALLET_UNLOCK_FAILURE:
+    } else {
         QMessageBox::critical(this, windowTitle(),
-            tr("Could not unlock wallet."),
+            tr("Could not generate address: %1").arg(QString::fromStdString(error)),
             QMessageBox::Ok, QMessageBox::Ok);
-        break;
-    case AddressTableModel::EditStatus::KEY_GENERATION_FAILURE:
-        QMessageBox::critical(this, windowTitle(),
-            tr("Could not generate new %1 address").arg(QString::fromStdString(FormatOutputType(address_type))),
-            QMessageBox::Ok, QMessageBox::Ok);
-        break;
-    // These aren't valid return values for our action
-    case AddressTableModel::EditStatus::INVALID_ADDRESS:
-    case AddressTableModel::EditStatus::DUPLICATE_ADDRESS:
-    case AddressTableModel::EditStatus::NO_CHANGES:
-        assert(false);
     }
     clear();
     accept();

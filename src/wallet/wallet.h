@@ -31,6 +31,9 @@
 #include <wallet/db.h>
 #include <wallet/scriptpubkeyman.h>
 #include <wallet/transaction.h>
+#include <wallet/stealth_wallet.h>
+#include <wallet/privacy_wallet.h>
+#include <wallet/fcmp_wallet.h>
 #include <wallet/types.h>
 #include <wallet/walletutil.h>
 #include <validation.h>
@@ -1282,6 +1285,25 @@ public:
     mutable std::map<COutPoint, CScriptCache> prevoutScriptCache;
     mutable std::map<uint160, bool> addressStakeCache;
     std::atomic<bool> fCleanCoinStake = true;
+
+    // Privacy wallet managers
+    std::unique_ptr<CStealthAddressManager> m_stealth_manager;
+    std::unique_ptr<CPrivacyWalletManager> m_privacy_manager;
+    std::unique_ptr<CFcmpWalletManager> m_fcmp_manager;
+
+    CStealthAddressManager* GetStealthAddressManager() { return m_stealth_manager.get(); }
+    CPrivacyWalletManager* GetPrivacyWalletManager() { return m_privacy_manager.get(); }
+    CFcmpWalletManager* GetFcmpWalletManager() { return m_fcmp_manager.get(); }
+
+    void InitPrivacyManagers()
+    {
+        m_stealth_manager = std::make_unique<CStealthAddressManager>(this);
+        m_privacy_manager = std::make_unique<CPrivacyWalletManager>(this);
+        m_fcmp_manager = std::make_unique<CFcmpWalletManager>(this);
+        m_stealth_manager->LoadFromDB();
+        m_privacy_manager->Load();
+        m_fcmp_manager->Load();
+    }
 };
 
 /**

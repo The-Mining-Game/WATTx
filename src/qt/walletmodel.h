@@ -116,6 +116,15 @@ public:
     // Send coins to a list of recipients
     void sendCoins(WalletModelTransaction& transaction);
 
+    // Send private FCMP transaction
+    struct PrivateSendResult {
+        bool success;
+        QString txid;
+        CAmount fee;
+        QString error;
+    };
+    PrivateSendResult sendPrivateTransaction(const QList<SendCoinsRecipient>& recipients);
+
     // Wallet encryption
     bool setWalletEncrypted(const SecureString& passphrase);
     // Passphrase only needed when unlocking

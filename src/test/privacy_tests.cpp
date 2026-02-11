@@ -634,15 +634,15 @@ BOOST_AUTO_TEST_CASE(privacy_transaction_serialization_roundtrip)
 
 BOOST_AUTO_TEST_CASE(ring_size_validation)
 {
-    // Test ring size requirements
-    BOOST_CHECK(privacy::GetMinRingSize(50000) == 3);     // Early chain
-    BOOST_CHECK(privacy::GetMinRingSize(200000) == 7);    // Mid chain
-    BOOST_CHECK(privacy::GetMinRingSize(600000) == 11);   // Mature chain
+    // Test ring size requirements (privacy activates at 210,000)
+    BOOST_CHECK(privacy::GetMinRingSize(100000) == 3);    // Pre-activation
+    BOOST_CHECK(privacy::GetMinRingSize(300000) == 7);    // Early privacy
+    BOOST_CHECK(privacy::GetMinRingSize(500000) == 11);   // Mature chain
 
     // Default ring size should be at least minimum
-    BOOST_CHECK(privacy::GetDefaultRingSize(50000) >= privacy::GetMinRingSize(50000));
-    BOOST_CHECK(privacy::GetDefaultRingSize(600000) >= privacy::GetMinRingSize(600000));
-    BOOST_CHECK(privacy::GetDefaultRingSize(600000) == 11);
+    BOOST_CHECK(privacy::GetDefaultRingSize(100000) >= privacy::GetMinRingSize(100000));
+    BOOST_CHECK(privacy::GetDefaultRingSize(500000) >= privacy::GetMinRingSize(500000));
+    BOOST_CHECK(privacy::GetDefaultRingSize(500000) == 11);
 }
 
 BOOST_AUTO_TEST_CASE(privacy_output_type_detection)

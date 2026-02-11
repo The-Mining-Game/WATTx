@@ -285,6 +285,14 @@ public:
         consensus.nFcmpActivationHeight = 210000; // Activate FCMP at block 210,000
         consensus.nFcmpMaturity = 10; // FCMP outputs spendable after 10 blocks
 
+        // PoS Difficulty Fix (Hard Fork)
+        // Fixes: RBTPosLimit too easy (blocks every ~10s instead of 120s target),
+        // stakeTimestampMask=0 allowing 1-second grinding, weak adjustment algorithm.
+        // After this height: tighter PoS limit (QTUM standard), 16-second timestamp mask,
+        // and 4x stronger difficulty adjustment multiplier.
+        consensus.nPoSDifficultyFixHeight = 210000;
+        consensus.FixedRBTPosLimit = uint256{"0000000000003fffffffffffffffffffffffffffffffffffffffffffffffffff"};
+
         // WATTx Trust Tier parameters (to be added to consensus struct)
         // consensus.nMinValidatorStake = 100000 * COIN;
         // consensus.nBronzeUptime = 95;
@@ -445,6 +453,10 @@ public:
         // FCMP Privacy - Activate early for testnet testing
         consensus.nFcmpActivationHeight = 2000; // Activate FCMP at block 2,000
         consensus.nFcmpMaturity = 10;
+
+        // PoS Difficulty Fix - Activate early for testnet testing
+        consensus.nPoSDifficultyFixHeight = 500;
+        consensus.FixedRBTPosLimit = uint256{"0000000000003fffffffffffffffffffffffffffffffffffffffffffffffffff"};
     }
 };
 
@@ -914,9 +926,14 @@ public:
         consensus.nRandomXActivationHeight = 1; // RandomX active from block 1
         consensus.nX25XActivationHeight = 1; // X25X active from block 1 (genesis uses SHA256d)
 
-        // FCMP Privacy - Activate at block 1 for regtest (immediate testing)
+        // Privacy - Activate at block 1 for regtest (immediate testing)
+        consensus.nPrivacyActivationHeight = 1;
         consensus.nFcmpActivationHeight = 1;
         consensus.nFcmpMaturity = 10;
+
+        // PoS Difficulty Fix - Active from block 1 for regtest
+        consensus.nPoSDifficultyFixHeight = 1;
+        consensus.FixedRBTPosLimit = uint256{"0000000000003fffffffffffffffffffffffffffffffffffffffffffffffffff"};
 
         // WATTx regtest addresses start with 'w' (base58 prefix 135)
         base58Prefixes[PUBKEY_ADDRESS] = std::vector<unsigned char>(1,135);
@@ -1092,14 +1109,15 @@ void CChainParams::UpdateDifficultyChangeBlockHeight(int nHeight)
     consensus.posLimit = uint256{"00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
     consensus.QIP9PosLimit = uint256{"0000000000001fffffffffffffffffffffffffffffffffffffffffffffffffff"};
     consensus.RBTPosLimit = uint256{"0000000000003fffffffffffffffffffffffffffffffffffffffffffffffffff"};
+    consensus.FixedRBTPosLimit = uint256{"0000000000003fffffffffffffffffffffffffffffffffffffffffffffffffff"};
     consensus.QIP9Height = nHeight;
     consensus.fPowAllowMinDifficultyBlocks = false;
     consensus.fPowNoRetargeting = true;
     consensus.fPoSNoRetargeting = false;
     consensus.nLastPOWBlock = 5000;
     consensus.nMPoSRewardRecipients = 10;
-    consensus.nFirstMPoSBlock = consensus.nLastPOWBlock + 
-                                consensus.nMPoSRewardRecipients + 
+    consensus.nFirstMPoSBlock = consensus.nLastPOWBlock +
+                                consensus.nMPoSRewardRecipients +
                                 consensus.nCoinbaseMaturity;
     consensus.nLastMPoSBlock = 0;
 }

@@ -1529,6 +1529,227 @@ public:
         LOCK(m_wallet->cs_wallet);
         return m_wallet->GetHDKeyPath(dest, hdkeypath);
     }
+
+    //////////////////////////////////////////////////
+    // WATTx Privacy Transaction Interface
+    //////////////////////////////////////////////////
+
+    CAmount getPrivacyBalance() override
+    {
+        LOCK(m_wallet->cs_wallet);
+        if (auto* mgr = m_wallet->GetPrivacyWalletManager()) {
+            return mgr->GetPrivacyBalance();
+        }
+        return 0;
+    }
+
+    CAmount getFcmpBalance() override
+    {
+        LOCK(m_wallet->cs_wallet);
+        if (auto* mgr = m_wallet->GetFcmpWalletManager()) {
+            return mgr->GetFcmpBalance();
+        }
+        return 0;
+    }
+
+    std::vector<PrivacyOutputInfo> getPrivacyOutputs() override
+    {
+        LOCK(m_wallet->cs_wallet);
+        std::vector<PrivacyOutputInfo> result;
+        if (auto* mgr = m_wallet->GetPrivacyWalletManager()) {
+            int currentHeight = m_wallet->GetLastBlockHeight();
+            for (const auto& out : mgr->GetPrivacyOutputs(false)) {
+                PrivacyOutputInfo info;
+                info.amount = out.amount;
+                info.confirmations = currentHeight - out.blockHeight + 1;
+                info.spendable = !out.spent && info.confirmations >= 10;
+                info.isFcmp = false;
+                result.push_back(info);
+            }
+        }
+        return result;
+    }
+
+    std::vector<PrivacyOutputInfo> getFcmpOutputs() override
+    {
+        LOCK(m_wallet->cs_wallet);
+        std::vector<PrivacyOutputInfo> result;
+        if (auto* mgr = m_wallet->GetFcmpWalletManager()) {
+            int currentHeight = m_wallet->GetLastBlockHeight();
+            for (const auto& out : mgr->GetFcmpOutputs(false)) {
+                PrivacyOutputInfo info;
+                info.amount = out.amount;
+                info.confirmations = currentHeight - out.blockHeight + 1;
+                info.spendable = !out.spent && info.confirmations >= 10;
+                info.isFcmp = true;
+                result.push_back(info);
+            }
+        }
+        return result;
+    }
+
+    bool shieldFunds(CAmount amount, bool useFcmp, std::string& error) override
+    {
+        LOCK(m_wallet->cs_wallet);
+        auto* stealthMgr = m_wallet->GetStealthAddressManager();
+        if (!stealthMgr) { error = "Stealth address manager not available"; return false; }
+
+        auto addresses = stealthMgr->GetStealthAddresses();
+        if (addresses.empty()) {
+            CStealthAddressData newAddr;
+            stealthMgr->GenerateStealthAddress("default", newAddr);
+            addresses = stealthMgr->GetStealthAddresses();
+        }
+        if (addresses.empty()) { error = "Failed to create stealth address"; return false; }
+
+        if (useFcmp) {
+            if (auto* mgr = m_wallet->GetFcmpWalletManager()) {
+                auto result = mgr->CreateShieldTransaction(addresses[0].address, amount);
+                if (result.success) return true;
+                error = result.error;
+                return false;
+            }
+            error = "FCMP wallet not available";
+        } else {
+            if (auto* mgr = m_wallet->GetPrivacyWalletManager()) {
+                std::vector<std::pair<privacy::CStealthAddress, CAmount>> recipients;
+                recipients.push_back({addresses[0].address, amount});
+                CPrivacyTransactionParams params;
+                params.ringSize = 11;
+                auto result = mgr->CreatePrivacyTransaction(recipients, params);
+                if (result.success) return true;
+                error = result.error;
+                return false;
+            }
+            error = "Privacy wallet not available";
+        }
+        return false;
+    }
+
+    bool sendPrivate(const std::string& stealthAddr, CAmount amount, bool useFcmp, int ringSize, std::string& txid, std::string& error) override
+    {
+        LOCK(m_wallet->cs_wallet);
+        auto destAddr = privacy::CStealthAddress::FromString(stealthAddr);
+        if (!destAddr) { error = "Invalid stealth address"; return false; }
+
+        if (useFcmp) {
+            if (auto* mgr = m_wallet->GetFcmpWalletManager()) {
+                CFcmpRecipient recipient;
+                recipient.stealthAddress = *destAddr;
+                recipient.amount = amount;
+                auto result = mgr->CreateFcmpTransaction({recipient});
+                if (result.success) {
+                    if (result.standardTx) txid = result.standardTx->GetHash().GetHex();
+                    return true;
+                }
+                error = result.error;
+                return false;
+            }
+            error = "FCMP wallet not available";
+        } else {
+            if (auto* mgr = m_wallet->GetPrivacyWalletManager()) {
+                std::vector<std::pair<privacy::CStealthAddress, CAmount>> recipients;
+                recipients.push_back({*destAddr, amount});
+                CPrivacyTransactionParams params;
+                params.ringSize = ringSize;
+                auto result = mgr->CreatePrivacyTransaction(recipients, params);
+                if (result.success) {
+                    if (result.standardTx) txid = result.standardTx->GetHash().GetHex();
+                    return true;
+                }
+                error = result.error;
+                return false;
+            }
+            error = "Privacy wallet not available";
+        }
+        return false;
+    }
+
+    CAmount estimatePrivateFee(int numInputs, int numOutputs, bool useFcmp, int ringSize) override
+    {
+        CAmount baseFee = 10000; // 0.0001 WTX
+        if (useFcmp) {
+            return baseFee * numInputs * 5; // FCMP proofs are larger
+        }
+        return baseFee * numInputs * ringSize / 3;
+    }
+
+    bool generateStealthAddress(const std::string& label, std::string& address, std::string& error) override
+    {
+        LOCK(m_wallet->cs_wallet);
+        if (auto* mgr = m_wallet->GetStealthAddressManager()) {
+            CStealthAddressData addrData;
+            if (mgr->GenerateStealthAddress(label, addrData)) {
+                address = addrData.address.ToString();
+                return true;
+            }
+            error = "Failed to generate stealth address";
+            return false;
+        }
+        error = "Stealth address manager not available";
+        return false;
+    }
+
+    std::vector<StealthAddressInfo> getStealthAddresses() override
+    {
+        LOCK(m_wallet->cs_wallet);
+        std::vector<StealthAddressInfo> result;
+        if (auto* mgr = m_wallet->GetStealthAddressManager()) {
+            for (const auto& addr : mgr->GetStealthAddresses()) {
+                StealthAddressInfo info;
+                info.label = addr.label;
+                info.address = addr.address.ToString();
+                info.created = FormatISO8601DateTime(addr.nCreateTime);
+                result.push_back(info);
+            }
+        }
+        return result;
+    }
+
+    bool sendPrivateBatch(const std::vector<std::pair<std::string, CAmount>>& recipients,
+                           std::string& txid, CAmount& fee, std::string& error) override
+    {
+        LOCK(m_wallet->cs_wallet);
+
+        auto* fcmpMgr = m_wallet->GetFcmpWalletManager();
+        if (!fcmpMgr) {
+            error = "FCMP wallet manager not available";
+            return false;
+        }
+
+        // Build FCMP recipient list
+        std::vector<CFcmpRecipient> fcmpRecipients;
+        for (const auto& [addrStr, amount] : recipients) {
+            auto destAddr = privacy::CStealthAddress::FromString(addrStr);
+            if (!destAddr) {
+                error = "Invalid stealth address: " + addrStr;
+                return false;
+            }
+
+            CFcmpRecipient r;
+            r.stealthAddress = *destAddr;
+            r.amount = amount;
+            fcmpRecipients.push_back(r);
+        }
+
+        // Create FCMP transaction
+        auto result = fcmpMgr->CreateFcmpTransaction(fcmpRecipients);
+        if (!result.success) {
+            error = result.error;
+            return false;
+        }
+
+        fee = result.fee;
+
+        // Commit the transaction
+        if (result.standardTx) {
+            txid = result.standardTx->GetHash().GetHex();
+            m_wallet->CommitTransaction(result.standardTx, {}, {});
+        }
+
+        return true;
+    }
+
     std::unique_ptr<Handler> handleUnload(UnloadFn fn) override
     {
         return MakeSignalHandler(m_wallet->NotifyUnload.connect(fn));

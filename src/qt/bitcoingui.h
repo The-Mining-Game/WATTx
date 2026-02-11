@@ -181,6 +181,7 @@ private:
     QAction* delegationAction = nullptr;
     QAction* superStakerAction = nullptr;
     QAction* messagingAction = nullptr;
+    QAction* trustTierAction = nullptr;
     QAction* walletStakeAction = nullptr;
     QAction* signTxHardwareAction = nullptr;
     QAction* m_create_wallet_action{nullptr};
@@ -341,6 +342,8 @@ public Q_SLOTS:
     void gotoSuperStakerPage();
     /** Switch to messaging page */
     void gotoMessagingPage();
+    /** Switch to trust tier page */
+    void gotoTrustTierPage();
 
     /** Show Sign/Verify Message dialog and switch to sign message tab */
     void gotoSignMessageTab(QString addr = "");

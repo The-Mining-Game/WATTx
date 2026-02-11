@@ -238,6 +238,11 @@ struct Params {
 
     int64_t StakeTimestampMask(int height) const
     {
+        // After PoS difficulty fix: enforce 16-second timestamp granularity
+        // to prevent rapid-fire staking (was 1-second with mask=0)
+        if (height >= nPoSDifficultyFixHeight) {
+            return 15; // 16-second intervals (mask 0xF)
+        }
         return height < nReduceBlocktimeHeight ? nStakeTimestampMask : nRBTStakeTimestampMask;
     }
     int64_t MinStakeTimestampMask() const
@@ -341,12 +346,6 @@ struct Params {
     int nGoldUptimeThreshold{990};     // 99.0% uptime for Gold
     int nPlatinumUptimeThreshold{999}; // 99.9% uptime for Platinum
 
-    /** Block reward multipliers for each tier (in percentage, 100 = 1.0x) */
-    int nBronzeRewardMultiplier{100};   // 1.0x reward
-    int nSilverRewardMultiplier{125};   // 1.25x reward
-    int nGoldRewardMultiplier{150};     // 1.5x reward
-    int nPlatinumRewardMultiplier{200}; // 2.0x reward
-
     /** Base block reward in satoshis (5 WATTx per block for each PoW/PoS) */
     /** 50% to PoW miners, 50% to PoS stakers - each receives this amount */
     int64_t nBaseBlockReward{500000000};
@@ -359,7 +358,7 @@ struct Params {
     //////////////////////////////////////////////////
 
     /** Height at which AuxPoW (merged mining with Monero) becomes active */
-    int nAuxPowActivationHeight{50000}; // Placeholder - set actual activation height
+    int nAuxPowActivationHeight{210000}; // Activate merged mining at block 210,000
 
     /** WATTx chain ID for merged mining (prevents cross-chain replay) */
     int32_t nAuxPowChainId{0x5754}; // "WT" in hex
@@ -380,11 +379,30 @@ struct Params {
     //////////////////////////////////////////////////
 
     /** Height at which EVM transaction anchoring to Monero becomes active */
-    int nEVMAnchorActivationHeight{50000}; // Same as AuxPoW activation
+    int nEVMAnchorActivationHeight{210000}; // Activate EVM anchoring at block 210,000
 
     /** Check if EVM anchoring is active at given height */
     bool IsEVMAnchorActive(int height) const {
         return height >= nEVMAnchorActivationHeight;
+    }
+
+    //////////////////////////////////////////////////
+    // WATTx PoS Difficulty Fix (Hard Fork)
+    //////////////////////////////////////////////////
+
+    /** Height at which PoS difficulty fix activates.
+     *  Fixes: RBTPosLimit too easy (2^228), stakeTimestampMask=0 (1-sec grinding),
+     *  and weak difficulty adjustment causing ~10s blocks instead of 120s target.
+     *  After this height: tighter PoS limit, 16-second timestamp granularity. */
+    int nPoSDifficultyFixHeight{std::numeric_limits<int>::max()}; // Disabled by default
+
+    /** Tighter PoS difficulty limit after the fix (matches QTUM standard ~2^214).
+     *  Replaces the broken RBTPosLimit (2^228) which was 16,384x too easy. */
+    uint256 FixedRBTPosLimit;
+
+    /** Check if PoS difficulty fix is active at given height */
+    bool IsPoSDifficultyFixActive(int height) const {
+        return height >= nPoSDifficultyFixHeight;
     }
 
     //////////////////////////////////////////////////
@@ -407,7 +425,7 @@ struct Params {
     //////////////////////////////////////////////////
 
     /** Block height at which privacy transactions become valid */
-    int nPrivacyActivationHeight{100000};
+    int nPrivacyActivationHeight{210000};
 
     /** Check if privacy transactions are active at given height */
     bool IsPrivacyActive(int height) const {

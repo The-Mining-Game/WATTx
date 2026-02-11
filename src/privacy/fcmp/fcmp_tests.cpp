@@ -353,9 +353,11 @@ void TestCurveTreeIntegration() {
     size_t est_size = prover.EstimateProofSize(1);
     TEST_ASSERT(est_size > 0, "Estimated proof size should be positive");
 
-    // Generate proof (placeholder - will just hash inputs)
+    // Generate proof with Schnorr sigma protocol
     try {
-        auto proof = prover.GenerateProof(output1, 0);
+        auto sk = util::RandomScalar();
+        auto rerand = util::RandomScalar();
+        auto proof = prover.GenerateProof(output1, 0, sk, rerand);
         TEST_ASSERT(!proof.empty(), "Proof should not be empty");
 
         std::cout << "  Generated proof size: " << proof.size() << " bytes" << std::endl;

@@ -49,6 +49,10 @@ bool CStealthAddressManager::GenerateStealthAddress(const std::string& label,
     uint256 addrHash = HashStealthAddress(addressData.address);
     m_stealthAddresses[addrHash] = addressData;
 
+    // Persist immediately
+    WalletBatch batch(m_wallet->GetDatabase());
+    StealthAddressDB::WriteStealthAddress(batch, addressData);
+
     LogPrintf("Generated new stealth address: %s (label: %s)\n",
               addressData.address.ToString(), label);
     return true;
@@ -79,6 +83,10 @@ bool CStealthAddressManager::ImportStealthAddress(const CKey& scanKey, const CKe
     }
 
     m_stealthAddresses[addrHash] = addressData;
+
+    // Persist immediately
+    WalletBatch batch(m_wallet->GetDatabase());
+    StealthAddressDB::WriteStealthAddress(batch, addressData);
 
     LogPrintf("Imported stealth address: %s (label: %s)\n",
               addressData.address.ToString(), label);
@@ -119,93 +127,134 @@ std::optional<CStealthAddressData> CStealthAddressManager::GetStealthAddressByHa
     return std::nullopt;
 }
 
-std::optional<CStealthPayment> CStealthAddressManager::TryDetectPayment(
-    const CTxOut& txout,
-    uint32_t outputIndex,
-    const uint256& txid,
+std::vector<CStealthPayment> CStealthAddressManager::TryDetectPayments(
+    const CTransaction& tx,
     int blockHeight)
 {
-    // Extract pubkey from output
-    std::vector<std::vector<unsigned char>> solutions;
-    TxoutType type = Solver(txout.scriptPubKey, solutions);
+    std::vector<CStealthPayment> found;
+    uint256 txid = tx.GetHash();
 
-    CPubKey outputPubKey;
-    if (type == TxoutType::PUBKEY && solutions.size() >= 1) {
-        outputPubKey = CPubKey(solutions[0]);
-    } else {
-        // Not a P2PK output, can't be stealth
-        return std::nullopt;
-    }
+    // Step 1: Find ephemeral pubkey R from OP_RETURN outputs with "WTXS" marker
+    CPubKey ephemeralPubKey;
+    bool hasEphemeral = false;
 
-    if (!outputPubKey.IsFullyValid()) {
-        return std::nullopt;
-    }
+    for (const auto& txout : tx.vout) {
+        if (!txout.scriptPubKey.IsUnspendable()) continue;
 
-    // Look for ephemeral pubkey in OP_RETURN output (would need context of full tx)
-    // For now, this is a simplified detection that tries each address
-    // In practice, ephemeral pubkey would be encoded in a preceding OP_RETURN output
+        // Parse OP_RETURN data
+        CScript::const_iterator it = txout.scriptPubKey.begin();
+        opcodetype opcode;
+        std::vector<unsigned char> data;
 
-    // Try each of our stealth addresses
-    for (const auto& [addrHash, addrData] : m_stealthAddresses) {
-        // In a full implementation, we would:
-        // 1. Find the ephemeral pubkey R from OP_RETURN
-        // 2. Compute shared secret S = scan_privkey * R
-        // 3. Derive expected pubkey P = spend_pubkey + H(S)*G
-        // 4. Check if P matches outputPubKey
+        // Skip OP_RETURN
+        if (!txout.scriptPubKey.GetOp(it, opcode) || opcode != OP_RETURN) continue;
+        if (!txout.scriptPubKey.GetOp(it, opcode, data)) continue;
 
-        // For now, use the basic detection with ephemeral pubkey assumed from context
-        // This is a placeholder - real implementation needs full tx context
-
-        CKey derivedKey;
-        // Try with output pubkey as ephemeral (simplified - not correct protocol)
-        if (privacy::DeriveStealthSpendingKey(addrData.scanPrivKey, addrData.spendPrivKey,
-                                               outputPubKey, outputIndex, derivedKey)) {
-            // Verify the derived public key matches
-            if (derivedKey.GetPubKey() == outputPubKey) {
-                CStealthPayment payment;
-                payment.txid = txid;
-                payment.nOutput = outputIndex;
-                payment.nValue = txout.nValue;
-                payment.oneTimePubKey = outputPubKey;
-                payment.derivedPrivKey = derivedKey;
-                payment.stealthAddressHash = addrHash;
-                payment.blockHeight = blockHeight;
-                payment.spent = false;
-
-                LogPrintf("Detected stealth payment: %s:%d, amount=%d, to address=%s\n",
-                          txid.ToString(), outputIndex, txout.nValue, addrData.address.ToString());
-                return payment;
+        // Check for "WTXS" stealth marker (4 bytes) + compressed pubkey (33 bytes)
+        if (data.size() >= 37 &&
+            data[0] == 'W' && data[1] == 'T' && data[2] == 'X' && data[3] == 'S') {
+            std::vector<unsigned char> pubkeyData(data.begin() + 4, data.begin() + 37);
+            CPubKey candidate(pubkeyData);
+            if (candidate.IsFullyValid()) {
+                ephemeralPubKey = candidate;
+                hasEphemeral = true;
+                break;
             }
         }
     }
 
-    return std::nullopt;
+    if (!hasEphemeral) return found;
+
+    // Step 2: For each non-OP_RETURN output, try to match against our stealth addresses
+    for (uint32_t i = 0; i < tx.vout.size(); i++) {
+        const CTxOut& txout = tx.vout[i];
+        if (txout.scriptPubKey.IsUnspendable()) continue;
+
+        // Extract pubkey from output
+        std::vector<std::vector<unsigned char>> solutions;
+        TxoutType type = Solver(txout.scriptPubKey, solutions);
+
+        CPubKey outputPubKey;
+        if (type == TxoutType::PUBKEY && solutions.size() >= 1) {
+            outputPubKey = CPubKey(solutions[0]);
+        } else {
+            continue;
+        }
+
+        if (!outputPubKey.IsFullyValid()) continue;
+
+        // Step 3: Try each stealth address using proper DKSAP protocol
+        for (const auto& [addrHash, addrData] : m_stealthAddresses) {
+            // Build a CStealthOutput from the ephemeral data and output pubkey
+            privacy::CStealthOutput stealthOut;
+            stealthOut.oneTimePubKey = outputPubKey;
+            stealthOut.ephemeral = privacy::CEphemeralData(ephemeralPubKey, 0);
+            stealthOut.outputIndex = i;
+
+            // Compute view tag for fast filtering
+            // S = scan_privkey * R (ECDH shared secret)
+            // view_tag = first byte of H(S)
+            uint8_t viewTag = privacy::ComputeViewTag(
+                CPubKey()); // Compute from ephemeral - ScanStealthOutput does full check
+
+            // Use ScanStealthOutput which implements proper DKSAP:
+            // 1. S = scan_privkey * R
+            // 2. P' = spend_pubkey + H(S, outputIndex)*G
+            // 3. Check P' == outputPubKey
+            // 4. If match, derive spending key = spend_privkey + H(S, outputIndex)
+            CKey derivedKey;
+            if (privacy::ScanStealthOutput(stealthOut, addrData.scanPrivKey,
+                                            addrData.address.spendPubKey, derivedKey)) {
+                // Verify the derived key matches the output
+                if (derivedKey.GetPubKey() == outputPubKey) {
+                    CStealthPayment payment;
+                    payment.txid = txid;
+                    payment.nOutput = i;
+                    payment.nValue = txout.nValue;
+                    payment.oneTimePubKey = outputPubKey;
+                    payment.derivedPrivKey = derivedKey;
+                    payment.stealthAddressHash = addrHash;
+                    payment.blockHeight = blockHeight;
+                    payment.spent = false;
+
+                    LogPrintf("Detected stealth payment: %s:%d, amount=%d, to address=%s\n",
+                              txid.ToString(), i, txout.nValue, addrData.address.ToString());
+                    found.push_back(payment);
+                    break; // One address match per output
+                }
+            }
+        }
+    }
+
+    return found;
 }
 
 std::vector<CStealthPayment> CStealthAddressManager::ScanTransactionForPayments(
     const CTransaction& tx)
 {
     LOCK(cs_stealth);
-    std::vector<CStealthPayment> payments;
 
     if (m_stealthAddresses.empty()) {
-        return payments;
+        return {};
     }
 
-    uint256 txid = tx.GetHash();
+    auto payments = TryDetectPayments(tx, -1);
 
-    for (uint32_t i = 0; i < tx.vout.size(); i++) {
-        auto payment = TryDetectPayment(tx.vout[i], i, txid, -1);
-        if (payment) {
-            COutPoint outpoint(Txid::FromUint256(txid), i);
+    for (auto& payment : payments) {
+        COutPoint outpoint = payment.GetOutpoint();
 
-            // Check if we already have this payment
-            if (m_payments.find(outpoint) == m_payments.end()) {
-                m_payments[outpoint] = *payment;
-                m_paymentKeys[outpoint] = payment->derivedPrivKey;
-            }
+        // Check if we already have this payment
+        if (m_payments.find(outpoint) == m_payments.end()) {
+            m_payments[outpoint] = payment;
+            m_paymentKeys[outpoint] = payment.derivedPrivKey;
 
-            payments.push_back(*payment);
+            // Persist immediately
+            WalletBatch batch(m_wallet->GetDatabase());
+            StealthAddressDB::WriteStealthPayment(batch, payment);
+
+            // Persist the derived key (serialized)
+            std::vector<unsigned char> keyData(UCharCast(payment.derivedPrivKey.begin()), UCharCast(payment.derivedPrivKey.end()));
+            StealthAddressDB::WriteStealthKey(batch, outpoint, payment.derivedPrivKey);
         }
     }
 
@@ -216,35 +265,37 @@ std::vector<CStealthPayment> CStealthAddressManager::ScanBlockForPayments(
     const CBlock& block, int height)
 {
     LOCK(cs_stealth);
-    std::vector<CStealthPayment> payments;
+    std::vector<CStealthPayment> allPayments;
 
     if (m_stealthAddresses.empty()) {
-        return payments;
+        return allPayments;
     }
 
+    WalletBatch batch(m_wallet->GetDatabase());
+
     for (const auto& tx : block.vtx) {
-        uint256 txid = tx->GetHash();
+        auto payments = TryDetectPayments(*tx, height);
 
-        for (uint32_t i = 0; i < tx->vout.size(); i++) {
-            auto payment = TryDetectPayment(tx->vout[i], i, txid, height);
-            if (payment) {
-                COutPoint outpoint(Txid::FromUint256(txid), i);
+        for (auto& payment : payments) {
+            COutPoint outpoint = payment.GetOutpoint();
 
-                // Update height if we already have it from mempool
-                auto it = m_payments.find(outpoint);
-                if (it != m_payments.end()) {
-                    it->second.blockHeight = height;
-                } else {
-                    m_payments[outpoint] = *payment;
-                    m_paymentKeys[outpoint] = payment->derivedPrivKey;
-                }
-
-                payments.push_back(*payment);
+            // Update height if we already have it from mempool
+            auto it = m_payments.find(outpoint);
+            if (it != m_payments.end()) {
+                it->second.blockHeight = height;
+                StealthAddressDB::WriteStealthPayment(batch, it->second);
+            } else {
+                m_payments[outpoint] = payment;
+                m_paymentKeys[outpoint] = payment.derivedPrivKey;
+                StealthAddressDB::WriteStealthPayment(batch, payment);
+                StealthAddressDB::WriteStealthKey(batch, outpoint, payment.derivedPrivKey);
             }
+
+            allPayments.push_back(payment);
         }
     }
 
-    return payments;
+    return allPayments;
 }
 
 std::vector<CStealthPayment> CStealthAddressManager::GetStealthPayments(bool includeSpent) const
@@ -348,16 +399,65 @@ std::optional<CKey> CStealthAddressManager::GetPrivateKeyForOutput(const COutPoi
 
 bool CStealthAddressManager::LoadFromDB()
 {
-    // Simplified loading - in production would use proper wallet database
-    // For now, just log that we'd load from database
-    LogPrintf("Stealth address manager: load from DB (stub)\n");
+    LOCK(cs_stealth);
+
+    // Load stealth addresses
+    if (!StealthAddressDB::ReadStealthAddresses(m_wallet->GetDatabase(), m_stealthAddresses)) {
+        LogPrintf("Warning: Failed to load stealth addresses from DB\n");
+        return false;
+    }
+
+    // Load stealth payments
+    if (!StealthAddressDB::ReadStealthPayments(m_wallet->GetDatabase(), m_payments)) {
+        LogPrintf("Warning: Failed to load stealth payments from DB\n");
+        return false;
+    }
+
+    // Load derived keys for each payment
+    for (const auto& [outpoint, payment] : m_payments) {
+        CKey key;
+        if (StealthAddressDB::ReadStealthKey(m_wallet->GetDatabase(), outpoint, key)) {
+            m_paymentKeys[outpoint] = key;
+        }
+    }
+
+    LogPrintf("Stealth address manager: loaded %d addresses, %d payments\n",
+              m_stealthAddresses.size(), m_payments.size());
     return true;
 }
 
 bool CStealthAddressManager::SaveToDB()
 {
-    // Simplified saving - in production would use proper wallet database
-    LogPrintf("Stealth address manager: save to DB (stub)\n");
+    LOCK(cs_stealth);
+
+    WalletBatch batch(m_wallet->GetDatabase());
+
+    // Save all stealth addresses
+    for (const auto& [hash, data] : m_stealthAddresses) {
+        if (!StealthAddressDB::WriteStealthAddress(batch, data)) {
+            LogPrintf("Error: Failed to save stealth address to DB\n");
+            return false;
+        }
+    }
+
+    // Save all payments
+    for (const auto& [outpoint, payment] : m_payments) {
+        if (!StealthAddressDB::WriteStealthPayment(batch, payment)) {
+            LogPrintf("Error: Failed to save stealth payment to DB\n");
+            return false;
+        }
+    }
+
+    // Save derived keys
+    for (const auto& [outpoint, key] : m_paymentKeys) {
+        if (!StealthAddressDB::WriteStealthKey(batch, outpoint, key)) {
+            LogPrintf("Error: Failed to save stealth key to DB\n");
+            return false;
+        }
+    }
+
+    LogPrintf("Stealth address manager: saved %d addresses, %d payments\n",
+              m_stealthAddresses.size(), m_payments.size());
     return true;
 }
 
@@ -381,59 +481,109 @@ uint256 CStealthAddressManager::HashStealthAddress(const privacy::CStealthAddres
 }
 
 //
-// StealthAddressDB Implementation (stub - uses memory for now)
+// StealthAddressDB Implementation
 //
 
 bool StealthAddressDB::WriteStealthAddress(WalletBatch& batch, const CStealthAddressData& addressData)
 {
-    // Stub - would write to wallet database
-    (void)batch;
-    (void)addressData;
-    return true;
+    // Compute hash for keying
+    HashWriter hasher;
+    hasher << addressData.address.scanPubKey << addressData.address.spendPubKey;
+    uint256 hash = hasher.GetHash();
+    return batch.WriteStealthAddress(hash, addressData);
 }
 
 bool StealthAddressDB::ReadStealthAddresses(WalletDatabase& db,
                                              std::map<uint256, CStealthAddressData>& addresses)
 {
-    // Stub - would read from wallet database
-    (void)db;
     addresses.clear();
+
+    WalletBatch batch(db, false);
+
+    DataStream prefix;
+    prefix << DBKeys::STEALTH_ADDR;
+
+    std::unique_ptr<DatabaseCursor> cursor = batch.GetBatch().GetNewPrefixCursor(prefix);
+    if (!cursor) return false;
+
+    DataStream ssKey, ssValue;
+    while (true) {
+        DatabaseCursor::Status status = cursor->Next(ssKey, ssValue);
+        if (status == DatabaseCursor::Status::DONE) break;
+        if (status == DatabaseCursor::Status::FAIL) return false;
+
+        std::string type;
+        ssKey >> type;
+        uint256 hash;
+        ssKey >> hash;
+
+        CStealthAddressData data;
+        ssValue >> data;
+        addresses[hash] = data;
+    }
+
     return true;
 }
 
 bool StealthAddressDB::WriteStealthPayment(WalletBatch& batch, const CStealthPayment& payment)
 {
-    // Stub
-    (void)batch;
-    (void)payment;
-    return true;
+    COutPoint outpoint = payment.GetOutpoint();
+    return batch.WriteStealthPayment(outpoint, payment);
 }
 
 bool StealthAddressDB::ReadStealthPayments(WalletDatabase& db,
                                             std::map<COutPoint, CStealthPayment>& payments)
 {
-    // Stub
-    (void)db;
     payments.clear();
+
+    WalletBatch batch(db, false);
+
+    DataStream prefix;
+    prefix << DBKeys::STEALTH_PAYMENT;
+
+    std::unique_ptr<DatabaseCursor> cursor = batch.GetBatch().GetNewPrefixCursor(prefix);
+    if (!cursor) return false;
+
+    DataStream ssKey, ssValue;
+    while (true) {
+        DatabaseCursor::Status status = cursor->Next(ssKey, ssValue);
+        if (status == DatabaseCursor::Status::DONE) break;
+        if (status == DatabaseCursor::Status::FAIL) return false;
+
+        std::string type;
+        ssKey >> type;
+        Txid hash;
+        uint32_t n;
+        ssKey >> hash;
+        ssKey >> n;
+
+        CStealthPayment payment;
+        ssValue >> payment;
+        payments[COutPoint(hash, n)] = payment;
+    }
+
     return true;
 }
 
 bool StealthAddressDB::WriteStealthKey(WalletBatch& batch, const COutPoint& outpoint, const CKey& key)
 {
-    // Stub
-    (void)batch;
-    (void)outpoint;
-    (void)key;
-    return true;
+    // Serialize key as raw bytes
+    std::vector<unsigned char> keyData(UCharCast(key.begin()), UCharCast(key.end()));
+    return batch.WriteStealthKey(outpoint, keyData);
 }
 
 bool StealthAddressDB::ReadStealthKey(WalletDatabase& db, const COutPoint& outpoint, CKey& key)
 {
-    // Stub
-    (void)db;
-    (void)outpoint;
-    (void)key;
-    return false;
+    WalletBatch batch(db, false);
+    std::vector<unsigned char> keyData;
+    if (!batch.ReadStealthKey(outpoint, keyData)) {
+        return false;
+    }
+
+    // Reconstruct CKey from raw bytes
+    if (keyData.size() != 32) return false;
+    key.Set(keyData.begin(), keyData.end(), true);
+    return key.IsValid();
 }
 
 } // namespace wallet

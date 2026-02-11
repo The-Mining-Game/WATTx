@@ -198,6 +198,10 @@ std::optional<OutputTuple> MemoryTreeStorage::GetOutput(uint64_t index) {
     return std::nullopt;
 }
 
+bool MemoryTreeStorage::DeleteOutput(uint64_t index) {
+    return m_outputs.erase(index) > 0;
+}
+
 bool MemoryTreeStorage::StoreMetadata(const std::string& key, const std::vector<uint8_t>& value) {
     m_metadata[key] = value;
     return true;
@@ -350,6 +354,75 @@ std::optional<OutputTuple> CurveTree::GetOutput(uint64_t index) const {
 
 bool CurveTree::HasOutput(uint64_t index) const {
     return m_storage->GetOutput(index).has_value();
+}
+
+bool CurveTree::RemoveLastN(uint64_t count) {
+    if (count == 0) return true;
+    if (count > m_output_count) return false;
+
+    m_storage->BeginBatch();
+
+    // Delete outputs from the end
+    for (uint64_t i = 0; i < count; ++i) {
+        uint64_t idx = m_output_count - 1 - i;
+        m_storage->DeleteOutput(idx);
+    }
+
+    // Update output count
+    m_output_count -= count;
+
+    // Recalculate depth
+    m_depth = CalculateDepth(m_output_count);
+
+    // Rebuild affected tree portions
+    // For simplicity and correctness, rebuild from the first affected leaf commitment
+    if (m_output_count > 0) {
+        uint64_t first_affected_leaf = m_output_count / TreeConfig::LEAF_BRANCH_WIDTH;
+        // Rebuild from the affected leaf up
+        uint64_t num_leaf_commits = (m_output_count + TreeConfig::LEAF_BRANCH_WIDTH - 1) /
+                                     TreeConfig::LEAF_BRANCH_WIDTH;
+
+        // Recompute affected leaf nodes
+        for (uint64_t i = first_affected_leaf; i < num_leaf_commits; ++i) {
+            Point hash = ComputeLeafNode(i);
+            uint64_t start = i * TreeConfig::LEAF_BRANCH_WIDTH;
+            uint64_t end = std::min(start + TreeConfig::LEAF_BRANCH_WIDTH, m_output_count);
+            m_storage->StoreNode(TreeIndex(0, i), TreeNode(hash, end - start));
+        }
+
+        // Clean up any orphaned leaf nodes beyond current range
+        for (uint64_t i = num_leaf_commits; ; ++i) {
+            if (!m_storage->DeleteNode(TreeIndex(0, i))) break;
+        }
+
+        // Rebuild internal layers
+        uint64_t nodes_at_prev_layer = num_leaf_commits;
+        for (uint32_t layer = 1; layer < m_depth; ++layer) {
+            uint64_t nodes_at_layer = (nodes_at_prev_layer + TreeConfig::INTERNAL_BRANCH_WIDTH - 1) /
+                                       TreeConfig::INTERNAL_BRANCH_WIDTH;
+
+            for (uint64_t i = 0; i < nodes_at_layer; ++i) {
+                auto children = GetChildren(TreeIndex(layer, i));
+                if (!children.empty()) {
+                    Point hash = ComputeNodeHash(children);
+                    m_storage->StoreNode(TreeIndex(layer, i), TreeNode(hash, children.size()));
+                }
+            }
+
+            // Clean up orphaned nodes
+            for (uint64_t i = nodes_at_layer; ; ++i) {
+                if (!m_storage->DeleteNode(TreeIndex(layer, i))) break;
+            }
+
+            nodes_at_prev_layer = nodes_at_layer;
+        }
+    }
+
+    m_storage->CommitBatch();
+    m_root_dirty = true;
+    Save();
+
+    return true;
 }
 
 Point CurveTree::ComputeLeafCommitment(const std::vector<Scalar>& elements) const {

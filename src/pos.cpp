@@ -838,30 +838,6 @@ trust::TrustTier GetStakerTrustTier(const CScript& scriptPubKey, trust::TrustSco
     return trustManager.GetValidatorTier(keyId);
 }
 
-CAmount CalculateTieredBlockReward(CAmount nBaseReward, trust::TrustTier tier, const Consensus::Params& params)
-{
-    int multiplier = GetTierRewardMultiplier(tier, params);
-
-    // Apply multiplier (multiplier is percentage, e.g., 150 = 1.5x)
-    return (nBaseReward * multiplier) / 100;
-}
-
-int GetTierRewardMultiplier(trust::TrustTier tier, const Consensus::Params& params)
-{
-    switch (tier) {
-        case trust::TrustTier::PLATINUM:
-            return params.nPlatinumRewardMultiplier;
-        case trust::TrustTier::GOLD:
-            return params.nGoldRewardMultiplier;
-        case trust::TrustTier::SILVER:
-            return params.nSilverRewardMultiplier;
-        case trust::TrustTier::BRONZE:
-            return params.nBronzeRewardMultiplier;
-        case trust::TrustTier::NONE:
-        default:
-            return 0; // No reward for ineligible validators
-    }
-}
 
 bool IsTrustTierActive(int nHeight, const Consensus::Params& params)
 {
@@ -933,8 +909,8 @@ bool CheckTieredProofOfStake(CBlockIndex* pindexPrev, BlockValidationState& stat
                                       info->GetUptimePercentage() / 10));
     }
 
-    LogDebug(BCLog::COINSTAKE, "CheckTieredProofOfStake(): Validator %s has %s tier, multiplier %d%%\n",
-             validatorId.ToString(), trust::TrustTierToString(tier), GetTierRewardMultiplier(tier, params));
+    LogDebug(BCLog::COINSTAKE, "CheckTieredProofOfStake(): Validator %s has %s tier\n",
+             validatorId.ToString(), trust::TrustTierToString(tier));
 
     return true;
 }

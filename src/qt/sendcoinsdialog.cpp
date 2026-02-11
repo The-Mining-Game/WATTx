@@ -485,6 +485,85 @@ void SendCoinsDialog::sendButtonClicked([[maybe_unused]] bool checked)
     if(!model || !model->getOptionsModel())
         return;
 
+    // Collect recipients first for private send path
+    QList<SendCoinsRecipient> recipients;
+    bool valid = true;
+    for(int i = 0; i < ui->entries->count(); ++i)
+    {
+        SendCoinsEntry *entry = qobject_cast<SendCoinsEntry*>(ui->entries->itemAt(i)->widget());
+        if(entry)
+        {
+            // Accept both standard and stealth addresses
+            recipients.append(entry->getValue());
+            if (recipients.last().amount <= 0) {
+                valid = false;
+            }
+        }
+    }
+
+    if(!valid || recipients.isEmpty())
+    {
+        fNewRecipientAllowed = true;
+        return;
+    }
+
+    // Check if FCMP balance is sufficient for private send
+    CAmount totalAmount = 0;
+    for (const auto& rcp : recipients) {
+        totalAmount += rcp.amount;
+    }
+    CAmount fcmpBalance = model->wallet().getFcmpBalance();
+
+    // Route through FCMP private send if we have sufficient FCMP balance
+    if (fcmpBalance >= totalAmount) {
+        // Build confirmation dialog for private send
+        QString question_string = tr("<b>Are you sure you want to send?</b><br><br>");
+        question_string.append(tr("This will create a <b>private FCMP transaction</b> with full anonymity.<br><br>"));
+
+        CAmount estimatedFee = model->wallet().estimatePrivateFee(2, recipients.size() + 1, true, 0);
+        QString formattedFee = BitcoinUnits::formatWithUnit(model->getOptionsModel()->getDisplayUnit(), estimatedFee);
+
+        for (const auto& rcp : recipients) {
+            QString formattedAmount = BitcoinUnits::formatWithUnit(model->getOptionsModel()->getDisplayUnit(), rcp.amount);
+            question_string.append(tr("Send %1 to %2").arg(formattedAmount, rcp.address));
+            question_string.append("<br>");
+        }
+        question_string.append(tr("<br>Estimated fee: %1").arg(formattedFee));
+
+        auto confirmationDialog = new SendConfirmationDialog(
+            tr("Confirm private send"), question_string, "", "", SEND_CONFIRM_DELAY, true, false, this);
+        confirmationDialog->setAttribute(Qt::WA_DeleteOnClose);
+        const auto retval = static_cast<QMessageBox::StandardButton>(confirmationDialog->exec());
+
+        if (retval != QMessageBox::Yes) {
+            fNewRecipientAllowed = true;
+            return;
+        }
+
+        // Request wallet unlock
+        WalletModel::UnlockContext ctx(model->requestUnlock());
+        if (!ctx.isValid()) {
+            fNewRecipientAllowed = true;
+            return;
+        }
+
+        // Execute private send
+        auto result = model->sendPrivateTransaction(recipients);
+        if (result.success) {
+            accept();
+            m_coin_control->UnSelectAll();
+            coinControlUpdateLabels();
+        } else {
+            QMessageBox::warning(this, tr("Send Failed"),
+                tr("Private send failed: %1").arg(result.error));
+        }
+
+        fNewRecipientAllowed = true;
+        m_current_transaction.reset();
+        return;
+    }
+
+    // Fallback: standard transparent send flow (when no FCMP balance available)
     QString question_string, informative_text, detailed_text;
     if (!PrepareSendText(question_string, informative_text, detailed_text)) return;
     assert(m_current_transaction);
@@ -524,19 +603,13 @@ void SendCoinsDialog::sendButtonClicked([[maybe_unused]] bool checked)
             CMutableTransaction mtx = CMutableTransaction{*(m_current_transaction->getWtx())};
             PartiallySignedTransaction psbtx(mtx);
             bool complete = false;
-            // Always fill without signing first. This prevents an external signer
-            // from being called prematurely and is not expensive.
             const auto err{model->wallet().fillPSBT(SIGHASH_ALL, /*sign=*/false, /*bip32derivs=*/true, /*n_signed=*/nullptr, psbtx, complete)};
             assert(!complete);
             assert(!err);
             send_failure = !signWithExternalSigner(psbtx, mtx, complete);
-            // Don't broadcast when user rejects it on the device or there's a failure:
             broadcast = complete && !send_failure;
             if (!send_failure) {
-                // A transaction signed with an external signer is not always complete,
-                // e.g. in a multisig wallet.
                 if (complete) {
-                    // Prepare transaction for broadcast transaction if complete
                     const CTransactionRef tx = MakeTransactionRef(mtx);
                     m_current_transaction->setWtx(tx);
                 } else {
@@ -544,30 +617,22 @@ void SendCoinsDialog::sendButtonClicked([[maybe_unused]] bool checked)
                 }
             }
         }
-
-        // Sign psbt with hwi tool
         else if(model->getSignPsbtWithHwiTool())
         {
-            // Create psbt
             CMutableTransaction mtx = CMutableTransaction{*(m_current_transaction->getWtx())};
             PartiallySignedTransaction psbtx(mtx);
             bool complete = false;
-
-            // Fill without signing
             const auto err{model->wallet().fillPSBT(SIGHASH_ALL, /*sign=*/false, /*bip32derivs=*/true, /*n_signed=*/nullptr, psbtx, complete)};
             assert(!complete);
             assert(!err);
 
-            // Serialize the PSBT
             DataStream ssTx;
             ssTx << psbtx;
             QString psbt = EncodeBase64(ssTx.str()).c_str();
 
-            // Sign tx with hardware
             QVariantMap variantMap;
             send_failure = !HardwareSignTx::process(this, model, psbt, variantMap, false);
 
-            // Don't broadcast when user rejects it on the device or there's a failure:
             CMutableTransaction tmpMtx;
             if(!send_failure) {
                 std::string hexTx = variantMap["hextx"].toString().toStdString();
@@ -583,10 +648,7 @@ void SendCoinsDialog::sendButtonClicked([[maybe_unused]] bool checked)
                 }
             }
         }
-        // Broadcast the transaction, unless an external signer was used and it
-        // failed, or more signatures are needed.
         if (broadcast) {
-            // now send the prepared transaction
             model->sendCoins(*m_current_transaction);
             Q_EMIT coinsSent(m_current_transaction->getWtx()->GetHash());
             accept();

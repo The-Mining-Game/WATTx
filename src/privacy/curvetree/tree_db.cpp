@@ -181,6 +181,21 @@ bool LevelDBTreeStorage::StoreOutput(uint64_t index, const OutputTuple& output) 
     return status.ok();
 }
 
+bool LevelDBTreeStorage::DeleteOutput(uint64_t index) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    std::string key = MakeOutputKey(index);
+    m_output_count_dirty = true;
+
+    if (m_in_batch) {
+        m_batch->Delete(key);
+        return true;
+    }
+
+    leveldb::Status status = m_db->Delete(leveldb::WriteOptions(), key);
+    return status.ok();
+}
+
 std::optional<OutputTuple> LevelDBTreeStorage::GetOutput(uint64_t index) {
     std::lock_guard<std::mutex> lock(m_mutex);
 

@@ -19,9 +19,9 @@
 #include <set>
 #include <vector>
 
-class CWallet;
-
 namespace wallet {
+
+class CWallet;
 
 /**
  * @brief Stored stealth address with associated keys
@@ -149,11 +149,9 @@ private:
     // Derived private keys for payments (outpoint -> key)
     std::map<COutPoint, CKey> m_paymentKeys GUARDED_BY(cs_stealth);
 
-    //! Try to detect payment to one of our stealth addresses
-    std::optional<CStealthPayment> TryDetectPayment(
-        const CTxOut& txout,
-        uint32_t outputIndex,
-        const uint256& txid,
+    //! Try to detect stealth payments in a transaction (full DKSAP protocol)
+    std::vector<CStealthPayment> TryDetectPayments(
+        const CTransaction& tx,
         int blockHeight);
 
     //! Compute hash of stealth address for indexing

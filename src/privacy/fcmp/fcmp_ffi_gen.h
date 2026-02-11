@@ -263,12 +263,17 @@ int32_t fcmp_pedersen_commit(uint8_t *out, const uint8_t *value, const uint8_t *
 uintptr_t fcmp_proof_size(uint32_t num_inputs, uint32_t num_layers);
 
 /**
- * Generate an FCMP proof (placeholder implementation)
+ * Generate an FCMP proof (Schnorr sigma protocol on curve tree branch)
  *
  * # Safety
  * - All pointers must be valid
  * - `proof_out` must have at least `proof_max_len` bytes available
  * - `proof_len_out` must be writable
+ *
+ * # Proof structure:
+ * - challenge `c` (32 bytes)
+ * - For each tree layer: response `s_i` (32 bytes) + commitment `R_i` (32 bytes)
+ * - Total size: 32 + num_layers * 64 bytes
  *
  * # Returns
  * - `FCMP_SUCCESS` on success
@@ -279,10 +284,16 @@ int32_t fcmp_prove(uint8_t *proof_out,
                    uintptr_t proof_max_len,
                    const uint8_t *tree_root,
                    const uint8_t *output,
-                   const struct FcmpBranch *branch);
+                   const struct FcmpBranch *branch,
+                   const uint8_t *secret_key,
+                   const uint8_t *rerandomizer);
 
 /**
- * Verify an FCMP proof (placeholder implementation)
+ * Verify an FCMP proof (Schnorr sigma protocol verification)
+ *
+ * Proof format: c (32) || [s_0 (32) || R_0 (32)] || [s_1 (32) || R_1 (32)] || ...
+ * For each layer i: verify s_i * G == R_i + c * layer_commitment_i
+ * Then recompute Fiat-Shamir challenge and verify c == c'
  *
  * # Safety
  * - All pointers must be valid
