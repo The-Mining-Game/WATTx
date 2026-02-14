@@ -397,28 +397,42 @@ QString EvmExportDialog::getPrivateKeyForAddress(const QString &address)
 {
     if (!model) return QString();
 
+    std::string walletName = model->wallet().getWalletName();
+    std::string uri = "/wallet/" + walletName;
+
+    // Try dumpprivkey first (legacy wallets)
     try {
-        // Use RPC dumpprivkey to get the private key (works with legacy wallets)
         UniValue params(UniValue::VARR);
         params.push_back(address.toStdString());
-
-        std::string walletName = model->wallet().getWalletName();
-        std::string uri = "/wallet/" + walletName;
 
         UniValue result = model->node().executeRpc("dumpprivkey", params, uri);
 
         if (result.isStr()) {
-            // The result is in WIF format, we need to decode and convert to hex
             std::string wifKey = result.get_str();
             CKey key = DecodeSecret(wifKey);
             if (key.IsValid()) {
-                // Format as hex with 0x prefix (Ethereum format)
                 return QString("0x") + QString::fromStdString(HexStr(key));
             }
         }
-    } catch (const std::exception& e) {
-        // RPC call failed - wallet might be locked or key not available
-        return QString();
+    } catch (...) {
+        // dumpprivkey not available (descriptor wallet) - try exportevmkey
+    }
+
+    // Try exportevmkey RPC (works with both legacy and descriptor wallets)
+    try {
+        UniValue params(UniValue::VARR);
+        params.push_back(address.toStdString());
+
+        UniValue result = model->node().executeRpc("exportevmkey", params, uri);
+
+        if (result.isObject()) {
+            const UniValue& privKey = result.find_value("private_key");
+            if (privKey.isStr()) {
+                return QString::fromStdString(privKey.get_str());
+            }
+        }
+    } catch (...) {
+        // exportevmkey also failed
     }
 
     return QString();

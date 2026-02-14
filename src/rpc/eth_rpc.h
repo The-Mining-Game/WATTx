@@ -6,6 +6,7 @@
 #define BITCOIN_RPC_ETH_RPC_H
 
 #include <consensus/amount.h>
+#include <pubkey.h>
 #include <rpc/util.h>
 #include <uint256.h>
 #include <univalue.h>
@@ -98,6 +99,18 @@ bool NormalizeEthAddress(const std::string& input, std::string& output);
  * @return true if valid 40-char hex address
  */
 bool IsValidEthAddress(const std::string& addr);
+
+// ============================================================================
+// Keccak-256 Based EVM Address Derivation
+// ============================================================================
+
+/**
+ * Derive Ethereum-compatible 0x address from a public key using Keccak-256.
+ * This matches MetaMask/Rabby address derivation.
+ * @param pubkey The compressed or uncompressed public key
+ * @return The 0x-prefixed Ethereum address, or empty string on error
+ */
+std::string PubKeyToEvmAddress(const CPubKey& pubkey);
 
 // ============================================================================
 // Block Number Parsing

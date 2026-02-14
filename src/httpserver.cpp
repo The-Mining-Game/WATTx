@@ -253,6 +253,8 @@ std::string RequestMethodString(HTTPRequest::RequestMethod m)
         return "HEAD";
     case HTTPRequest::PUT:
         return "PUT";
+    case HTTPRequest::OPTIONS:
+        return "OPTIONS";
     case HTTPRequest::UNKNOWN:
         return "unknown";
     } // no default case, so the compiler can warn about missing cases
@@ -468,6 +470,7 @@ bool InitHTTPServer(const util::SignalInterrupt& interrupt)
     evhttp_set_timeout(http, gArgs.GetIntArg("-rpcservertimeout", DEFAULT_HTTP_SERVER_TIMEOUT));
     evhttp_set_max_headers_size(http, MAX_HEADERS_SIZE);
     evhttp_set_max_body_size(http, MAX_SIZE);
+    evhttp_set_allowed_methods(http, EVHTTP_REQ_GET | EVHTTP_REQ_POST | EVHTTP_REQ_HEAD | EVHTTP_REQ_PUT | EVHTTP_REQ_OPTIONS);
     evhttp_set_gencb(http, http_request_cb, (void*)&interrupt);
 
     if (!HTTPBindAddresses(http)) {
@@ -826,6 +829,8 @@ HTTPRequest::RequestMethod HTTPRequest::GetRequestMethod() const
         return HEAD;
     case EVHTTP_REQ_PUT:
         return PUT;
+    case EVHTTP_REQ_OPTIONS:
+        return OPTIONS;
     default:
         return UNKNOWN;
     }

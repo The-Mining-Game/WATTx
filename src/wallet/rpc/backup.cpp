@@ -14,6 +14,7 @@
 #include <rpc/util.h>
 #include <script/descriptor.h>
 #include <script/script.h>
+#include <script/signingprovider.h>
 #include <script/solver.h>
 #include <sync.h>
 #include <uint256.h>
@@ -22,10 +23,15 @@
 #include <util/time.h>
 #include <util/translation.h>
 #include <wallet/rpc/util.h>
+#include <wallet/scriptpubkeyman.h>
 #include <wallet/wallet.h>
+#include <ethash/keccak.hpp>
+#include <secp256k1.h>
 
 #include <cstdint>
 #include <fstream>
+#include <iomanip>
+#include <sstream>
 #include <tuple>
 #include <string>
 
@@ -2047,4 +2053,117 @@ RPCHelpMan restorewallet()
 },
     };
 }
+RPCHelpMan exportevmkey()
+{
+    return RPCHelpMan{"exportevmkey",
+                "\nExports the Ethereum-compatible private key and EVM address for a WATTx address.\n"
+                "The EVM address is derived using Keccak-256 (MetaMask/Rabby compatible).\n"
+                "Works with both legacy and descriptor wallets.\n",
+                {
+                    {"address", RPCArg::Type::STR, RPCArg::Optional::NO, "The WATTx address to export"},
+                },
+                RPCResult{
+                    RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::STR, "wattx_address", "The WATTx base58 address"},
+                        {RPCResult::Type::STR, "evm_address", "The Ethereum-compatible 0x address"},
+                        {RPCResult::Type::STR, "private_key", "The private key in 0x hex format (for MetaMask import)"},
+                    }
+                },
+                RPCExamples{
+                    HelpExampleCli("exportevmkey", "\"myaddress\"")
+            + HelpExampleRpc("exportevmkey", "\"myaddress\"")
+                },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    const std::shared_ptr<const CWallet> pwallet = GetWalletForJSONRPCRequest(request);
+    if (!pwallet) return UniValue::VNULL;
+
+    LOCK(pwallet->cs_wallet);
+    EnsureWalletIsUnlocked(*pwallet);
+
+    std::string strAddress = request.params[0].get_str();
+    CTxDestination dest = DecodeDestination(strAddress);
+    if (!IsValidDestination(dest)) {
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid WATTx address");
+    }
+
+    // Get the key ID from the destination
+    CKeyID keyid;
+    if (auto* pk_hash = std::get_if<PKHash>(&dest)) {
+        keyid = ToKeyID(*pk_hash);
+    } else {
+        throw JSONRPCError(RPC_TYPE_ERROR, "Address does not refer to a key (only PKHash addresses supported)");
+    }
+
+    // Get the private key - works with both legacy and descriptor wallets
+    CKey vchSecret;
+
+    // Try legacy wallet first
+    LegacyScriptPubKeyMan* legacy_spk = pwallet->GetLegacyScriptPubKeyMan();
+    if (legacy_spk && legacy_spk->GetKey(keyid, vchSecret)) {
+        // Got key from legacy wallet
+    }
+
+    // If legacy didn't work, try descriptor wallet approach
+    if (!vchSecret.IsValid()) {
+        CPubKey pubkey;
+        PKHash pkhash(keyid);
+        if (pwallet->GetPubKey(pkhash, pubkey)) {
+            CScript script = GetScriptForDestination(PKHash(keyid));
+            std::set<ScriptPubKeyMan*> spk_mans = pwallet->GetScriptPubKeyMans(script);
+            for (auto* spk_man : spk_mans) {
+                DescriptorScriptPubKeyMan* desc_spk = dynamic_cast<DescriptorScriptPubKeyMan*>(spk_man);
+                if (desc_spk) {
+                    std::unique_ptr<FlatSigningProvider> keys = desc_spk->GetSigningProvider(pubkey);
+                    if (keys && keys->GetKey(keyid, vchSecret)) {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if (!vchSecret.IsValid()) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "Private key for address " + strAddress + " is not known");
+    }
+
+    // Get public key and derive EVM address using Keccak-256 (MetaMask compatible)
+    CPubKey pubkey = vchSecret.GetPubKey();
+    if (!pubkey.IsValid()) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR, "Failed to get public key");
+    }
+
+    // Decompress pubkey using secp256k1
+    static secp256k1_context* secp_ctx = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
+    secp256k1_pubkey secp_pubkey;
+    if (!secp256k1_ec_pubkey_parse(secp_ctx, &secp_pubkey, pubkey.data(), pubkey.size())) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR, "Failed to parse public key");
+    }
+
+    unsigned char uncompressed[65];
+    size_t outputLen = 65;
+    secp256k1_ec_pubkey_serialize(secp_ctx, uncompressed, &outputLen, &secp_pubkey, SECP256K1_EC_UNCOMPRESSED);
+
+    // Keccak-256 of uncompressed pubkey (without 0x04 prefix), take last 20 bytes
+    ethash::hash256 keccakHash = ethash::keccak256(uncompressed + 1, 64);
+    std::stringstream evmSs;
+    evmSs << "0x";
+    for (size_t i = 12; i < 32; i++) {
+        evmSs << std::hex << std::setfill('0') << std::setw(2) << static_cast<int>(keccakHash.bytes[i]);
+    }
+    std::string evmAddress = evmSs.str();
+
+    // Format private key as 0x hex (Ethereum format)
+    std::string hexKey = "0x" + HexStr(vchSecret);
+
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("wattx_address", strAddress);
+    result.pushKV("evm_address", evmAddress);
+    result.pushKV("private_key", hexKey);
+    return result;
+},
+    };
+}
+
 } // namespace wallet

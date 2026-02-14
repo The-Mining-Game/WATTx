@@ -159,25 +159,69 @@ static bool RPCAuthorized(const std::string& strAuth, std::string& strAuthUserna
     return multiUserAuthorized(strUserPass);
 }
 
+static void AddCORSHeaders(HTTPRequest* req)
+{
+    req->WriteHeader("Access-Control-Allow-Origin", "*");
+    req->WriteHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+    req->WriteHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    req->WriteHeader("Access-Control-Max-Age", "86400");
+}
+
 static bool HTTPReq_JSONRPC(const std::any& context, HTTPRequest* req)
 {
+    // Handle CORS preflight for browser wallets (MetaMask, Rabby)
+    if (req->GetRequestMethod() == HTTPRequest::OPTIONS) {
+        AddCORSHeaders(req);
+        req->WriteReply(HTTP_NO_CONTENT);
+        return true;
+    }
+
     // JSONRPC handles only POST
     if (req->GetRequestMethod() != HTTPRequest::POST) {
         req->WriteReply(HTTP_BAD_METHOD, "JSONRPC server handles only POST requests");
         return false;
     }
+    // Read body once (ReadBody() consumes the buffer)
+    std::string reqBody = req->ReadBody();
+
     // Check authorization
     std::pair<bool, std::string> authHeader = req->GetHeader("authorization");
+    bool authSkipped = false;
+
+    // Allow unauthenticated access for ETH/web3/net RPCs (browser wallets like MetaMask)
     if (!authHeader.first) {
-        req->WriteHeader("WWW-Authenticate", WWW_AUTH_HEADER_DATA);
-        req->WriteReply(HTTP_UNAUTHORIZED);
-        return false;
+        UniValue peekRequest;
+        bool isEthMethod = false;
+        if (peekRequest.read(reqBody)) {
+            std::string method;
+            if (peekRequest.isObject()) {
+                const UniValue& mval = peekRequest["method"];
+                if (mval.isStr()) method = mval.get_str();
+            } else if (peekRequest.isArray() && peekRequest.size() > 0) {
+                const UniValue& first = peekRequest[0];
+                if (first.isObject()) {
+                    const UniValue& mval = first["method"];
+                    if (mval.isStr()) method = mval.get_str();
+                }
+            }
+            // Allow eth_*, net_*, web3_* methods without authentication
+            if (method.size() >= 4 && (method.substr(0, 4) == "eth_" || method.substr(0, 4) == "net_" || method.substr(0, 5) == "web3_")) {
+                isEthMethod = true;
+            }
+        }
+
+        if (!isEthMethod) {
+            req->WriteHeader("WWW-Authenticate", WWW_AUTH_HEADER_DATA);
+            req->WriteReply(HTTP_UNAUTHORIZED);
+            return false;
+        }
+        authSkipped = true;
     }
 
     JSONRPCRequestLong jreq(req);
     jreq.context = context;
     jreq.peerAddr = req->GetPeer().ToStringAddrPort();
-    if (!RPCAuthorized(authHeader.second, jreq.authUser)) {
+    if (!authSkipped && !RPCAuthorized(authHeader.second, jreq.authUser)) {
         LogPrintf("ThreadRPCServer incorrect password attempt from %s\n", jreq.peerAddr);
 
         /* Deter brute-forcing
@@ -193,7 +237,7 @@ static bool HTTPReq_JSONRPC(const std::any& context, HTTPRequest* req)
     try {
         // Parse request
         UniValue valRequest;
-        if (!valRequest.read(req->ReadBody()))
+        if (!valRequest.read(reqBody))
             throw JSONRPCError(RPC_PARSE_ERROR, "Parse error");
 
         // Set the URI
@@ -288,6 +332,7 @@ static bool HTTPReq_JSONRPC(const std::any& context, HTTPRequest* req)
         else
             throw JSONRPCError(RPC_PARSE_ERROR, "Top-level object parse error");
 
+        AddCORSHeaders(req);
         req->WriteHeader("Content-Type", "application/json");
         req->WriteReply(HTTP_OK, reply.write() + "\n");
     } catch (UniValue& e) {

@@ -1506,6 +1506,7 @@ RPCHelpMan importdescriptors();
 RPCHelpMan listdescriptors();
 RPCHelpMan backupwallet();
 RPCHelpMan restorewallet();
+RPCHelpMan exportevmkey();
 
 // coins
 RPCHelpMan getreceivedbyaddress();
@@ -1567,6 +1568,7 @@ Span<const CRPCCommand> GetWalletRPCCommands()
         {"wallet", &restorewallet},
         {"wallet", &dumpprivkey},
         {"wallet", &dumpwallet},
+        {"wallet", &exportevmkey},
         {"wallet", &encryptwallet},
         {"wallet", &getaddressesbylabel},
         {"wallet", &getaddressinfo},

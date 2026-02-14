@@ -93,7 +93,8 @@ public:
         GET,
         POST,
         HEAD,
-        PUT
+        PUT,
+        OPTIONS
     };
 
     void setConnClosed();

@@ -29,12 +29,15 @@
 #include <util/strencodings.h>
 #include <util/convert.h>
 #include <validation.h>
+#include <interfaces/wallet.h>
+#include <wallet/context.h>
 #include <wallet/receive.h>
-#include <wallet/rpc/util.h>
 #include <wallet/wallet.h>
 #include <rpc/contract_util.h>
 #include <libdevcore/CommonData.h>
 #include <qtum/qtumstate.h>
+#include <ethash/keccak.hpp>
+#include <secp256k1.h>
 
 #include <iomanip>
 #include <map>
@@ -42,6 +45,27 @@
 #include <sstream>
 
 using node::NodeContext;
+
+// Get wallet from NodeContext (ETH RPCs are in bitcoin_node, not bitcoin_wallet,
+// so request.context is NodeContext, not WalletContext)
+static std::shared_ptr<wallet::CWallet> GetWalletFromNodeContext(const JSONRPCRequest& request)
+{
+    NodeContext& node = EnsureAnyNodeContext(request.context);
+    if (!node.wallet_loader) return nullptr;
+
+    wallet::WalletContext* wallet_context = node.wallet_loader->context();
+    if (!wallet_context) return nullptr;
+
+    size_t count{0};
+    auto wallet = wallet::GetDefaultWallet(*wallet_context, count);
+    if (wallet) return wallet;
+
+    // If no default, try getting the first available wallet
+    auto wallets = wallet::GetWallets(*wallet_context);
+    if (!wallets.empty()) return wallets[0];
+
+    return nullptr;
+}
 
 // Forward declarations
 static UniValue FormatEthBlockInternal(const CBlock& block, const CBlockIndex* pblockindex,
@@ -203,6 +227,81 @@ bool IsValidEthAddress(const std::string& addr)
 {
     std::string normalized;
     return NormalizeEthAddress(addr, normalized);
+}
+
+// ============================================================================
+// Keccak-256 Based EVM Address Derivation (MetaMask/Rabby Compatible)
+// ============================================================================
+
+// Static secp256k1 context for pubkey decompression (thread-safe initialization)
+static secp256k1_context* GetSecp256k1Context()
+{
+    static secp256k1_context* ctx = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
+    return ctx;
+}
+
+std::string PubKeyToEvmAddress(const CPubKey& compressedPubkey)
+{
+    if (!compressedPubkey.IsValid()) return "";
+
+    secp256k1_context* ctx = GetSecp256k1Context();
+    secp256k1_pubkey pubkey;
+
+    if (!secp256k1_ec_pubkey_parse(ctx, &pubkey, compressedPubkey.data(), compressedPubkey.size())) {
+        return "";
+    }
+
+    // Serialize as uncompressed (65 bytes: 0x04 + x + y)
+    unsigned char uncompressed[65];
+    size_t outputLen = 65;
+    secp256k1_ec_pubkey_serialize(ctx, uncompressed, &outputLen, &pubkey, SECP256K1_EC_UNCOMPRESSED);
+
+    // Keccak-256 of the public key bytes (without the 0x04 prefix)
+    ethash::hash256 hash = ethash::keccak256(uncompressed + 1, 64);
+
+    // Take last 20 bytes as the Ethereum address
+    std::stringstream ss;
+    ss << "0x";
+    for (size_t i = 12; i < 32; i++) {
+        ss << std::hex << std::setfill('0') << std::setw(2) << static_cast<int>(hash.bytes[i]);
+    }
+    return ss.str();
+}
+
+// Look up the wallet destination matching a Keccak-derived EVM address.
+// Returns true and sets base58Out if a matching wallet address is found.
+static bool EvmAddressToWalletBase58(const wallet::CWallet& wallet, const std::string& evmAddr, std::string& base58Out) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+{
+    std::string normalizedTarget;
+    if (!NormalizeEthAddress(evmAddr, normalizedTarget)) {
+        return false;
+    }
+
+    // Collect all unique destinations from address book and balances
+    std::set<CTxDestination> destinations;
+    for (const auto& [dest, entry] : wallet.m_address_book) {
+        destinations.insert(dest);
+    }
+    std::map<CTxDestination, CAmount> balances = wallet::GetAddressBalances(wallet);
+    for (const auto& [dest, amount] : balances) {
+        destinations.insert(dest);
+    }
+
+    // Iterate wallet addresses and find the one whose Keccak-derived address matches
+    for (const auto& dest : destinations) {
+        if (auto* pk_hash = std::get_if<PKHash>(&dest)) {
+            CPubKey pubkey;
+            if (wallet.GetPubKey(*pk_hash, pubkey) && pubkey.IsValid()) {
+                std::string derived = PubKeyToEvmAddress(pubkey);
+                if (derived == normalizedTarget) {
+                    base58Out = EncodeDestination(dest);
+                    return true;
+                }
+            }
+        }
+    }
+
+    return false;
 }
 
 // ============================================================================
@@ -541,13 +640,15 @@ static RPCHelpMan web3_sha3()
 
     std::vector<unsigned char> data = ParseHex(hex);
 
-    // Use Keccak-256 hash
-    uint256 hash;
-    // Note: Bitcoin uses SHA256, but ETH uses Keccak-256
-    // For now, use SHA256 as placeholder - full implementation needs Keccak
-    CSHA256().Write(data.data(), data.size()).Finalize(hash.begin());
+    // Keccak-256 hash (Ethereum's "SHA3" is actually Keccak-256)
+    ethash::hash256 hash = ethash::keccak256(data.data(), data.size());
 
-    return "0x" + hash.GetHex();
+    std::stringstream ss;
+    ss << "0x";
+    for (size_t i = 0; i < 32; i++) {
+        ss << std::hex << std::setfill('0') << std::setw(2) << static_cast<int>(hash.bytes[i]);
+    }
+    return ss.str();
 },
     };
 }
@@ -576,53 +677,44 @@ static RPCHelpMan eth_getBalance()
     std::string base58Addr;
     bool validAddress = false;
 
-    // Check if it's already a base58 address or needs conversion from ETH hex
-    if (IsValidEthAddress(addrStr)) {
-        // Valid Ethereum hex format - convert to base58 for wallet lookup
-        if (EthAddressToBase58(addrStr, base58Addr)) {
-            CTxDestination dest = DecodeDestination(base58Addr);
-            validAddress = IsValidDestination(dest);
-        }
-        // Even if conversion fails, accept the address for MetaMask compatibility
-        if (!validAddress) {
-            // Return 0 balance for any valid hex address not mapped to WATTx
-            return "0x0";
-        }
-    } else {
-        // Assume it's a base58 address
-        base58Addr = addrStr;
-        CTxDestination dest = DecodeDestination(base58Addr);
-        if (!IsValidDestination(dest)) {
-            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid address");
-        }
-        validAddress = true;
-    }
-
-    // Decode the destination for wallet lookup
-    CTxDestination dest = DecodeDestination(base58Addr);
-
-    // Try to get balance from wallet first (gracefully handle missing wallet)
+    // Try to get balance from wallet
     try {
-        const std::shared_ptr<wallet::CWallet> pwallet = wallet::GetWalletForJSONRPCRequest(request);
+        const std::shared_ptr<wallet::CWallet> pwallet = GetWalletFromNodeContext(request);
         if (pwallet) {
             LOCK(pwallet->cs_wallet);
 
-            // Get address balances from wallet
-            std::map<CTxDestination, CAmount> balances = wallet::GetAddressBalances(*pwallet);
+            if (IsValidEthAddress(addrStr)) {
+                // Keccak-derived EVM address - reverse lookup in wallet
+                if (EvmAddressToWalletBase58(*pwallet, addrStr, base58Addr)) {
+                    validAddress = true;
+                } else {
+                    // Not found in wallet - return 0
+                    return "0x0";
+                }
+            } else {
+                // Assume it's a base58 address
+                base58Addr = addrStr;
+                CTxDestination dest = DecodeDestination(base58Addr);
+                if (!IsValidDestination(dest)) {
+                    throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid address");
+                }
+                validAddress = true;
+            }
 
-            auto it = balances.find(dest);
-            if (it != balances.end()) {
-                return SatoshiToWei(it->second);
+            if (validAddress) {
+                CTxDestination dest = DecodeDestination(base58Addr);
+                std::map<CTxDestination, CAmount> balances = wallet::GetAddressBalances(*pwallet);
+                auto it = balances.find(dest);
+                if (it != balances.end()) {
+                    return SatoshiToWei(it->second);
+                }
             }
         }
     } catch (...) {
         // Wallet not available
     }
 
-    // Address not in wallet - return 0
-    // Note: In UTXO model, we can't efficiently scan all UTXOs for an address
-    // without a full address index. For external addresses not in wallet, return 0.
-    // This is a limitation compared to account-based chains like Ethereum.
+    // Address not in wallet or wallet not available - return 0
     return "0x0";
 },
     };
@@ -648,7 +740,7 @@ static RPCHelpMan eth_accounts()
     UniValue result(UniValue::VARR);
 
     try {
-        const std::shared_ptr<wallet::CWallet> pwallet = wallet::GetWalletForJSONRPCRequest(request);
+        const std::shared_ptr<wallet::CWallet> pwallet = GetWalletFromNodeContext(request);
         if (!pwallet) {
             return result; // Empty array if no wallet
         }
@@ -667,12 +759,16 @@ static RPCHelpMan eth_accounts()
             destinations.insert(addr);
         }
 
-        // Convert to ETH hex format
+        // Convert to Keccak-derived EVM addresses (MetaMask/Rabby compatible)
         for (const auto& dest : destinations) {
-            std::string base58 = EncodeDestination(dest);
-            std::string hexAddr;
-            if (Base58ToEthAddress(base58, hexAddr)) {
-                result.push_back(hexAddr);
+            if (auto* pk_hash = std::get_if<PKHash>(&dest)) {
+                CPubKey pubkey;
+                if (pwallet->GetPubKey(*pk_hash, pubkey) && pubkey.IsValid()) {
+                    std::string evmAddr = PubKeyToEvmAddress(pubkey);
+                    if (!evmAddr.empty()) {
+                        result.push_back(evmAddr);
+                    }
+                }
             }
         }
     } catch (...) {
@@ -702,51 +798,45 @@ static RPCHelpMan eth_getTransactionCount()
 {
     std::string addrStr = request.params[0].get_str();
     std::string base58Addr;
-    bool validAddress = false;
-
-    // Convert ETH hex address to base58 if needed
-    if (IsValidEthAddress(addrStr)) {
-        if (EthAddressToBase58(addrStr, base58Addr)) {
-            CTxDestination dest = DecodeDestination(base58Addr);
-            validAddress = IsValidDestination(dest);
-        }
-        // For MetaMask compatibility, return 0 for any valid hex address
-        if (!validAddress) {
-            return "0x0";
-        }
-    } else {
-        base58Addr = addrStr;
-        CTxDestination dest = DecodeDestination(base58Addr);
-        if (!IsValidDestination(dest)) {
-            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid address");
-        }
-        validAddress = true;
-    }
-
-    CTxDestination dest = DecodeDestination(base58Addr);
 
     // In UTXO model, there's no nonce. Count transactions sent from this address.
     // For MetaMask compatibility, we count outgoing transactions from wallet
     uint64_t txCount = 0;
 
     try {
-        const std::shared_ptr<wallet::CWallet> pwallet = wallet::GetWalletForJSONRPCRequest(request);
+        const std::shared_ptr<wallet::CWallet> pwallet = GetWalletFromNodeContext(request);
         if (pwallet) {
             LOCK(pwallet->cs_wallet);
 
-            CScript scriptPubKey = GetScriptForDestination(dest);
+            bool validAddress = false;
 
-            for (const auto& [txid, wtx] : pwallet->mapWallet) {
-                // Check if any input is from this address
-                for (const CTxIn& txin : wtx.tx->vin) {
-                    // Look up the previous output
-                    auto prevIt = pwallet->mapWallet.find(txin.prevout.hash);
-                    if (prevIt != pwallet->mapWallet.end()) {
-                        if (txin.prevout.n < prevIt->second.tx->vout.size()) {
-                            const CTxOut& prevOut = prevIt->second.tx->vout[txin.prevout.n];
-                            if (prevOut.scriptPubKey == scriptPubKey) {
-                                txCount++;
-                                break; // Count each tx only once
+            if (IsValidEthAddress(addrStr)) {
+                // Keccak-derived EVM address - reverse lookup in wallet
+                if (EvmAddressToWalletBase58(*pwallet, addrStr, base58Addr)) {
+                    validAddress = true;
+                }
+            } else {
+                base58Addr = addrStr;
+                CTxDestination dest = DecodeDestination(base58Addr);
+                if (IsValidDestination(dest)) {
+                    validAddress = true;
+                }
+            }
+
+            if (validAddress) {
+                CTxDestination dest = DecodeDestination(base58Addr);
+                CScript scriptPubKey = GetScriptForDestination(dest);
+
+                for (const auto& [txid, wtx] : pwallet->mapWallet) {
+                    for (const CTxIn& txin : wtx.tx->vin) {
+                        auto prevIt = pwallet->mapWallet.find(txin.prevout.hash);
+                        if (prevIt != pwallet->mapWallet.end()) {
+                            if (txin.prevout.n < prevIt->second.tx->vout.size()) {
+                                const CTxOut& prevOut = prevIt->second.tx->vout[txin.prevout.n];
+                                if (prevOut.scriptPubKey == scriptPubKey) {
+                                    txCount++;
+                                    break;
+                                }
                             }
                         }
                     }
@@ -777,7 +867,7 @@ static RPCHelpMan eth_coinbase()
 {
     // Try to get mining/staking address from wallet
     try {
-        const std::shared_ptr<wallet::CWallet> pwallet = wallet::GetWalletForJSONRPCRequest(request);
+        const std::shared_ptr<wallet::CWallet> pwallet = GetWalletFromNodeContext(request);
         if (pwallet) {
             LOCK(pwallet->cs_wallet);
 
@@ -1194,7 +1284,7 @@ static RPCHelpMan eth_sendTransaction()
         },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
-    const std::shared_ptr<wallet::CWallet> pwallet = wallet::GetWalletForJSONRPCRequest(request);
+    const std::shared_ptr<wallet::CWallet> pwallet = GetWalletFromNodeContext(request);
     if (!pwallet) {
         throw JSONRPCError(RPC_WALLET_NOT_FOUND, "Wallet not found");
     }
@@ -1388,7 +1478,7 @@ static RPCHelpMan eth_getTransactionByHash()
 
     // Try wallet first if available (gracefully handle missing wallet)
     try {
-        const std::shared_ptr<wallet::CWallet> pwallet = wallet::GetWalletForJSONRPCRequest(request);
+        const std::shared_ptr<wallet::CWallet> pwallet = GetWalletFromNodeContext(request);
         if (pwallet) {
             LOCK(pwallet->cs_wallet);
             auto it = pwallet->mapWallet.find(hash);
