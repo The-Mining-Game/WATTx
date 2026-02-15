@@ -14,6 +14,11 @@
 #include <streams.h>
 #include <test/util/setup_common.h>
 
+// Windows wingdi.h defines TRANSPARENT as a macro
+#ifdef TRANSPARENT
+#undef TRANSPARENT
+#endif
+
 BOOST_FIXTURE_TEST_SUITE(privacy_tests, BasicTestingSetup)
 
 BOOST_AUTO_TEST_CASE(stealth_address_creation)

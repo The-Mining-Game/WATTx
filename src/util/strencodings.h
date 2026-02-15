@@ -453,8 +453,8 @@ template <util::detail::Hex str>
 #if defined(__cpp_lib_bit_cast) && __cpp_lib_bit_cast >= 201806L
 constexpr auto operator""_hex_u8() { return std::bit_cast<std::array<uint8_t, str.bytes.size()>>(str.bytes); }
 #else
-inline auto operator""_hex_u8() {
-    std::array<uint8_t, str.bytes.size()> result;
+constexpr auto operator""_hex_u8() {
+    std::array<uint8_t, str.bytes.size()> result{};
     for (size_t i = 0; i < str.bytes.size(); ++i) {
         result[i] = static_cast<uint8_t>(str.bytes[i]);
     }
