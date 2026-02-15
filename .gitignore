@@ -9,5 +9,9 @@ build-win64/
 *.pyc
 __pycache__/
 release/
+release-linux64/
+release-win64/
 *.exe
 *.tar.gz
+*.zip
+src/privacy/fcmp/rust/target/
