@@ -4,6 +4,11 @@
 
 #include <wallet/messaging.h>
 
+// Windows winuser.h defines SendMessage as a macro
+#ifdef SendMessage
+#undef SendMessage
+#endif
+
 #include <crypto/sha256.h>
 #include <hash.h>
 #include <key_io.h>
@@ -22,6 +27,11 @@
 #include <wallet/wallet.h>
 
 #include <openssl/evp.h>
+
+// Windows winuser.h defines SendMessage as a macro - must undef AFTER all includes
+#ifdef SendMessage
+#undef SendMessage
+#endif
 
 namespace wallet {
 

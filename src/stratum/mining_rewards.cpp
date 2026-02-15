@@ -10,11 +10,21 @@
 #include <algorithm>
 #include <cstring>
 #include <iomanip>
+#ifdef WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "ws2_32.lib")
+#define close closesocket
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+#else
 #include <netdb.h>
 #include <netinet/in.h>
-#include <sstream>
 #include <sys/socket.h>
 #include <unistd.h>
+#endif
+#include <sstream>
 
 namespace mining_rewards {
 
@@ -307,11 +317,17 @@ std::string MiningRewardsManager::HttpPost(const std::string& host, uint16_t por
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) return "";
 
+#ifdef WIN32
+    DWORD timeout_ms = 10000;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout_ms, sizeof(timeout_ms));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeout_ms, sizeof(timeout_ms));
+#else
     struct timeval tv;
     tv.tv_sec = 10;
     tv.tv_usec = 0;
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+#endif
 
     struct sockaddr_in addr{};
     addr.sin_family = AF_INET;
@@ -366,7 +382,7 @@ std::string MiningRewardsManager::HttpPost(const std::string& host, uint16_t por
 
     std::string response;
     char buffer[4096];
-    ssize_t bytes;
+    int bytes;
     while ((bytes = recv(sock, buffer, sizeof(buffer) - 1, 0)) > 0) {
         buffer[bytes] = '\0';
         response += buffer;

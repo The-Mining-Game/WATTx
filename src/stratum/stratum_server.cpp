@@ -28,6 +28,13 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #pragma comment(lib, "ws2_32.lib")
+// Windows compatibility for POSIX socket functions
+#define poll WSAPoll
+#define close closesocket
+typedef int socklen_t;
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
 #else
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -91,11 +98,7 @@ bool StratumServer::Start(const StratumConfig& config, interfaces::Mining* minin
 
     if (bind(m_listen_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
         LogPrintf("Stratum: Failed to bind to port %d\n", config.port);
-#ifdef WIN32
-        closesocket(m_listen_socket);
-#else
         close(m_listen_socket);
-#endif
         m_listen_socket = -1;
         return false;
     }
@@ -103,11 +106,7 @@ bool StratumServer::Start(const StratumConfig& config, interfaces::Mining* minin
     // Start listening
     if (listen(m_listen_socket, config.max_clients) < 0) {
         LogPrintf("Stratum: Failed to listen\n");
-#ifdef WIN32
-        closesocket(m_listen_socket);
-#else
         close(m_listen_socket);
-#endif
         m_listen_socket = -1;
         return false;
     }
@@ -131,11 +130,7 @@ void StratumServer::Stop() {
 
     // Close listening socket to wake up accept thread
     if (m_listen_socket >= 0) {
-#ifdef WIN32
-        closesocket(m_listen_socket);
-#else
         close(m_listen_socket);
-#endif
         m_listen_socket = -1;
     }
 
@@ -155,11 +150,7 @@ void StratumServer::Stop() {
         std::lock_guard<std::mutex> lock(m_clients_mutex);
         for (auto& [id, client] : m_clients) {
             if (client->socket_fd >= 0) {
-#ifdef WIN32
-                closesocket(client->socket_fd);
-#else
                 close(client->socket_fd);
-#endif
             }
         }
         m_clients.clear();
@@ -233,7 +224,7 @@ void StratumServer::ClientThread(int client_id) {
         }
 
         // Read data
-        ssize_t bytes_read = recv(socket_fd, buffer, sizeof(buffer) - 1, 0);
+        int bytes_read = recv(socket_fd, buffer, sizeof(buffer) - 1, 0);
 
         if (bytes_read > 0) {
             buffer[bytes_read] = '\0';
@@ -800,11 +791,7 @@ void StratumServer::DisconnectClient(int client_id) {
     auto it = m_clients.find(client_id);
     if (it != m_clients.end()) {
         if (it->second->socket_fd >= 0) {
-#ifdef WIN32
-            closesocket(it->second->socket_fd);
-#else
             close(it->second->socket_fd);
-#endif
         }
         m_clients.erase(it);
         LogPrintf("Stratum: Client %d removed\n", client_id);

@@ -13,6 +13,11 @@
 
 #include <string>
 #include <vector>
+
+// Windows winuser.h defines SendMessage as a macro
+#ifdef SendMessage
+#undef SendMessage
+#endif
 #include <cstdint>
 
 namespace wallet {

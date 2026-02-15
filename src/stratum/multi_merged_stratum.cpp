@@ -16,12 +16,24 @@
 #include <cstring>
 #include <iomanip>
 #include <set>
+#ifdef WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "ws2_32.lib")
+#define poll WSAPoll
+#define close closesocket
+typedef int socklen_t;
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+#else
 #include <netdb.h>
 #include <netinet/in.h>
 #include <poll.h>
-#include <sstream>
 #include <sys/socket.h>
 #include <unistd.h>
+#endif
+#include <sstream>
 
 namespace merged_stratum {
 
@@ -166,7 +178,7 @@ bool MultiMergedStratumServer::Start(const MultiMergedConfig& config, interfaces
         }
 
         int opt = 1;
-        setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
 
         struct sockaddr_in addr{};
         addr.sin_family = AF_INET;
@@ -401,7 +413,7 @@ void MultiMergedStratumServer::ClientThread(int client_id) {
         if (ret < 0) break;
         if (ret == 0) continue;
 
-        ssize_t bytes = recv(socket_fd, buffer, sizeof(buffer) - 1, 0);
+        int bytes = recv(socket_fd, buffer, sizeof(buffer) - 1, 0);
         if (bytes <= 0) break;
 
         buffer[bytes] = '\0';

@@ -21,11 +21,25 @@
 #include <chrono>
 #include <cstring>
 #include <iomanip>
+
+#ifdef WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "ws2_32.lib")
+// Windows compatibility for POSIX socket functions
+#define poll WSAPoll
+#define close closesocket
+typedef int socklen_t;
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+#else
 #include <netdb.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#endif
 
 // JSON parsing helpers (simple implementation)
 #include <sstream>
@@ -242,7 +256,7 @@ bool MergedStratumServer::Start(const MergedStratumConfig& config, interfaces::M
 
     // Set socket options
     int opt = 1;
-    setsockopt(m_listen_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    setsockopt(m_listen_socket, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
 
     // Bind
     struct sockaddr_in addr{};
@@ -403,7 +417,7 @@ void MergedStratumServer::ClientThread(int client_id) {
         if (ret < 0) break;
         if (ret == 0) continue;
 
-        ssize_t bytes = recv(socket_fd, buffer, sizeof(buffer) - 1, 0);
+        int bytes = recv(socket_fd, buffer, sizeof(buffer) - 1, 0);
         if (bytes <= 0) {
             break;
         }
@@ -1239,11 +1253,17 @@ std::string MergedStratumServer::HttpPost(const std::string& host, uint16_t port
     if (sock < 0) return "";
 
     // Set timeout
+#ifdef WIN32
+    DWORD timeout_ms = 5000;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout_ms, sizeof(timeout_ms));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeout_ms, sizeof(timeout_ms));
+#else
     struct timeval tv;
     tv.tv_sec = 5;
     tv.tv_usec = 0;
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+#endif
 
     struct sockaddr_in addr{};
     addr.sin_family = AF_INET;
@@ -1280,7 +1300,7 @@ std::string MergedStratumServer::HttpPost(const std::string& host, uint16_t port
     // Read response
     std::string response;
     char buffer[4096];
-    ssize_t bytes;
+    int bytes;
     while ((bytes = recv(sock, buffer, sizeof(buffer) - 1, 0)) > 0) {
         buffer[bytes] = '\0';
         response += buffer;

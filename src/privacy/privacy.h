@@ -72,6 +72,11 @@ namespace privacy {
 /**
  * @brief Privacy transaction types
  */
+// Windows headers define TRANSPARENT as a macro - undefine it
+#ifdef TRANSPARENT
+#undef TRANSPARENT
+#endif
+
 enum class PrivacyType : uint8_t
 {
     TRANSPARENT = 0,    // Standard Bitcoin-style
@@ -207,6 +212,9 @@ public:
      * @brief Verify FCMP-specific transaction components
      */
     bool VerifyFcmp() const;
+
+    /** Self-check for wallet-created FCMP transactions (skips FFI proof verification) */
+    bool VerifyFcmpSelfCheck() const;
 
     template <typename Stream>
     void Serialize(Stream& s) const {

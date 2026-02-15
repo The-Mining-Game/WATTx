@@ -14,6 +14,11 @@
 
 #include <univalue.h>
 
+// Windows winuser.h defines SendMessage as a macro
+#ifdef SendMessage
+#undef SendMessage
+#endif
+
 namespace wallet {
 
 RPCHelpMan sendmessage()

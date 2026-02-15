@@ -7,8 +7,15 @@
 # and FCMP (Full-Chain Membership Proofs) support
 
 # Find libsodium for Ed25519 cryptographic operations
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(SODIUM REQUIRED libsodium)
+if(CMAKE_CROSSCOMPILING AND EXISTS "${CMAKE_FIND_ROOT_PATH}/include/sodium.h")
+    # Cross-compilation: use libsodium from depends directory
+    set(SODIUM_INCLUDE_DIRS "${CMAKE_FIND_ROOT_PATH}/include")
+    set(SODIUM_LIBRARIES "${CMAKE_FIND_ROOT_PATH}/lib/libsodium.a")
+    set(SODIUM_CFLAGS_OTHER "")
+else()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(SODIUM REQUIRED libsodium)
+endif()
 
 add_library(wattx_privacy STATIC
     stealth.cpp
@@ -43,6 +50,17 @@ target_link_libraries(wattx_privacy
         leveldb
         ${SODIUM_LIBRARIES}
 )
+
+# Add Boost include directory for headers used transitively (e.g. eth_client/FixedHash.h)
+target_include_directories(wattx_privacy PUBLIC ${Boost_INCLUDE_DIR})
+
+# MinGW cross-compilation: -std=c++20 strips the predefined WIN32 macro,
+# but Bitcoin Core headers (fs.h, etc.) check #ifdef WIN32.
+# WIN32_LEAN_AND_MEAN prevents windows.h from including nb30.h which
+# redefines UNIQUE_NAME (conflicts with util/macros.h used by sync.h LOCK).
+if(MINGW)
+    target_compile_definitions(wattx_privacy PUBLIC WIN32 WIN32_LEAN_AND_MEAN NOMINMAX)
+endif()
 
 target_compile_options(wattx_privacy PRIVATE ${SODIUM_CFLAGS_OTHER})
 
@@ -124,6 +142,7 @@ if(WATTX_FCMP_ENABLED)
             bitcoin_crypto
             leveldb
             ${SODIUM_LIBRARIES}
+            $<$<BOOL:${WIN32}>:ntdll>
     )
 
     target_compile_options(test_fcmp PRIVATE ${SODIUM_CFLAGS_OTHER})

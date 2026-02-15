@@ -19,11 +19,18 @@ set(RUST_DIR ${CMAKE_CURRENT_SOURCE_DIR}/rust)
 set(RUST_TARGET_DIR ${RUST_DIR}/target)
 set(RUST_RELEASE_DIR ${RUST_TARGET_DIR}/release)
 
-# Determine static library name based on platform
-if(WIN32)
+# Determine static library name and cargo target based on platform
+if(WIN32 AND CMAKE_CROSSCOMPILING)
+    set(RUST_TARGET "x86_64-pc-windows-gnu")
+    set(RUST_LIB_NAME libwattx_fcmp.a)
+    set(RUST_RELEASE_DIR ${RUST_TARGET_DIR}/${RUST_TARGET}/release)
+    set(CARGO_TARGET_FLAG --target ${RUST_TARGET})
+elseif(WIN32)
     set(RUST_LIB_NAME wattx_fcmp.lib)
+    set(CARGO_TARGET_FLAG "")
 else()
     set(RUST_LIB_NAME libwattx_fcmp.a)
+    set(CARGO_TARGET_FLAG "")
 endif()
 
 set(RUST_LIB_PATH ${RUST_RELEASE_DIR}/${RUST_LIB_NAME})
@@ -31,7 +38,7 @@ set(RUST_LIB_PATH ${RUST_RELEASE_DIR}/${RUST_LIB_NAME})
 # Custom target to build Rust library
 add_custom_command(
     OUTPUT ${RUST_LIB_PATH}
-    COMMAND ${CARGO_EXECUTABLE} build --release
+    COMMAND ${CARGO_EXECUTABLE} build --release ${CARGO_TARGET_FLAG}
     WORKING_DIRECTORY ${RUST_DIR}
     COMMENT "Building FCMP Rust library..."
     DEPENDS
@@ -70,6 +77,7 @@ elseif(WIN32)
         ws2_32
         bcrypt
         userenv
+        ntdll
     )
 endif()
 

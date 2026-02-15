@@ -11,10 +11,18 @@
 #include <util/strencodings.h>
 
 #include <cstring>
+#ifdef WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+#else
 #include <netdb.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#endif
 
 namespace merged_stratum {
 
@@ -34,11 +42,17 @@ public:
         int sock = socket(AF_INET, SOCK_STREAM, 0);
         if (sock < 0) return "";
 
+#ifdef WIN32
+        DWORD timeout_ms = 10000;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout_ms, sizeof(timeout_ms));
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeout_ms, sizeof(timeout_ms));
+#else
         struct timeval tv;
         tv.tv_sec = 10;
         tv.tv_usec = 0;
         setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
         setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+#endif
 
         struct sockaddr_in addr{};
         addr.sin_family = AF_INET;
@@ -46,13 +60,21 @@ public:
 
         struct hostent* he = gethostbyname(m_config.daemon_host.c_str());
         if (!he) {
+#ifdef WIN32
+            closesocket(sock);
+#else
             close(sock);
+#endif
             return "";
         }
         std::memcpy(&addr.sin_addr, he->h_addr, he->h_length);
 
         if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+#ifdef WIN32
+            closesocket(sock);
+#else
             close(sock);
+#endif
             return "";
         }
 
@@ -74,19 +96,27 @@ public:
 
         std::string req_str = request.str();
         if (send(sock, req_str.c_str(), req_str.length(), 0) < 0) {
+#ifdef WIN32
+            closesocket(sock);
+#else
             close(sock);
+#endif
             return "";
         }
 
         std::string response;
         char buffer[4096];
-        ssize_t bytes;
+        int bytes;
         while ((bytes = recv(sock, buffer, sizeof(buffer) - 1, 0)) > 0) {
             buffer[bytes] = '\0';
             response += buffer;
         }
 
+#ifdef WIN32
+        closesocket(sock);
+#else
         close(sock);
+#endif
 
         // Extract body (skip headers)
         size_t body_start = response.find("\r\n\r\n");

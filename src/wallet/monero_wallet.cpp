@@ -9,11 +9,18 @@
 
 #include <algorithm>
 #include <cstring>
+#include <sstream>
+
+#ifdef WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "ws2_32.lib")
+#else
 #include <netdb.h>
 #include <netinet/in.h>
-#include <sstream>
 #include <sys/socket.h>
 #include <unistd.h>
+#endif
 
 // Keccak-256 implementation (simplified)
 extern "C" {
@@ -438,6 +445,16 @@ void MoneroLightWallet::ScalarReduce(MoneroSecretKey& key) {
 }
 
 std::string MoneroLightWallet::DaemonRPC(const std::string& method, const std::string& params) {
+#ifdef WIN32
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) return "";
+    SOCKET sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock == INVALID_SOCKET) { WSACleanup(); return ""; }
+
+    DWORD timeout_ms = 10000;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout_ms, sizeof(timeout_ms));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeout_ms, sizeof(timeout_ms));
+#else
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) return "";
 
@@ -446,6 +463,7 @@ std::string MoneroLightWallet::DaemonRPC(const std::string& method, const std::s
     tv.tv_usec = 0;
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+#endif
 
     struct sockaddr_in addr{};
     addr.sin_family = AF_INET;
@@ -453,13 +471,21 @@ std::string MoneroLightWallet::DaemonRPC(const std::string& method, const std::s
 
     struct hostent* he = gethostbyname(m_daemon_host.c_str());
     if (!he) {
+#ifdef WIN32
+        closesocket(sock); WSACleanup();
+#else
         close(sock);
+#endif
         return "";
     }
     std::memcpy(&addr.sin_addr, he->h_addr, he->h_length);
 
     if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+#ifdef WIN32
+        closesocket(sock); WSACleanup();
+#else
         close(sock);
+#endif
         return "";
     }
 
@@ -482,19 +508,28 @@ std::string MoneroLightWallet::DaemonRPC(const std::string& method, const std::s
 
     std::string req_str = request.str();
     if (send(sock, req_str.c_str(), req_str.length(), 0) < 0) {
+#ifdef WIN32
+        closesocket(sock); WSACleanup();
+#else
         close(sock);
+#endif
         return "";
     }
 
     std::string response;
     char buffer[4096];
-    ssize_t bytes;
+    int bytes;
     while ((bytes = recv(sock, buffer, sizeof(buffer) - 1, 0)) > 0) {
         buffer[bytes] = '\0';
         response += buffer;
     }
 
+#ifdef WIN32
+    closesocket(sock);
+    WSACleanup();
+#else
     close(sock);
+#endif
 
     // Extract body
     size_t body_start = response.find("\r\n\r\n");
