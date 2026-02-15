@@ -81,6 +81,8 @@
 #include <addresstype.h>
 #include <validators/validatordb.h>
 #include <validators/delegation.h>
+#include <trust/trustscore.h>
+#include <trust/heartbeat_net.h>
 
 #include <algorithm>
 #include <cassert>
@@ -2310,6 +2312,55 @@ bool CheckIndexProof(const CBlockIndex& block, const Consensus::Params& consensu
     }
 }
 
+/**
+ * Get the trust tier bonus percentage for a given trust tier.
+ * Returns the bonus as a whole percentage (e.g. 5 = 5% bonus).
+ *   NONE:     0%  (still eligible for base reward)
+ *   BRONZE:   0%  (base level)
+ *   SILVER:   5%
+ *   GOLD:    10%
+ *   PLATINUM: 15%
+ */
+int GetTrustTierBonusPercent(trust::TrustTier tier)
+{
+    switch (tier) {
+        case trust::TrustTier::SILVER:   return 5;
+        case trust::TrustTier::GOLD:     return 10;
+        case trust::TrustTier::PLATINUM: return 15;
+        default:                         return 0; // NONE and BRONZE
+    }
+}
+
+/**
+ * Apply trust tier reward multiplier to a base block reward for PoS blocks.
+ * Looks up the staker's validator trust tier and returns the adjusted reward.
+ * If the trust tier system is not active or the staker is not a registered
+ * validator, returns the base reward unchanged.
+ */
+CAmount ApplyTrustTierBonus(CAmount baseReward, const CKeyID& stakerId,
+                            int nHeight, const Consensus::Params& consensusParams)
+{
+    // Trust tier bonus only applies after activation height
+    if (nHeight < consensusParams.nTrustTierActivationHeight) {
+        return baseReward;
+    }
+
+    // Look up the validator's trust tier via the heartbeat manager
+    if (trust::g_heartbeat_manager) {
+        trust::TrustTier tier = trust::g_heartbeat_manager->GetTrustManager()->GetValidatorTier(stakerId);
+        int bonusPercent = GetTrustTierBonusPercent(tier);
+        if (bonusPercent > 0) {
+            CAmount bonus = (baseReward * bonusPercent) / 100;
+            LogPrintf("TrustTierBonus: validator %s tier=%s bonus=%d%% (%lld satoshis)\n",
+                      stakerId.ToString(), trust::TrustTierToString(tier),
+                      bonusPercent, bonus);
+            return baseReward + bonus;
+        }
+    }
+
+    return baseReward;
+}
+
 CAmount GetBlockSubsidy(int nHeight, const Consensus::Params& consensusParams)
 {
     // WATTx: Initial PoW phase gets larger reward for bootstrap
@@ -2332,19 +2383,6 @@ CAmount GetBlockSubsidy(int nHeight, const Consensus::Params& consensusParams)
     // Apply halving
     CAmount nSubsidy = nBaseReward >> halvings;
     return nSubsidy;
-}
-
-// WATTx: Get tiered block subsidy with trust tier multiplier applied
-CAmount GetTieredBlockSubsidy(int nHeight, const Consensus::Params& consensusParams, int tierMultiplier)
-{
-    CAmount nBaseSubsidy = GetBlockSubsidy(nHeight, consensusParams);
-
-    // Apply trust tier multiplier (100 = 1.0x, 150 = 1.5x, etc.)
-    if (tierMultiplier > 0 && nHeight >= consensusParams.nTrustTierActivationHeight) {
-        return (nBaseSubsidy * tierMultiplier) / 100;
-    }
-
-    return nBaseSubsidy;
 }
 
 CoinsViews::CoinsViews(DBParams db_params, CoinsViewOptions options)
@@ -3209,10 +3247,6 @@ bool CheckMinGasPrice(std::vector<EthTransactionParams>& etps, const uint64_t& m
 
 bool CheckReward(const CBlock& block, BlockValidationState& state, int nHeight, const Consensus::Params& consensusParams, CAmount nFees, CAmount gasRefunds, CAmount nActualStakeReward, const std::vector<CTxOut>& vouts, CAmount nValueCoinPrev, bool delegateOutputExist, CChain& chain, node::BlockManager& blockman)
 {
-    // Debug logging for reward check
-    LogPrintf("CheckReward: height=%d IsPoW=%d IsPoS=%d prevoutStake.IsNull=%d prevoutStake.n=%u vtx.size=%zu\n",
-              nHeight, block.IsProofOfWork(), block.IsProofOfStake(),
-              block.prevoutStake.IsNull(), block.prevoutStake.n, block.vtx.size());
     size_t offset = block.IsProofOfStake() ? 1 : 0;
     std::vector<CTxOut> vTempVouts=block.vtx[offset]->vout;
     std::vector<CTxOut>::iterator it;
@@ -3237,8 +3271,25 @@ bool CheckReward(const CBlock& block, BlockValidationState& state, int nHeight, 
     }
     else
     {
-        // Check full reward
-        CAmount blockReward = nFees + GetBlockSubsidy(nHeight, consensusParams);
+        // Check full reward with trust tier bonus for PoS blocks
+        CAmount baseSubsidy = GetBlockSubsidy(nHeight, consensusParams);
+
+        // Extract staker's CKeyID from the coinstake output for trust tier lookup
+        CKeyID stakerId;
+        if (block.vtx.size() > 1 && block.vtx[1]->vout.size() > 1) {
+            CTxDestination dest;
+            if (ExtractDestination(block.vtx[1]->vout[1].scriptPubKey, dest)) {
+                const PKHash* pkhash = std::get_if<PKHash>(&dest);
+                if (pkhash) {
+                    stakerId = CKeyID{uint160{*pkhash}};
+                }
+            }
+        }
+
+        // Apply trust tier bonus to the subsidy portion (not fees)
+        CAmount adjustedSubsidy = ApplyTrustTierBonus(baseSubsidy, stakerId, nHeight, consensusParams);
+        CAmount blockReward = nFees + adjustedSubsidy;
+
         if (nActualStakeReward > blockReward)
             return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-cs-amount", strprintf("CheckReward(): coinstake pays too much (actual=%d vs limit=%d)", nActualStakeReward, blockReward));
 

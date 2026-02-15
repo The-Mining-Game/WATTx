@@ -16,6 +16,7 @@
 #include <qt/transactiontablemodel.h>
 #include <qt/walletmodel.h>
 #include <qt/tokenitemmodel.h>
+#include <interfaces/node.h>
 #include <interfaces/wallet.h>
 #include <qt/transactiondescdialog.h>
 #include <qt/styleSheet.h>
@@ -434,7 +435,9 @@ void OverviewPage::setWalletModel(WalletModel *model)
     // Auto-shield: periodically check for transparent balance and shield to FCMP
     auto* autoShieldTimer = new QTimer(this);
     connect(autoShieldTimer, &QTimer::timeout, this, [this]() {
-        if (!walletModel) return;
+        if (!walletModel || !clientModel) return;
+        // Don't auto-shield during initial block download
+        if (clientModel->node().isInitialBlockDownload()) return;
         interfaces::WalletBalances bal = walletModel->getCachedBalance();
         if (bal.balance > 0) {
             std::string error;

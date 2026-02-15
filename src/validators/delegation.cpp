@@ -587,7 +587,7 @@ void DelegationDB::ProcessBlock(int height) {
 
         // Activate pending delegations after maturity
         if (entry.status == DelegationStatus::PENDING) {
-            if (height - entry.delegationHeight >= DELEGATION_MATURITY) {
+            if (height - entry.delegationHeight >= consensusParams.nDelegationMaturity) {
                 entry.status = DelegationStatus::ACTIVE;
                 LogPrintf("DelegationDB: Delegation %s is now active\n",
                           id.ToString().substr(0, 16));
@@ -597,7 +597,7 @@ void DelegationDB::ProcessBlock(int height) {
 
         // Complete unbonding
         if (entry.status == DelegationStatus::UNBONDING) {
-            if (height - entry.unbondingStartHeight >= DELEGATION_UNBONDING_PERIOD) {
+            if (height - entry.unbondingStartHeight >= consensusParams.nDelegationUnbondingPeriod) {
                 entry.status = DelegationStatus::WITHDRAWN;
                 LogPrintf("DelegationDB: Delegation %s unbonding complete\n",
                           id.ToString().substr(0, 16));

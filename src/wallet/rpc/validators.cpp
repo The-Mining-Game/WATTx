@@ -507,7 +507,7 @@ RPCHelpMan undelegatestake()
             UniValue result(UniValue::VOBJ);
             result.pushKV("validatorId", validatorId.ToString());
             result.pushKV("undelegatedAmount", ValueFromAmount(undelegateAmount));
-            result.pushKV("unbondingBlocks", DELEGATION_UNBONDING_PERIOD);
+            result.pushKV("unbondingBlocks", Params().GetConsensus().nDelegationUnbondingPeriod);
 
             return result;
         },

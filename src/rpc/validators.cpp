@@ -140,7 +140,6 @@ static RPCHelpMan getvalidator()
                 {RPCResult::Type::NUM, "delegatorCount", "Number of delegators"},
                 {RPCResult::Type::STR, "trustTier", "Trust tier"},
                 {RPCResult::Type::NUM, "uptimePercent", "Uptime percentage * 10"},
-                {RPCResult::Type::NUM, "rewardMultiplier", "Reward multiplier (100 = 1x)"},
             }
         },
         RPCExamples{
@@ -369,7 +368,7 @@ static RPCHelpMan getpendingrewards()
 static RPCHelpMan gettrusttierinfo()
 {
     return RPCHelpMan{"gettrusttierinfo",
-        "\nGet trust tier thresholds and multipliers.\n",
+        "\nGet trust tier thresholds and configuration.\n",
         {},
         RPCResult{
             RPCResult::Type::OBJ, "", "",
@@ -380,13 +379,6 @@ static RPCHelpMan gettrusttierinfo()
                     {RPCResult::Type::NUM, "silver", "Silver tier threshold"},
                     {RPCResult::Type::NUM, "gold", "Gold tier threshold"},
                     {RPCResult::Type::NUM, "platinum", "Platinum tier threshold"},
-                }},
-                {RPCResult::Type::OBJ, "multipliers", "Reward multipliers for each tier",
-                {
-                    {RPCResult::Type::NUM, "bronze", "Bronze tier multiplier (100 = 1.0x)"},
-                    {RPCResult::Type::NUM, "silver", "Silver tier multiplier"},
-                    {RPCResult::Type::NUM, "gold", "Gold tier multiplier"},
-                    {RPCResult::Type::NUM, "platinum", "Platinum tier multiplier"},
                 }},
                 {RPCResult::Type::STR_AMOUNT, "minValidatorStake", "Minimum stake to be a validator"},
                 {RPCResult::Type::NUM, "heartbeatInterval", "Blocks between heartbeats"},

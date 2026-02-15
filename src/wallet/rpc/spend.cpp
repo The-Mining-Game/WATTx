@@ -16,6 +16,7 @@
 #include <util/vector.h>
 #include <util/moneystr.h>
 #include <wallet/coincontrol.h>
+#include <wallet/fcmp_wallet.h>
 #include <wallet/feebumper.h>
 #include <wallet/fees.h>
 #include <wallet/rpc/util.h>
@@ -173,6 +174,60 @@ UniValue SendMoney(CWallet& wallet, const CCoinControl &coin_control, std::vecto
         throw JSONRPCError(RPC_WALLET_ERROR, "Error: Wallet unlocked for staking only, unable to create transaction.");
     }
 
+    // Calculate total amount needed
+    CAmount totalAmount = 0;
+    for (const auto& recipient : recipients) {
+        totalAmount += recipient.nAmount;
+    }
+
+    // Try FCMP private send first (privacy built into regular transactions)
+    auto* fcmpManager = wallet.GetFcmpWalletManager();
+    if (fcmpManager) {
+        CAmount fcmpBalance = fcmpManager->GetSpendableFcmpBalance(10);
+        if (fcmpBalance >= totalAmount) {
+            // Build FCMP recipients from standard recipients
+            std::vector<CFcmpRecipient> fcmpRecipients;
+            for (const auto& recipient : recipients) {
+                CFcmpRecipient fcmpRecip;
+                fcmpRecip.scriptPubKey = GetScriptForDestination(recipient.dest);
+                fcmpRecip.amount = recipient.nAmount;
+                fcmpRecipients.push_back(fcmpRecip);
+            }
+
+            CFcmpTransactionParams params;
+            params.subtractFeeFromAmount = (!recipients.empty() && recipients[0].fSubtractFeeFromAmount);
+
+            auto fcmpResult = fcmpManager->CreateFcmpTransaction(fcmpRecipients, params);
+            if (fcmpResult.success) {
+                // Broadcast the FCMP transaction
+                wallet.CommitTransaction(fcmpResult.standardTx, std::move(map_value), /*orderForm=*/{});
+
+                // Mark spent inputs
+                uint256 spendingTxHash = fcmpResult.standardTx->GetHash();
+                auto allOutputs = fcmpManager->GetFcmpOutputs(false);
+                for (const auto& ki : fcmpResult.keyImages) {
+                    uint256 kiHash = ki.GetHash();
+                    for (const auto& out : allOutputs) {
+                        if (out.keyImageHash == kiHash) {
+                            fcmpManager->MarkFcmpOutputSpent(out.outpoint, spendingTxHash);
+                            break;
+                        }
+                    }
+                }
+
+                if (verbose) {
+                    UniValue entry(UniValue::VOBJ);
+                    entry.pushKV("txid", fcmpResult.standardTx->GetHash().GetHex());
+                    entry.pushKV("fee_reason", "fcmp_private");
+                    return entry;
+                }
+                return fcmpResult.standardTx->GetHash().GetHex();
+            }
+            // If FCMP creation fails, fall through to transparent send
+        }
+    }
+
+    // Fallback: standard transparent send
     // Shuffle recipient list
     std::shuffle(recipients.begin(), recipients.end(), FastRandomContext());
 

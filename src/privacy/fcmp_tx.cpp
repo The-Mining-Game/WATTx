@@ -9,6 +9,7 @@
 #include <privacy/ed25519/pedersen.h>
 #include <hash.h>
 #include <util/strencodings.h>
+#include <logging.h>
 
 #include <cstring>
 

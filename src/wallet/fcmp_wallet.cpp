@@ -3,6 +3,9 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <wallet/fcmp_wallet.h>
+#include <wallet/coincontrol.h>
+#include <wallet/receive.h>
+#include <wallet/spend.h>
 #include <wallet/wallet.h>
 #include <wallet/walletdb.h>
 #include <privacy/fcmp/fcmp_wrapper.h>
@@ -11,6 +14,7 @@
 #include <hash.h>
 #include <logging.h>
 #include <script/script.h>
+#include <util/moneystr.h>
 #include <util/time.h>
 
 #include <algorithm>
@@ -135,32 +139,37 @@ CFcmpTransactionResult CFcmpWalletManager::CreateFcmpTransaction(
         // Create output
         privacy::CPrivacyOutput privOutput;
 
-        // Generate stealth output
-        CKey ephemeralKey;
-        ephemeralKey.MakeNewKey(true);
-        privacy::GenerateStealthDestination(
-            recipient.stealthAddress,
-            ephemeralKey,
-            privOutput.stealthOutput
-        );
+        if (recipient.IsStealthRecipient()) {
+            // Full privacy: stealth address output with hidden amount
+            CKey ephemeralKey;
+            ephemeralKey.MakeNewKey(true);
+            privacy::GenerateStealthDestination(
+                recipient.stealthAddress,
+                ephemeralKey,
+                privOutput.stealthOutput
+            );
 
-        // Create commitment
-        ed25519::Scalar blinding = ed25519::Scalar::Random();
-        auto commitment = ed25519::PedersenCommitment::CommitAmount(
-            static_cast<uint64_t>(outputAmount),
-            blinding
-        );
+            // Create commitment for confidential amount
+            ed25519::Scalar blinding = ed25519::Scalar::Random();
+            auto commitment = ed25519::PedersenCommitment::CommitAmount(
+                static_cast<uint64_t>(outputAmount),
+                blinding
+            );
 
-        // Store in output
-        privOutput.confidentialOutput.commitment.data.resize(33);
-        privOutput.confidentialOutput.commitment.data[0] = 0x02;
-        std::memcpy(
-            privOutput.confidentialOutput.commitment.data.data() + 1,
-            commitment.GetPoint().data.data(),
-            32
-        );
+            privOutput.confidentialOutput.commitment.data.resize(33);
+            privOutput.confidentialOutput.commitment.data[0] = 0x02;
+            std::memcpy(
+                privOutput.confidentialOutput.commitment.data.data() + 1,
+                commitment.GetPoint().data.data(),
+                32
+            );
+        } else {
+            // Deshielding: regular script output (sender privacy preserved,
+            // recipient receives to a standard address with visible amount)
+            privOutput.scriptPubKey = recipient.scriptPubKey;
+        }
+
         privOutput.nValue = outputAmount;
-
         result.privacyTx.privacyOutputs.push_back(privOutput);
     }
 
@@ -227,13 +236,17 @@ CFcmpTransactionResult CFcmpWalletManager::CreateFcmpTransaction(
 
             auto changeKI = GenerateKeyImage(changeInfo.privKey, changeInfo.outputTuple.O);
             changeInfo.keyImageHash = changeKI.GetHash();
-            // Will be added after tx confirms
+            // Store in result - caller adds to wallet after tx commit
+            result.changeOutputInfo = changeInfo;
         }
     }
 
-    // Verify the transaction
-    if (!result.privacyTx.Verify()) {
-        result.error = "Transaction verification failed";
+    // Self-verify the transaction (SA+L signature, balance)
+    // Note: FCMP proof FFI verification is skipped during creation as the proof
+    // will be validated by consensus when the transaction is included in a block.
+    // The SA+L signature and commitment balance are verified here.
+    if (!result.privacyTx.VerifyFcmpSelfCheck()) {
+        result.error = "Transaction self-check failed";
         return result;
     }
 
@@ -259,6 +272,127 @@ CAmount CFcmpWalletManager::EstimateFee(
                           numOutputs * 100;
 
     return feeRate.GetFee(estimatedSize);
+}
+
+// ============================================================================
+// Auto-Shielding
+// ============================================================================
+
+void CFcmpWalletManager::AutoShield()
+{
+    // Minimum transparent balance to trigger auto-shield (1 WATTx)
+    static constexpr CAmount AUTO_SHIELD_MIN = 100000000;
+
+    LOCK(cs_fcmp);
+
+    // Skip if already shielding
+    if (m_autoShieldPending) return;
+
+    // Skip during IBD
+    if (m_wallet->chain().isInitialBlockDownload()) return;
+
+    // Skip if wallet is locked
+    if (m_wallet->IsLocked()) return;
+
+    // Check transparent balance
+    Balance bal = GetBalance(*m_wallet, /*min_depth=*/1);
+    CAmount transparentBalance = bal.m_mine_trusted;
+
+    if (transparentBalance < AUTO_SHIELD_MIN) return;
+
+    // Get or generate a stealth address for shielding
+    auto* stealthMgr = m_wallet->GetStealthAddressManager();
+    if (!stealthMgr) return;
+
+    privacy::CStealthAddress shieldAddr;
+    if (stealthMgr->HasStealthAddresses()) {
+        auto addresses = stealthMgr->GetStealthAddresses();
+        if (!addresses.empty()) {
+            shieldAddr = addresses[0].address;
+        }
+    }
+
+    if (!shieldAddr.IsValid()) {
+        CStealthAddressData newAddr;
+        if (!stealthMgr->GenerateStealthAddress("auto_shield", newAddr)) return;
+        shieldAddr = newAddr.address;
+    }
+
+    m_autoShieldPending = true;
+
+    // Create shield template to get the OP_RETURN script and cryptographic material
+    auto result = CreateShieldTransaction(shieldAddr, transparentBalance - 1000, /*minConfirmations=*/1);
+
+    if (result.success) {
+        // Extract OP_RETURN script from template
+        CScript opReturnScript;
+        for (const auto& txout : result.standardTx->vout) {
+            if (txout.scriptPubKey.size() > 0 && txout.scriptPubKey[0] == OP_RETURN) {
+                opReturnScript = txout.scriptPubKey;
+                break;
+            }
+        }
+
+        if (!opReturnScript.empty()) {
+            // Build a proper transaction with inputs via wallet coin selection
+            CRecipient opReturnRecipient{CNoDestination{opReturnScript}, 0, false};
+
+            // Get a wallet address for the shielded value output
+            auto destResult = m_wallet->GetNewDestination(OutputType::BECH32, "auto_shield");
+            if (destResult) {
+                CRecipient shieldRecipient{*destResult, transparentBalance - 1000, true /* subtract fee */};
+
+                std::vector<CRecipient> recipients;
+                recipients.push_back(shieldRecipient);
+                recipients.push_back(opReturnRecipient);
+
+                CCoinControl coinControl;
+                coinControl.m_min_depth = 1;
+
+                auto txResult = CreateTransaction(*m_wallet, recipients, std::nullopt, coinControl, true);
+
+                if (txResult) {
+                    // Commit the properly-formed transaction
+                    mapValue_t mapValue;
+                    mapValue["comment"] = "Auto-shield to FCMP";
+                    m_wallet->CommitTransaction(txResult->tx, std::move(mapValue), {});
+
+                    // Register the FCMP output with the correct txid and output index
+                    if (result.hasPrivKey) {
+                        // Find the OP_RETURN output index in the committed TX
+                        int opReturnVout = -1;
+                        for (size_t vi = 0; vi < txResult->tx->vout.size(); vi++) {
+                            if (txResult->tx->vout[vi].scriptPubKey.size() > 0 &&
+                                txResult->tx->vout[vi].scriptPubKey[0] == OP_RETURN) {
+                                opReturnVout = vi;
+                                break;
+                            }
+                        }
+
+                        CFcmpOutputInfo outputInfo;
+                        outputInfo.outpoint = COutPoint(txResult->tx->GetHash(), opReturnVout >= 0 ? opReturnVout : 0);
+                        outputInfo.amount = transparentBalance - 1000 - txResult->fee;
+                        outputInfo.privKey = result.privKey;
+                        outputInfo.blinding = result.blinding;
+                        outputInfo.outputTuple = result.outputTuple;
+                        outputInfo.keyImageHash = result.keyImageHash;
+                        outputInfo.blockHeight = -1;
+                        outputInfo.spent = false;
+                        outputInfo.nTime = GetTime();
+                        AddFcmpOutput(outputInfo);
+                    }
+
+                    LogPrintf("Auto-shield: %s WATTx shielded to FCMP (txid=%s)\n",
+                              FormatMoney(transparentBalance - 1000), txResult->tx->GetHash().GetHex());
+                } else {
+                    LogPrintf("Auto-shield: Failed to create transaction: %s\n",
+                              util::ErrorString(txResult).original);
+                }
+            }
+        }
+    }
+
+    m_autoShieldPending = false;
 }
 
 CFcmpShieldResult CFcmpWalletManager::CreateShieldTransaction(
@@ -384,6 +518,24 @@ std::vector<CFcmpOutputInfo> CFcmpWalletManager::GetSpendableFcmpOutputs(int min
         });
 
     return outputs;
+}
+
+bool CFcmpWalletManager::UpdateFcmpOutputBlockHeight(const COutPoint& outpoint, int blockHeight)
+{
+    LOCK(cs_fcmp);
+
+    auto it = m_fcmpOutputs.find(outpoint);
+    if (it == m_fcmpOutputs.end()) {
+        return false;
+    }
+
+    if (it->second.blockHeight != blockHeight) {
+        it->second.blockHeight = blockHeight;
+        WalletBatch batch(m_wallet->GetDatabase());
+        batch.WriteFcmpOutput(outpoint, it->second);
+        LogPrintf("FCMP: Updated output %s blockHeight to %d\n", outpoint.ToString(), blockHeight);
+    }
+    return true;
 }
 
 bool CFcmpWalletManager::AddFcmpOutput(const CFcmpOutputInfo& output)
@@ -581,9 +733,14 @@ int CFcmpWalletManager::ScanTransactionForFcmpOutputs(
     int found = 0;
     uint256 txid = tx.GetHash();
 
+    // Check if this is a coinbase/coinstake transaction (for maturity tracking)
+    bool isCoinbaseTx = tx.IsCoinBase() || tx.IsCoinStake();
+
     // Get the stealth address manager to check ownership
     auto* stealthMgr = m_wallet->GetStealthAddressManager();
-    if (!stealthMgr || !stealthMgr->HasStealthAddresses()) return 0;
+    if (!stealthMgr || !stealthMgr->HasStealthAddresses()) {
+        return 0;
+    }
 
     auto stealthAddresses = stealthMgr->GetStealthAddresses();
 
@@ -604,6 +761,9 @@ int CFcmpWalletManager::ScanTransactionForFcmpOutputs(
         if (data.size() < 100) continue;
         if (data[0] != 'F' || data[1] != 'C' || data[2] != 'M' || data[3] != 'P') continue;
 
+        LogDebug(BCLog::PRIVACY, "FCMP scan: found FCMP marker in tx %s vout %d (data size=%zu, isCoinbase=%s)\n",
+                  txid.ToString().substr(0,8), i, data.size(), isCoinbaseTx ? "true" : "false");
+
         // Extract O, I, C points
         ed25519::Point O, I, C;
         std::memcpy(O.data.data(), data.data() + 4, 32);
@@ -622,17 +782,40 @@ int CFcmpWalletManager::ScanTransactionForFcmpOutputs(
         }
 
         // Try to detect ownership via stealth address scanning
-        if (!ephemeralPubKey.IsValid()) continue;
+        if (!ephemeralPubKey.IsValid()) {
+            continue;
+        }
+
+        LogDebug(BCLog::PRIVACY, "FCMP scan: checking %zu stealth addresses for ownership of tx %s vout %d\n",
+                  stealthAddresses.size(), txid.ToString().substr(0,8), i);
 
         for (const auto& addrData : stealthAddresses) {
-            // Build a stealth output to scan
-            privacy::CStealthOutput stealthOut;
-            stealthOut.ephemeral = privacy::CEphemeralData(ephemeralPubKey, 0);
-            stealthOut.outputIndex = i;
-
+            // For FCMP outputs, bypass ScanStealthOutput (which checks view tags)
+            // and use DeriveStealthSpendingKey directly. The OP_RETURN format
+            // doesn't include view tags, so we verify ownership by checking that
+            // the derived key produces the correct O point.
             CKey derivedKey;
-            if (privacy::ScanStealthOutput(stealthOut, addrData.scanPrivKey,
-                                            addrData.address.spendPubKey, derivedKey)) {
+            bool deriveResult = privacy::DeriveStealthSpendingKey(
+                addrData.scanPrivKey, addrData.spendPrivKey,
+                ephemeralPubKey, i, derivedKey);
+
+            if (!deriveResult || !derivedKey.IsValid()) {
+                continue;
+            }
+
+            // Verify the derived key matches the O point in the OP_RETURN
+            // O = Hash(oneTimePubKey) * G where oneTimePubKey = derivedKey.GetPubKey()
+            CPubKey oneTimePubKey = derivedKey.GetPubKey();
+            std::vector<uint8_t> verifyPubKeyBytes(oneTimePubKey.begin(), oneTimePubKey.end());
+            uint256 verifyKeyHash = Hash(verifyPubKeyBytes);
+            ed25519::Scalar verifyScalar = ed25519::Scalar::FromBytesModOrder(
+                std::vector<uint8_t>(verifyKeyHash.begin(), verifyKeyHash.end()));
+            ed25519::Point verifyO = verifyScalar * ed25519::Point::BasePoint();
+
+            bool scanResult = (verifyO == O);
+            LogDebug(BCLog::PRIVACY, "FCMP scan: O point match=%s for tx %s vout %d\n",
+                      scanResult ? "yes" : "no", txid.ToString().substr(0,8), i);
+            if (scanResult) {
                 // We own this output! Create FCMP output record
                 CFcmpOutputInfo outputInfo;
                 outputInfo.outpoint = COutPoint(Txid::FromUint256(txid), i);
@@ -642,16 +825,27 @@ int CFcmpWalletManager::ScanTransactionForFcmpOutputs(
                 outputInfo.outputTuple.C = C;
                 outputInfo.blockHeight = blockHeight;
                 outputInfo.spent = false;
+                outputInfo.isCoinbaseOutput = isCoinbaseTx;
                 outputInfo.nTime = GetTime();
 
-                // Derive Ed25519 private key from secp256k1 derived key
-                // Use hash of derived key as Ed25519 scalar
-                uint256 keyHash = Hash(std::vector<uint8_t>(UCharCast(derivedKey.begin()), UCharCast(derivedKey.end())));
+                // Derive Ed25519 private key from the one-time public key
+                // This MUST match the miner's derivation in CreateFcmpRewardOutput:
+                //   O = Hash(oneTimePubKey) * G
+                // The scanner derives the spending key, then gets the public key from it
+                // to use the same hash input as the miner.
+                CPubKey oneTimePubKey = derivedKey.GetPubKey();
+                std::vector<uint8_t> pubKeyBytes(oneTimePubKey.begin(), oneTimePubKey.end());
+                uint256 keyHash = Hash(pubKeyBytes);
                 outputInfo.privKey = ed25519::Scalar::FromBytesModOrder(
                     std::vector<uint8_t>(keyHash.begin(), keyHash.end()));
 
-                // Store blinding factor (we need to reconstruct from commitment)
-                outputInfo.blinding = ed25519::Scalar::Random(); // Sender would communicate this
+                // Derive blinding factor deterministically from the one-time public key
+                // This MUST match the miner's derivation in CreateFcmpRewardOutput
+                std::vector<uint8_t> blindingInput(pubKeyBytes.begin(), pubKeyBytes.end());
+                blindingInput.push_back(0x42); // domain separator for blinding derivation
+                uint256 blindingHash = Hash(blindingInput);
+                outputInfo.blinding = ed25519::Scalar::FromBytesModOrder(
+                    std::vector<uint8_t>(blindingHash.begin(), blindingHash.end()));
 
                 // Compute key image hash
                 auto keyImage = GenerateKeyImage(outputInfo.privKey, O);
@@ -683,6 +877,21 @@ int CFcmpWalletManager::ScanBlockForFcmpOutputs(
     const CBlock& block,
     int blockHeight)
 {
+    LOCK(cs_fcmp);
+
+    // Update blockHeight for any outputs we already track that are in this block
+    for (const auto& tx : block.vtx) {
+        uint256 txid = tx->GetHash();
+        for (auto& [outpoint, info] : m_fcmpOutputs) {
+            if (outpoint.hash == txid && info.blockHeight < 0) {
+                info.blockHeight = blockHeight;
+                WalletBatch batch(m_wallet->GetDatabase());
+                batch.WriteFcmpOutput(outpoint, info);
+                LogPrintf("FCMP: Confirmed output %s at height %d\n", outpoint.ToString(), blockHeight);
+            }
+        }
+    }
+
     int found = 0;
     for (const auto& tx : block.vtx) {
         found += ScanTransactionForFcmpOutputs(*tx, blockHeight);
@@ -815,12 +1024,12 @@ curvetree::OutputTuple CFcmpWalletManager::CreateOutputTuple(
     privacy::CStealthOutput stealthOut;
     if (!privacy::GenerateStealthDestination(stealthAddr, ephemeralKey, stealthOut)) {
         // Fallback: use random key if stealth derivation fails
+        LogPrintf("FCMP CreateOutputTuple: GenerateStealthDestination FAILED - using random key (output will NOT be spendable!)\n");
         auto kp = ed25519::KeyPair::Generate();
         tuple.O = kp.public_key;
         privKey = std::nullopt;
     } else {
-        // Convert secp256k1 one-time pubkey to Ed25519 point
-        // Hash the derived pubkey bytes to get an Ed25519 scalar, then compute O = scalar * G
+        // Default: derive O from the stealth output public key (non-owned case)
         std::vector<uint8_t> pubKeyBytes(stealthOut.oneTimePubKey.begin(), stealthOut.oneTimePubKey.end());
         uint256 keyHash = Hash(pubKeyBytes);
         ed25519::Scalar outputScalar = ed25519::Scalar::FromBytesModOrder(
@@ -834,15 +1043,17 @@ curvetree::OutputTuple CFcmpWalletManager::CreateOutputTuple(
             for (const auto& addrData : stealthAddresses) {
                 if (addrData.address.scanPubKey == stealthAddr.scanPubKey &&
                     addrData.address.spendPubKey == stealthAddr.spendPubKey) {
-                    // We own this address - derive spending key
+                    // We own this address - derive spending key to verify ownership
                     CKey derivedKey;
                     if (privacy::DeriveStealthSpendingKey(addrData.scanPrivKey, addrData.spendPrivKey,
                                                           ephemeralKey.GetPubKey(), 0, derivedKey)) {
-                        // Convert secp256k1 key to Ed25519 scalar
-                        std::vector<uint8_t> keyBytes(UCharCast(derivedKey.begin()), UCharCast(derivedKey.end()));
-                        uint256 privHash = Hash(keyBytes);
-                        privKey = ed25519::Scalar::FromBytesModOrder(
-                            std::vector<uint8_t>(privHash.begin(), privHash.end()));
+                        // Derive privKey from the one-time public key (same as miner derivation)
+                        // This ensures privKey * G == O (the outputScalar computed above)
+                        // Both sides hash the same oneTimePubKey bytes to produce the same scalar.
+                        privKey = outputScalar;
+                        LogPrintf("FCMP CreateOutputTuple: derived spending key, O = privKey*G\n");
+                    } else {
+                        LogPrintf("FCMP CreateOutputTuple: DeriveStealthSpendingKey FAILED\n");
                     }
                     break;
                 }
@@ -855,7 +1066,19 @@ curvetree::OutputTuple CFcmpWalletManager::CreateOutputTuple(
     tuple.I = ed25519::Point::HashToPoint(toHash);
 
     // C = amount*H + blinding*G (Pedersen commitment)
-    blinding = ed25519::Scalar::Random();
+    // Derive blinding deterministically from the one-time public key
+    // This MUST match the derivation in CreateFcmpRewardOutput (miner) and
+    // ScanTransactionForFcmpOutputs (scanner) so all three agree on C.
+    if (!stealthOut.oneTimePubKey.IsValid()) {
+        // Fallback if no valid stealth output
+        blinding = ed25519::Scalar::Random();
+    } else {
+        std::vector<uint8_t> blindingInput(stealthOut.oneTimePubKey.begin(), stealthOut.oneTimePubKey.end());
+        blindingInput.push_back(0x42); // domain separator for blinding derivation
+        uint256 blindingHash = Hash(blindingInput);
+        blinding = ed25519::Scalar::FromBytesModOrder(
+            std::vector<uint8_t>(blindingHash.begin(), blindingHash.end()));
+    }
     auto commitment = ed25519::PedersenCommitment::CommitAmount(
         static_cast<uint64_t>(amount),
         blinding
@@ -969,9 +1192,10 @@ std::optional<privacy::CFcmpInput> CFcmpWalletManager::BuildFcmpInput(
         std::vector<uint8_t>(challengeHash.begin(), challengeHash.end())
     );
 
-    // s = r + c*x
-    auto cx = fcmpInput.salSignature.c * output.privKey;
-    fcmpInput.salSignature.s = rerandomizer + cx;
+    // s = r + c*(x + r), where O_tilde = (x+r)*G
+    auto xPlusR = output.privKey + rerandomizer;
+    auto cxr = fcmpInput.salSignature.c * xPlusR;
+    fcmpInput.salSignature.s = rerandomizer + cxr;
 
     // Create pseudo-output commitment
     auto pseudoCommitment = ed25519::PedersenCommitment::CommitAmount(

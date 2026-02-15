@@ -6,6 +6,8 @@
 #include <hash.h>
 #include <logging.h>
 #include <net.h>
+#include <netmessagemaker.h>
+#include <protocol.h>
 #include <util/time.h>
 
 namespace trust {
@@ -114,8 +116,12 @@ bool HeartbeatManager::BroadcastHeartbeat(int blockHeight, const uint256& blockH
     // Update last broadcast height
     m_last_heartbeat_height = blockHeight;
 
-    // TODO: Broadcast to network via net_processing when fully integrated
-    // The heartbeat message will be relayed via the P2P protocol
+    // Broadcast heartbeat to all connected peers
+    if (m_connman) {
+        m_connman->ForEachNode([this, &hb](CNode* pnode) {
+            m_connman->PushMessage(pnode, NetMsg::Make(NetMsgType::HEARTBEAT, hb));
+        });
+    }
 
     LogPrintf("HeartbeatManager: Broadcast heartbeat at height %d from %s\n",
               blockHeight, hb.GetNodeAddressString());
@@ -173,7 +179,14 @@ bool HeartbeatManager::ProcessHeartbeat(const Heartbeat& heartbeat, NodeId from)
         }
     }
 
-    // TODO: Relay to other peers via net_processing when fully integrated
+    // Relay heartbeat to other peers (exclude the sender)
+    if (m_connman) {
+        m_connman->ForEachNode([this, &heartbeat, from](CNode* pnode) {
+            if (pnode->GetId() != from) {
+                m_connman->PushMessage(pnode, NetMsg::Make(NetMsgType::HEARTBEAT, heartbeat));
+            }
+        });
+    }
 
     LogPrintf("HeartbeatManager: Processed heartbeat from validator at height %d (IP: %s)\n",
               heartbeat.blockHeight, heartbeat.GetNodeAddressString());
@@ -202,7 +215,14 @@ bool HeartbeatManager::ProcessValidatorRegistration(const ValidatorRegistration&
         return false;
     }
 
-    // TODO: Relay to other peers via net_processing when fully integrated
+    // Relay registration to other peers (exclude the sender)
+    if (m_connman) {
+        m_connman->ForEachNode([this, &reg, from](CNode* pnode) {
+            if (pnode->GetId() != from) {
+                m_connman->PushMessage(pnode, NetMsg::Make(NetMsgType::REGVALIDATOR, reg));
+            }
+        });
+    }
 
     LogPrintf("HeartbeatManager: Registered validator with stake %lld\n", reg.stakeAmount);
     return true;

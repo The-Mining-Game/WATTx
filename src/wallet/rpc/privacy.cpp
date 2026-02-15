@@ -62,18 +62,14 @@ static RPCHelpMan getnewstealthaddress()
                 label = request.params[0].get_str();
             }
 
-            // Get or create stealth address manager
-            // Note: In full implementation, this would be a member of CWallet
-            static std::map<std::string, std::unique_ptr<CStealthAddressManager>> s_managers;
-
-            const std::string walletName = pwallet->GetName();
-            if (s_managers.find(walletName) == s_managers.end()) {
-                s_managers[walletName] = std::make_unique<CStealthAddressManager>(
-                    const_cast<CWallet*>(pwallet.get()));
+            // Use the wallet's internal stealth address manager
+            auto* stealthMgr = const_cast<CWallet*>(pwallet.get())->GetStealthAddressManager();
+            if (!stealthMgr) {
+                throw JSONRPCError(RPC_WALLET_ERROR, "Stealth address manager not initialized");
             }
 
             CStealthAddressData addressData;
-            if (!s_managers[walletName]->GenerateStealthAddress(label, addressData)) {
+            if (!stealthMgr->GenerateStealthAddress(label, addressData)) {
                 throw JSONRPCError(RPC_WALLET_ERROR, "Failed to generate stealth address");
             }
 
@@ -116,17 +112,14 @@ static RPCHelpMan liststealthaddresses()
 
             LOCK(pwallet->cs_wallet);
 
-            // Get stealth address manager
-            static std::map<std::string, std::unique_ptr<CStealthAddressManager>> s_managers;
-
-            const std::string walletName = pwallet->GetName();
-            if (s_managers.find(walletName) == s_managers.end()) {
-                s_managers[walletName] = std::make_unique<CStealthAddressManager>(
-                    const_cast<CWallet*>(pwallet.get()));
+            // Use the wallet's internal stealth address manager
+            auto* stealthMgr = const_cast<CWallet*>(pwallet.get())->GetStealthAddressManager();
+            if (!stealthMgr) {
+                throw JSONRPCError(RPC_WALLET_ERROR, "Stealth address manager not initialized");
             }
 
             UniValue result(UniValue::VARR);
-            for (const auto& addr : s_managers[walletName]->GetStealthAddresses()) {
+            for (const auto& addr : stealthMgr->GetStealthAddresses()) {
                 UniValue obj(UniValue::VOBJ);
                 obj.pushKV("address", addr.address.ToString());
                 obj.pushKV("label", addr.label);
@@ -514,6 +507,13 @@ static RPCHelpMan sendfcmp()
                 }
             }
 
+            // Register change output in wallet for balance tracking
+            if (result.changeOutputInfo) {
+                auto changeInfo = *result.changeOutputInfo;
+                changeInfo.outpoint = COutPoint(Txid::FromUint256(spendingTxHash), result.privacyTx.privacyOutputs.size() - 1);
+                fcmpManager->AddFcmpOutput(changeInfo);
+            }
+
             UniValue ret(UniValue::VOBJ);
             ret.pushKV("txid", result.standardTx->GetHash().GetHex());
             ret.pushKV("fee", ValueFromAmount(result.fee));
@@ -647,16 +647,14 @@ static RPCHelpMan shieldfcmp()
             // Generate new stealth address if not provided
             std::string stealthAddrStr;
             if (!stealthAddr) {
-                // Use the stealth address manager to generate a new one
-                static std::map<std::string, std::unique_ptr<CStealthAddressManager>> s_managers;
-                const std::string walletName = pwallet->GetName();
-                if (s_managers.find(walletName) == s_managers.end()) {
-                    s_managers[walletName] = std::make_unique<CStealthAddressManager>(
-                        const_cast<CWallet*>(pwallet.get()));
+                // Use the wallet's own stealth address manager
+                auto* stealthMgr = const_cast<CWallet*>(pwallet.get())->GetStealthAddressManager();
+                if (!stealthMgr) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, "Stealth address manager not available");
                 }
 
                 CStealthAddressData addressData;
-                if (!s_managers[walletName]->GenerateStealthAddress("fcmp_shield", addressData)) {
+                if (!stealthMgr->GenerateStealthAddress("fcmp_shield", addressData)) {
                     throw JSONRPCError(RPC_WALLET_ERROR, "Failed to generate stealth address");
                 }
                 stealthAddr = addressData.address;

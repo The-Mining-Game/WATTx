@@ -210,6 +210,10 @@ bool DeriveStealthSpendingKey(
     uint32_t outputIndex,
     CKey& derivedKey)
 {
+    if (!scanPrivKey.IsValid() || !spendPrivKey.IsValid() || !ephemeralPubKey.IsValid()) {
+        return false;
+    }
+
     secp256k1_context* ctx = secp256k1_context_create(SECP256K1_CONTEXT_SIGN | SECP256K1_CONTEXT_VERIFY);
     if (!ctx) {
         return false;

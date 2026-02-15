@@ -283,7 +283,9 @@ public:
 
         // FCMP Privacy Transaction Activation
         consensus.nFcmpActivationHeight = 210000; // Activate FCMP at block 210,000
+        consensus.nFcmpCoinbaseActivationHeight = 210100; // Private block rewards shortly after FCMP activation
         consensus.nFcmpMaturity = 10; // FCMP outputs spendable after 10 blocks
+        consensus.nFcmpCoinbaseMaturity = 100; // FCMP coinbase outputs need 100 blocks
 
         // PoS Difficulty Fix (Hard Fork)
         // Fixes: RBTPosLimit too easy (blocks every ~10s instead of 120s target),
@@ -299,6 +301,10 @@ public:
         // consensus.nSilverUptime = 97;
         // consensus.nGoldUptime = 99;
         // consensus.nPlatinumUptime = 999; // 99.9%
+
+        // Delegation parameters for mainnet
+        consensus.nDelegationMaturity = 1000;
+        consensus.nDelegationUnbondingPeriod = 10000;
     }
 };
 
@@ -452,11 +458,17 @@ public:
 
         // FCMP Privacy - Activate early for testnet testing
         consensus.nFcmpActivationHeight = 2000; // Activate FCMP at block 2,000
+        consensus.nFcmpCoinbaseActivationHeight = 2100; // Private block rewards at block 2,100
         consensus.nFcmpMaturity = 10;
+        consensus.nFcmpCoinbaseMaturity = 100;
 
         // PoS Difficulty Fix - Activate early for testnet testing
         consensus.nPoSDifficultyFixHeight = 500;
         consensus.FixedRBTPosLimit = uint256{"0000000000003fffffffffffffffffffffffffffffffffffffffffffffffffff"};
+
+        // Delegation parameters for testnet
+        consensus.nDelegationMaturity = 100;
+        consensus.nDelegationUnbondingPeriod = 1000;
     }
 };
 
@@ -554,9 +566,9 @@ public:
         base58Prefixes[EXT_PUBLIC_KEY] = {0x04, 0x35, 0x87, 0xCF};
         base58Prefixes[EXT_SECRET_KEY] = {0x04, 0x35, 0x83, 0x94};
 
-        bech32_hrp = "ws"; // WATTx signet bech32 prefix
+        bech32_hrp = "w4"; // WATTx testnet4 bech32 prefix
 
-        // No fixed seeds - WATTx signet runs in isolated mode
+        // No fixed seeds - WATTx testnet4 runs in isolated mode
         // vFixedSeeds = std::vector<uint8_t>(std::begin(chainparams_seed_testnet4), std::end(chainparams_seed_testnet4));
 
         fDefaultConsistencyChecks = false;
@@ -720,7 +732,7 @@ public:
         base58Prefixes[EXT_PUBLIC_KEY] = {0x04, 0x35, 0x87, 0xCF};
         base58Prefixes[EXT_SECRET_KEY] = {0x04, 0x35, 0x83, 0x94};
 
-        bech32_hrp = "w4"; // WATTx testnet4 bech32 prefix
+        bech32_hrp = "ws"; // WATTx signet bech32 prefix
 
         fDefaultConsistencyChecks = false;
         fMineBlocksOnDemand = false;
@@ -929,11 +941,17 @@ public:
         // Privacy - Activate at block 1 for regtest (immediate testing)
         consensus.nPrivacyActivationHeight = 1;
         consensus.nFcmpActivationHeight = 1;
+        consensus.nFcmpCoinbaseActivationHeight = 500; // Private block rewards after block 500 (gives room for transparent testing)
         consensus.nFcmpMaturity = 10;
+        consensus.nFcmpCoinbaseMaturity = 100;
 
         // PoS Difficulty Fix - Active from block 1 for regtest
         consensus.nPoSDifficultyFixHeight = 1;
         consensus.FixedRBTPosLimit = uint256{"0000000000003fffffffffffffffffffffffffffffffffffffffffffffffffff"};
+
+        // Delegation parameters - lowered for regtest testing
+        consensus.nDelegationMaturity = 10;
+        consensus.nDelegationUnbondingPeriod = 100;
 
         // WATTx regtest addresses start with 'w' (base58 prefix 135)
         base58Prefixes[PUBKEY_ADDRESS] = std::vector<unsigned char>(1,135);

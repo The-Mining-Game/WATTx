@@ -184,9 +184,12 @@ bool CAuxPow::GetAuxChainMerkleRoot(uint256& hashOut) const {
     // Look for merge mining tag in coinbase
     // The tag is in the coinbase's scriptSig or a special output
 
+    // Store coinbase tx locally to avoid dangling references from temporaries
+    const CTransaction coinbaseTx = GetCoinbaseTx();
+
     // Check coinbase input scriptSig
-    if (!GetCoinbaseTx().vin.empty()) {
-        const auto& scriptSig = GetCoinbaseTx().vin[0].scriptSig;
+    if (!coinbaseTx.vin.empty()) {
+        const auto& scriptSig = coinbaseTx.vin[0].scriptSig;
         std::vector<uint8_t> data(scriptSig.begin(), scriptSig.end());
 
         uint8_t depth;
@@ -196,7 +199,7 @@ bool CAuxPow::GetAuxChainMerkleRoot(uint256& hashOut) const {
     }
 
     // Check transaction outputs for OP_RETURN with merge mining data
-    for (const auto& out : GetCoinbaseTx().vout) {
+    for (const auto& out : coinbaseTx.vout) {
         const auto& script = out.scriptPubKey;
         if (script.size() >= 35 && script[0] == 0x6a) {  // OP_RETURN
             std::vector<uint8_t> data(script.begin() + 1, script.end());

@@ -10,6 +10,7 @@
 #include <sodium.h>
 
 #include <cassert>
+#include <cstring>
 #include <stdexcept>
 
 namespace ed25519 {
@@ -60,8 +61,12 @@ Scalar Scalar::Random() {
 Scalar Scalar::FromBytesModOrder(const uint8_t* bytes, size_t len) {
     Scalar result;
     if (len == 32) {
-        // Use libsodium's reduce function
-        crypto_core_ed25519_scalar_reduce(result.data.data(), bytes);
+        // crypto_core_ed25519_scalar_reduce requires 64-byte input;
+        // zero-pad 32-byte input to avoid reading stack garbage
+        std::array<uint8_t, 64> padded{};
+        std::memcpy(padded.data(), bytes, 32);
+        crypto_core_ed25519_scalar_reduce(result.data.data(), padded.data());
+        sodium_memzero(padded.data(), 64);
     } else if (len == 64) {
         // 64-byte input for hash outputs
         crypto_core_ed25519_scalar_reduce(result.data.data(), bytes);

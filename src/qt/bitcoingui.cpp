@@ -376,11 +376,7 @@ void BitcoinGUI::createActions()
     messagingAction->setToolTip(messagingAction->statusTip());
     messagingAction->setCheckable(true);
 
-    trustTierAction = new QAction(platformStyle->MultiStatesIcon(":/icons/tx_mined"), tr("Trust Tier"), this);
-    trustTierAction->setStatusTip(tr("View your validator trust tier, uptime, and reward multiplier"));
-    trustTierAction->setToolTip(trustTierAction->statusTip());
-    trustTierAction->setCheckable(true);
-    tabGroup->addAction(trustTierAction);
+
 
     WRCTokenAction = new QAction(platformStyle->MultiStatesIcon(":/icons/wrctoken"), tr("&WRC Tokens"), this);
     WRCTokenAction->setStatusTip(tr("WRC Tokens (send, receive or add Tokens in list)"));
@@ -417,8 +413,6 @@ void BitcoinGUI::createActions()
     connect(superStakerAction, SIGNAL(triggered()), this, SLOT(gotoSuperStakerPage()));
     connect(messagingAction, &QAction::triggered, [this]{ showNormalIfMinimized(); });
     connect(messagingAction, &QAction::triggered, this, &BitcoinGUI::gotoMessagingPage);
-    connect(trustTierAction, &QAction::triggered, [this]{ showNormalIfMinimized(); });
-    connect(trustTierAction, &QAction::triggered, this, &BitcoinGUI::gotoTrustTierPage);
 #endif // ENABLE_WALLET
 
     quitAction = new QAction(tr("E&xit"), this);
@@ -765,7 +759,6 @@ void BitcoinGUI::createToolBars()
         appNavigationBar->mapGroup(walletStakeAction, walletStakeActions);
         appNavigationBar->addAction(WRCTokenAction);
         appNavigationBar->addAction(messagingAction);
-        appNavigationBar->addAction(trustTierAction);
         appNavigationBar->buildUi();
         overviewAction->setChecked(true);
     }
@@ -1045,7 +1038,6 @@ void BitcoinGUI::setWalletActionsEnabled(bool enabled)
     m_load_psbt_action->setEnabled(enabled);
     m_load_psbt_clipboard_action->setEnabled(enabled);
     signTxHardwareAction->setEnabled(enabled);
-    trustTierAction->setEnabled(enabled);
     m_close_wallet_action->setEnabled(enabled);
     m_close_all_wallets_action->setEnabled(enabled);
 }
@@ -1221,12 +1213,6 @@ void BitcoinGUI::gotoMessagingPage()
 {
     messagingAction->setChecked(true);
     if (walletFrame) walletFrame->gotoMessagingPage();
-}
-
-void BitcoinGUI::gotoTrustTierPage()
-{
-    trustTierAction->setChecked(true);
-    if (walletFrame) walletFrame->gotoTrustTierPage();
 }
 
 void BitcoinGUI::gotoReceiveCoinsPage()

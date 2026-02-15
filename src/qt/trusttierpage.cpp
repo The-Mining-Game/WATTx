@@ -32,20 +32,18 @@ TrustTierPage::TrustTierPage(const PlatformStyle *_platformStyle, QWidget *paren
     // Set up tier requirements tree columns
     ui->tierRequirementsTree->setColumnWidth(0, 120);
     ui->tierRequirementsTree->setColumnWidth(1, 150);
-    ui->tierRequirementsTree->setColumnWidth(2, 150);
 
     // Populate tier requirements (static data from consensus params)
-    auto addTierReq = [&](const QString& name, const QString& uptime, const QString& multiplier, const QString& color) {
+    auto addTierReq = [&](const QString& name, const QString& uptime, const QString& color) {
         QTreeWidgetItem* item = new QTreeWidgetItem(ui->tierRequirementsTree);
         item->setText(0, name);
         item->setText(1, uptime);
-        item->setText(2, multiplier);
         item->setForeground(0, QColor(color));
     };
-    addTierReq("Bronze", "95.0%+", "1.0x", "#CD7F32");
-    addTierReq("Silver", "97.0%+", "1.25x", "#C0C0C0");
-    addTierReq("Gold", "99.0%+", "1.5x", "#FFD700");
-    addTierReq("Platinum", "99.9%+", "2.0x", "#E5E4E2");
+    addTierReq("Bronze", "95.0%+", "#CD7F32");
+    addTierReq("Silver", "97.0%+", "#C0C0C0");
+    addTierReq("Gold", "99.0%+", "#FFD700");
+    addTierReq("Platinum", "99.9%+", "#E5E4E2");
 
     // Set up network stats tree columns
     ui->networkStatsTree->setColumnWidth(0, 120);

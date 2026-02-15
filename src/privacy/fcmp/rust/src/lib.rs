@@ -653,8 +653,18 @@ pub unsafe extern "C" fn fcmp_prove(
     let mut commitments: Vec<[u8; 32]> = Vec::with_capacity(num_layers);
     let mut layer_secrets: Vec<Scalar> = Vec::with_capacity(num_layers);
 
-    // Layer 0 secret is sk + rerand
-    layer_secrets.push(sk + rerand);
+    // Layer 0 secret: derive from output tuple (must match verifier's layer_commit derivation)
+    {
+        let mut h = Blake2b512::new();
+        h.update(b"WATTx_FCMP_layer_commit");
+        h.update(&output_bytes[..32]);    // O
+        h.update(&output_bytes[32..64]);  // I
+        h.update(&output_bytes[64..96]);  // C
+        let hash = h.finalize();
+        let mut wide = [0u8; 64];
+        wide.copy_from_slice(&hash[..64]);
+        layer_secrets.push(Scalar::from_bytes_mod_order_wide(&wide));
+    }
 
     // Derive layer secrets from branch data using Fiat-Shamir
     for i in 1..num_layers {

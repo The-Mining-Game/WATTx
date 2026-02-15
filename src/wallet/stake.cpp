@@ -1,5 +1,7 @@
 #include <wallet/stake.h>
 #include <wallet/receive.h>
+#include <wallet/fcmp_wallet.h>
+#include <wallet/stealth_wallet.h>
 #include <node/miner.h>
 #include <qtum/qtumledger.h>
 #include <pos.h>
@@ -7,6 +9,11 @@
 #include <common/args.h>
 #include <chainparams.h>
 #include <util/moneystr.h>
+#include <privacy/stealth.h>
+#include <privacy/ed25519/ed25519_types.h>
+#include <privacy/ed25519/pedersen.h>
+#include <trust/trustscore.h>
+#include <trust/heartbeat_net.h>
 
 namespace wallet {
 
@@ -223,10 +230,17 @@ bool CreateCoinStakeFromMine(CWallet& wallet, unsigned int nBits, const CAmount&
     const Consensus::Params& consensusParams = Params().GetConsensus();
     int64_t nRewardPiece = 0;
     int nNextHeight = pindexPrev->nHeight + 1;
+    CAmount nFcmpReward = 0; // Reward portion to route to FCMP (0 = disabled)
 
     // Calculate reward
     {
-        int64_t nReward = nTotalFees + GetBlockSubsidy(nNextHeight, consensusParams);
+        CAmount baseSubsidy = GetBlockSubsidy(nNextHeight, consensusParams);
+
+        // Apply trust tier bonus for PoS validators
+        CKeyID stakerId{uint160{pkhash}};
+        CAmount adjustedSubsidy = ApplyTrustTierBonus(baseSubsidy, stakerId, nNextHeight, consensusParams);
+
+        int64_t nReward = nTotalFees + adjustedSubsidy;
         if (nReward < 0)
             return false;
 
@@ -234,15 +248,35 @@ bool CreateCoinStakeFromMine(CWallet& wallet, unsigned int nBits, const CAmount&
         if (nNextHeight >= consensusParams.nX25XActivationHeight) {
             // Calculate validator's share (PoS portion)
             int64_t nValidatorReward = (nReward * consensusParams.nPoSRewardPercent) / 100;
-            // Note: Miner's share will be handled separately in block creation
-            // The validator gets their share in the coinstake
-            nCredit += nValidatorReward;
 
+            // After FCMP coinbase activation, route reward to FCMP output
+            // Kernel value returns transparent for re-staking; only reward goes to FCMP
+            if (consensusParams.IsFcmpCoinbaseActive(nNextHeight)) {
+                auto* stealthMgr = wallet.GetStealthAddressManager();
+                if (stealthMgr && stealthMgr->HasStealthAddresses()) {
+                    nFcmpReward = nValidatorReward;
+                    // nCredit stays as kernel value only (no reward added)
+                } else {
+                    // No stealth address: fallback to transparent reward
+                    nCredit += nValidatorReward;
+                }
+            } else {
+                nCredit += nValidatorReward;
+            }
         }
         else if(pindexPrev->nHeight < consensusParams.nFirstMPoSBlock || pindexPrev->nHeight >= consensusParams.nLastMPoSBlock)
         {
             // Keep whole reward (legacy behavior)
-            nCredit += nReward;
+            if (consensusParams.IsFcmpCoinbaseActive(nNextHeight)) {
+                auto* stealthMgr = wallet.GetStealthAddressManager();
+                if (stealthMgr && stealthMgr->HasStealthAddresses()) {
+                    nFcmpReward = nReward;
+                } else {
+                    nCredit += nReward;
+                }
+            } else {
+                nCredit += nReward;
+            }
         }
         else
         {
@@ -252,22 +286,87 @@ bool CreateCoinStakeFromMine(CWallet& wallet, unsigned int nBits, const CAmount&
         }
    }
 
-    if (nCredit >= GetStakeSplitThreshold())
-    {
-        for(unsigned int i = 0; i < GetStakeSplitOutputs() - 1; i++)
-            txNew.vout.push_back(CTxOut(0, txNew.vout[1].scriptPubKey)); //split stake
-    }
+    if (nFcmpReward == 0) {
+        // Standard transparent flow: split stake if large enough
+        if (nCredit >= GetStakeSplitThreshold())
+        {
+            for(unsigned int i = 0; i < GetStakeSplitOutputs() - 1; i++)
+                txNew.vout.push_back(CTxOut(0, txNew.vout[1].scriptPubKey)); //split stake
+        }
 
-    // Set output amount
-    if (txNew.vout.size() == GetStakeSplitOutputs() + 1)
-    {
-        CAmount nValue = (nCredit / GetStakeSplitOutputs() / CENT) * CENT;
-        for(unsigned int i = 1; i < GetStakeSplitOutputs(); i++)
-            txNew.vout[i].nValue = nValue;
-        txNew.vout[GetStakeSplitOutputs()].nValue = nCredit - nValue * (GetStakeSplitOutputs() - 1);
+        // Set output amount
+        if (txNew.vout.size() == GetStakeSplitOutputs() + 1)
+        {
+            CAmount nValue = (nCredit / GetStakeSplitOutputs() / CENT) * CENT;
+            for(unsigned int i = 1; i < GetStakeSplitOutputs(); i++)
+                txNew.vout[i].nValue = nValue;
+            txNew.vout[GetStakeSplitOutputs()].nValue = nCredit - nValue * (GetStakeSplitOutputs() - 1);
+        }
+        else
+            txNew.vout[1].nValue = nCredit;
+    } else {
+        // FCMP reward flow: kernel value returns transparent, reward goes to FCMP
+        txNew.vout[1].nValue = nCredit; // Kernel return (transparent for re-staking)
+
+        // Create FCMP OP_RETURN output for the reward
+        auto* stealthMgr = wallet.GetStealthAddressManager();
+        if (stealthMgr && stealthMgr->HasStealthAddresses()) {
+            auto addresses = stealthMgr->GetStealthAddresses();
+            if (!addresses.empty()) {
+                const auto& addr = addresses[0].address;
+
+                // Generate ephemeral key for DKSAP
+                CKey ephemeralKey;
+                ephemeralKey.MakeNewKey(true);
+
+                // Generate stealth destination
+                privacy::CStealthOutput stealthOut;
+                if (privacy::GenerateStealthDestination(addr, ephemeralKey, stealthOut)) {
+                    // Derive O from the one-time public key
+                    std::vector<uint8_t> pubKeyBytes(stealthOut.oneTimePubKey.begin(), stealthOut.oneTimePubKey.end());
+                    uint256 keyHash = Hash(pubKeyBytes);
+                    ed25519::Scalar outputScalar = ed25519::Scalar::FromBytesModOrder(
+                        std::vector<uint8_t>(keyHash.begin(), keyHash.end()));
+                    ed25519::Point O = outputScalar * ed25519::Point::BasePoint();
+
+                    // I = Hp(O)
+                    std::vector<uint8_t> toHash(O.data.begin(), O.data.end());
+                    ed25519::Point I = ed25519::Point::HashToPoint(toHash);
+
+                    // C = amount*H + blinding*G
+                    ed25519::Scalar blinding = ed25519::Scalar::Random();
+                    auto commitment = ed25519::PedersenCommitment::CommitAmount(
+                        static_cast<uint64_t>(nFcmpReward), blinding);
+                    ed25519::Point C = commitment.GetPoint();
+
+                    CPubKey R = ephemeralKey.GetPubKey();
+
+                    // Build OP_RETURN: "FCMP" + O(32) + I(32) + C(32) + R(33)
+                    std::vector<uint8_t> fcmpData;
+                    fcmpData.reserve(4 + 96 + 33);
+                    fcmpData.push_back('F'); fcmpData.push_back('C');
+                    fcmpData.push_back('M'); fcmpData.push_back('P');
+                    fcmpData.insert(fcmpData.end(), O.data.begin(), O.data.end());
+                    fcmpData.insert(fcmpData.end(), I.data.begin(), I.data.end());
+                    fcmpData.insert(fcmpData.end(), C.data.begin(), C.data.end());
+                    fcmpData.insert(fcmpData.end(), R.begin(), R.end());
+
+                    CScript opReturnScript;
+                    opReturnScript << OP_RETURN << fcmpData;
+
+                    // nValue = nFcmpReward so GetValueOut() validation works
+                    txNew.vout.push_back(CTxOut(nFcmpReward, opReturnScript));
+
+                    LogPrintf("CreateCoinStake: FCMP reward output created (%s WATTx)\n",
+                              FormatMoney(nFcmpReward));
+                } else {
+                    // Fallback: add reward to kernel return
+                    txNew.vout[1].nValue += nFcmpReward;
+                    LogPrintf("CreateCoinStake: FCMP stealth derivation failed, reward goes transparent\n");
+                }
+            }
+        }
     }
-    else
-        txNew.vout[1].nValue = nCredit;
 
     if(pindexPrev->nHeight >= consensusParams.nFirstMPoSBlock && pindexPrev->nHeight < consensusParams.nLastMPoSBlock)
     {
@@ -448,7 +547,13 @@ bool CreateCoinStakeFromDelegate(CWallet& wallet, unsigned int nBits, const CAmo
 
     // Calculate reward
     {
-        int64_t nTotalReward = nTotalFees + GetBlockSubsidy(nNextHeight, consensusParams);
+        CAmount baseSubsidy = GetBlockSubsidy(nNextHeight, consensusParams);
+
+        // Apply trust tier bonus for PoS validators
+        CKeyID stakerId{uint160{pkhash}};
+        CAmount adjustedSubsidy = ApplyTrustTierBonus(baseSubsidy, stakerId, nNextHeight, consensusParams);
+
+        int64_t nTotalReward = nTotalFees + adjustedSubsidy;
         if (nTotalReward < 0)
             return false;
 

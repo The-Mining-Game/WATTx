@@ -75,23 +75,29 @@ struct CFcmpOutputInfo
     // Whether this output has been spent
     bool spent;
 
+    // Whether this output originated from a coinbase/coinstake transaction
+    // When true, uses coinbase maturity (100 blocks) instead of FCMP maturity (10 blocks)
+    bool isCoinbaseOutput{false};
+
     // Timestamp when we detected this output
     int64_t nTime;
 
     CFcmpOutputInfo()
-        : amount(0), treeLeafIndex(0), blockHeight(-1), spent(false), nTime(0) {}
+        : amount(0), treeLeafIndex(0), blockHeight(-1), spent(false), isCoinbaseOutput(false), nTime(0) {}
 
     bool IsSpendable(int currentHeight, int minConfirmations = 10) const {
         if (spent) return false;
         if (blockHeight < 0) return false;
-        return (currentHeight - blockHeight) >= minConfirmations;
+        // Coinbase-originated FCMP outputs require longer maturity (100 blocks)
+        int requiredConfs = isCoinbaseOutput ? std::max(minConfirmations, 100) : minConfirmations;
+        return (currentHeight - blockHeight) >= requiredConfs;
     }
 
     SERIALIZE_METHODS(CFcmpOutputInfo, obj) {
         READWRITE(obj.outpoint, obj.amount, obj.privKey, obj.blinding,
                   obj.outputTuple.O, obj.outputTuple.I, obj.outputTuple.C,
                   obj.treeLeafIndex, obj.keyImageHash, obj.blockHeight,
-                  obj.spent, obj.nTime);
+                  obj.spent, obj.isCoinbaseOutput, obj.nTime);
     }
 };
 
@@ -117,6 +123,9 @@ struct CFcmpTransactionResult
 
     // Error message if failed
     std::string error;
+
+    // Change output info (if any) - must be registered in wallet after commit
+    std::optional<CFcmpOutputInfo> changeOutputInfo;
 };
 
 /**
@@ -178,17 +187,29 @@ struct CFcmpTransactionParams
 
 /**
  * @brief Recipient for FCMP transaction
+ *
+ * Supports both stealth addresses (full privacy) and regular script
+ * destinations (sender-side privacy via deshielding).
  */
 struct CFcmpRecipient
 {
-    // Stealth address to send to
+    // Stealth address to send to (full privacy)
     privacy::CStealthAddress stealthAddress;
+
+    // Regular script destination (sender-side privacy / deshielding)
+    CScript scriptPubKey;
 
     // Amount to send
     CAmount amount;
 
     // Label (for local tracking)
     std::string label;
+
+    // Whether this recipient uses a stealth address (full privacy)
+    // vs regular address (sender-side privacy only)
+    bool IsStealthRecipient() const {
+        return stealthAddress.IsValid();
+    }
 };
 
 /**
@@ -266,6 +287,9 @@ public:
      * @return true if added successfully
      */
     bool AddFcmpOutput(const CFcmpOutputInfo& output);
+
+    /** Update block height for an existing output when its transaction is confirmed */
+    bool UpdateFcmpOutputBlockHeight(const COutPoint& outpoint, int blockHeight);
 
     /**
      * @brief Mark an FCMP output as spent
@@ -396,6 +420,19 @@ public:
     bool Save();
 
     // ========================================================================
+    // Auto-Shielding
+    // ========================================================================
+
+    /**
+     * @brief Auto-shield transparent funds to FCMP
+     *
+     * Called after block processing. If the wallet has transparent balance
+     * above the minimum threshold, automatically creates a shield transaction.
+     * Skipped during IBD and when a shield is already pending.
+     */
+    void AutoShield();
+
+    // ========================================================================
     // Utility
     // ========================================================================
 
@@ -433,6 +470,9 @@ private:
 
     // Global curve tree (shared with consensus)
     std::shared_ptr<curvetree::CurveTree> m_curveTree;
+
+    // Auto-shield state
+    bool m_autoShieldPending GUARDED_BY(cs_fcmp) = false;
 
     /**
      * @brief Select inputs for transaction

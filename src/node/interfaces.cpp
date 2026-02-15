@@ -77,6 +77,8 @@
 
 #ifdef ENABLE_WALLET
 #include <wallet/stake.h>
+#include <wallet/wallet.h>
+#include <wallet/context.h>
 #include <node/miner.h>
 #include <wallet/rpc/contract.h>
 #include <wallet/rpc/mining.h>
@@ -1200,6 +1202,29 @@ public:
     {
         BlockAssembler::Options assemble_options{options};
         ApplyArgsManOptions(*Assert(m_node.args), assemble_options);
+
+        // Auto-discover wallet for FCMP coinbase stealth address when needed
+        if (!assemble_options.fcmp_wallet && !fProofOfStake && m_node.wallet_loader) {
+            int nextHeight = chainman().ActiveChain().Height() + 1;
+            if (chainman().GetParams().GetConsensus().IsFcmpCoinbaseActive(nextHeight)) {
+                auto* wctx = m_node.wallet_loader->context();
+                if (wctx) {
+                    LOCK(wctx->wallets_mutex);
+                    LogDebug(BCLog::PRIVACY, "FCMP auto-discover: checking %zu wallets for stealth addresses (height=%d)\n",
+                              wctx->wallets.size(), nextHeight);
+                    for (const auto& w : wctx->wallets) {
+                        auto* stealthMgr = w->GetStealthAddressManager();
+                        if (stealthMgr && stealthMgr->HasStealthAddresses()) {
+                            assemble_options.fcmp_wallet = w.get();
+                            LogDebug(BCLog::PRIVACY, "FCMP auto-discover: found stealth address in wallet '%s'\n",
+                                      w->GetName());
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
         return std::make_unique<BlockTemplateImpl>(BlockAssembler{chainman().ActiveChainstate(), context()->mempool.get(), assemble_options}.CreateNewBlock(fProofOfStake, pTotalFees, nTime, nTimeLimit), m_node);
     }
 

@@ -33,6 +33,11 @@
 #include <wallet/wallet.h>
 #include <wallet/receive.h>
 #include <wallet/stake.h>
+#include <wallet/fcmp_wallet.h>
+#include <privacy/stealth.h>
+#include <privacy/ed25519/ed25519_types.h>
+#include <privacy/ed25519/pedersen.h>
+#include <privacy/curvetree/curve_tree.h>
 #endif
 
 #include <algorithm>
@@ -172,14 +177,123 @@ void BlockAssembler::resetBlock()
     nFees = 0;
 }
 
+#ifdef ENABLE_WALLET
+/**
+ * Create an FCMP reward OP_RETURN output for private block rewards.
+ *
+ * The output contains: OP_RETURN <"FCMP" + O(32) + I(32) + C(32) + R(33)>
+ * where O, I, C are the curve tree output tuple and R is the ephemeral pubkey
+ * for stealth address scanning.
+ *
+ * nValue is set to the reward amount so GetValueOut() validation works.
+ * The output is unspendable in the UTXO set but its value enters the FCMP
+ * curve tree via the wallet's scanning infrastructure.
+ */
+static CTxOut CreateFcmpRewardOutput(CAmount rewardAmount,
+                                     const CPubKey& scanPubKey,
+                                     const CPubKey& spendPubKey)
+{
+    // Build stealth address from pubkeys
+    privacy::CStealthAddress stealthAddr(scanPubKey, spendPubKey);
+
+    // Generate ephemeral key for DKSAP
+    CKey ephemeralKey;
+    ephemeralKey.MakeNewKey(true);
+
+    // Generate stealth destination
+    privacy::CStealthOutput stealthOut;
+    if (!privacy::GenerateStealthDestination(stealthAddr, ephemeralKey, stealthOut)) {
+        LogPrintf("CreateFcmpRewardOutput: GenerateStealthDestination failed, returning empty\n");
+        return CTxOut(0, CScript());
+    }
+
+    // Derive O from the one-time public key
+    std::vector<uint8_t> pubKeyBytes(stealthOut.oneTimePubKey.begin(), stealthOut.oneTimePubKey.end());
+    uint256 keyHash = Hash(pubKeyBytes);
+    ed25519::Scalar outputScalar = ed25519::Scalar::FromBytesModOrder(
+        std::vector<uint8_t>(keyHash.begin(), keyHash.end()));
+    ed25519::Point O = outputScalar * ed25519::Point::BasePoint();
+    LogDebug(BCLog::PRIVACY, "FCMP miner: oneTimePubKey=%s keyHash=%s O=%s\n",
+              HexStr(pubKeyBytes), keyHash.ToString(),
+              HexStr(std::vector<uint8_t>(O.data.begin(), O.data.end())));
+
+    // I = Hp(O) - key image point
+    std::vector<uint8_t> toHash(O.data.begin(), O.data.end());
+    ed25519::Point I = ed25519::Point::HashToPoint(toHash);
+
+    // C = amount*H + blinding*G (Pedersen commitment)
+    // Derive blinding deterministically from the one-time public key so the
+    // wallet scanner can reconstruct the same blinding factor.
+    std::vector<uint8_t> blindingInput(pubKeyBytes.begin(), pubKeyBytes.end());
+    blindingInput.push_back(0x42); // domain separator for blinding derivation
+    uint256 blindingHash = Hash(blindingInput);
+    ed25519::Scalar blinding = ed25519::Scalar::FromBytesModOrder(
+        std::vector<uint8_t>(blindingHash.begin(), blindingHash.end()));
+    auto commitment = ed25519::PedersenCommitment::CommitAmount(
+        static_cast<uint64_t>(rewardAmount), blinding);
+    ed25519::Point C = commitment.GetPoint();
+
+    // R = ephemeral public key (for recipient scanning)
+    CPubKey R = ephemeralKey.GetPubKey();
+
+    // Build OP_RETURN script: "FCMP" marker + O(32) + I(32) + C(32) + R(33) = 133 bytes
+    std::vector<uint8_t> fcmpData;
+    fcmpData.reserve(4 + 96 + 33);
+
+    // FCMP marker
+    fcmpData.push_back('F');
+    fcmpData.push_back('C');
+    fcmpData.push_back('M');
+    fcmpData.push_back('P');
+
+    // O, I, C points (32 bytes each)
+    fcmpData.insert(fcmpData.end(), O.data.begin(), O.data.end());
+    fcmpData.insert(fcmpData.end(), I.data.begin(), I.data.end());
+    fcmpData.insert(fcmpData.end(), C.data.begin(), C.data.end());
+
+    // R ephemeral pubkey (33 bytes compressed)
+    fcmpData.insert(fcmpData.end(), R.begin(), R.end());
+
+    CScript opReturnScript;
+    opReturnScript << OP_RETURN << fcmpData;
+
+    // nValue = rewardAmount so GetValueOut() validation works correctly
+    return CTxOut(rewardAmount, opReturnScript);
+}
+#endif // ENABLE_WALLET
+
 void BlockAssembler::RebuildRefundTransaction(CBlock* pblock){
     int refundtx=0; //0 for coinbase in PoW
     if(pblock->IsProofOfStake()){
         refundtx=1; //1 for coinstake in PoS
     }
     CMutableTransaction contrTx(originalRewardTx);
-    contrTx.vout[refundtx].nValue = nFees + GetBlockSubsidy(nHeight, chainparams.GetConsensus());
-    contrTx.vout[refundtx].nValue -= bceResult.refundSender;
+    CAmount adjustedReward = nFees + GetBlockSubsidy(nHeight, chainparams.GetConsensus());
+    adjustedReward -= bceResult.refundSender;
+
+#ifdef ENABLE_WALLET
+    // If the reward output is an FCMP OP_RETURN, regenerate it with the adjusted amount
+    // since the Pedersen commitment C must reflect the final post-refund amount
+    if (contrTx.vout[refundtx].scriptPubKey.IsUnspendable() &&
+        chainparams.GetConsensus().IsFcmpCoinbaseActive(nHeight) &&
+        m_options.use_fcmp_reward &&
+        !m_options.fcmp_stealth_scan_pubkey.empty() &&
+        !m_options.fcmp_stealth_spend_pubkey.empty())
+    {
+        CPubKey scanPub(m_options.fcmp_stealth_scan_pubkey);
+        CPubKey spendPub(m_options.fcmp_stealth_spend_pubkey);
+        if (scanPub.IsFullyValid() && spendPub.IsFullyValid()) {
+            contrTx.vout[refundtx] = CreateFcmpRewardOutput(adjustedReward, scanPub, spendPub);
+        } else {
+            contrTx.vout[refundtx].nValue = adjustedReward;
+        }
+    }
+    else
+#endif
+    {
+        contrTx.vout[refundtx].nValue = adjustedReward;
+    }
+
     //note, this will need changed for MPoS
     int i=contrTx.vout.size();
     contrTx.vout.resize(contrTx.vout.size()+bceResult.refundOutputs.size());
@@ -254,8 +368,55 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(bool fProofOfStak
     }
     else
     {
-        coinbaseTx.vout[0].scriptPubKey = m_options.coinbase_output_script;
-        coinbaseTx.vout[0].nValue = nFees + GetBlockSubsidy(nHeight, chainparams.GetConsensus());
+        CAmount coinbaseReward = nFees + GetBlockSubsidy(nHeight, chainparams.GetConsensus());
+#ifdef ENABLE_WALLET
+        // After FCMP coinbase activation, create FCMP OP_RETURN output for PoW rewards
+        if (chainparams.GetConsensus().IsFcmpCoinbaseActive(nHeight))
+        {
+            CPubKey scanPub, spendPub;
+            bool haveStealth = false;
+
+            // Use explicitly provided stealth address if available
+            if (m_options.use_fcmp_reward &&
+                !m_options.fcmp_stealth_scan_pubkey.empty() &&
+                !m_options.fcmp_stealth_spend_pubkey.empty())
+            {
+                scanPub = CPubKey(m_options.fcmp_stealth_scan_pubkey);
+                spendPub = CPubKey(m_options.fcmp_stealth_spend_pubkey);
+                haveStealth = scanPub.IsFullyValid() && spendPub.IsFullyValid();
+            }
+
+            // Auto-discover stealth address from provided wallet or block assembler's wallet
+            wallet::CWallet* discoverWallet = m_options.fcmp_wallet ? m_options.fcmp_wallet : pwallet;
+            if (!haveStealth && discoverWallet) {
+                auto* stealthMgr = discoverWallet->GetStealthAddressManager();
+                if (stealthMgr && stealthMgr->HasStealthAddresses()) {
+                    auto addresses = stealthMgr->GetStealthAddresses();
+                    if (!addresses.empty()) {
+                        const auto& addr = addresses[0].address;
+                        scanPub = addr.scanPubKey;
+                        spendPub = addr.spendPubKey;
+                        haveStealth = scanPub.IsFullyValid() && spendPub.IsFullyValid();
+                    }
+                }
+            }
+
+            if (haveStealth) {
+                coinbaseTx.vout[0] = CreateFcmpRewardOutput(coinbaseReward, scanPub, spendPub);
+                LogPrintf("CreateNewBlock: FCMP coinbase reward output created (%s WATTx)\n",
+                          FormatMoney(coinbaseReward));
+            } else {
+                // Fallback to transparent (auto-shield will handle it later)
+                coinbaseTx.vout[0].scriptPubKey = m_options.coinbase_output_script;
+                coinbaseTx.vout[0].nValue = coinbaseReward;
+            }
+        }
+        else
+#endif
+        {
+            coinbaseTx.vout[0].scriptPubKey = m_options.coinbase_output_script;
+            coinbaseTx.vout[0].nValue = coinbaseReward;
+        }
     }
     coinbaseTx.vin[0].scriptSig = CScript() << nHeight << OP_0;
     originalRewardTx = coinbaseTx;
@@ -1946,6 +2107,21 @@ protected:
         // Create a block that's properly populated with transactions
         BlockAssembler::Options options = ConfiguredOptions();
         options.coinbase_output_script = d->pblock->vtx[1]->vout[1].scriptPubKey;
+
+        // After FCMP coinbase activation, pass stealth address for private rewards
+        if (d->consensusParams.IsFcmpCoinbaseActive(d->nHeight)) {
+            auto* stealthMgr = d->pwallet->GetStealthAddressManager();
+            if (stealthMgr && stealthMgr->HasStealthAddresses()) {
+                auto addresses = stealthMgr->GetStealthAddresses();
+                if (!addresses.empty()) {
+                    const auto& addr = addresses[0].address;
+                    options.use_fcmp_reward = true;
+                    options.fcmp_stealth_scan_pubkey.assign(addr.scanPubKey.begin(), addr.scanPubKey.end());
+                    options.fcmp_stealth_spend_pubkey.assign(addr.spendPubKey.begin(), addr.spendPubKey.end());
+                }
+            }
+        }
+
         d->pblocktemplatefilled = std::unique_ptr<CBlockTemplate>(
                 BlockAssembler(d->pwallet->chain().chainman().ActiveChainstate(), &(d->pwallet->chain().mempool()), d->pwallet, options).CreateNewBlock(true, &(d->nTotalFees),
                                                         blockTime, FutureDrift(TicksSinceEpoch<std::chrono::seconds>(NodeClock::now()), d->nHeight, d->consensusParams) - nStakeTimeBuffer));

@@ -159,8 +159,8 @@ BOOST_AUTO_TEST_CASE(blockmanager_flush_block_file)
     CBlock block3;
     block3.nVersion = 3;
 
-    // They are 181 bytes header + 1 byte 0x00 for vtx length
-    constexpr int TEST_BLOCK_SIZE{182};
+    // They are 221 bytes header (80 standard + 64 QTUM + 40 Gapcoin + 37 PoS) + 1 byte 0x00 for vtx length
+    constexpr int TEST_BLOCK_SIZE{222};
 
     // Blockstore is empty
     BOOST_CHECK_EQUAL(blockman.CalculateCurrentUsage(), 0);
@@ -175,17 +175,15 @@ BOOST_AUTO_TEST_CASE(blockmanager_flush_block_file)
     BOOST_CHECK_EQUAL(blockman.CalculateCurrentUsage(), (TEST_BLOCK_SIZE + BLOCK_SERIALIZATION_HEADER_SIZE) * 2);
 
     // First two blocks are written as expected
-    // Errors are expected because block data is junk, thrown AFTER successful read
+    // WATTx ReadBlock does not check PoW (deferred to CheckBlock/ConnectBlock)
     CBlock read_block;
     BOOST_CHECK_EQUAL(read_block.nVersion, 0);
     {
-        ASSERT_DEBUG_LOG("ReadBlock: Errors in block header");
-        BOOST_CHECK(!blockman.ReadBlock(read_block, pos1));
+        BOOST_CHECK(blockman.ReadBlock(read_block, pos1));
         BOOST_CHECK_EQUAL(read_block.nVersion, 1);
     }
     {
-        ASSERT_DEBUG_LOG("ReadBlock: Errors in block header");
-        BOOST_CHECK(!blockman.ReadBlock(read_block, pos2));
+        BOOST_CHECK(blockman.ReadBlock(read_block, pos2));
         BOOST_CHECK_EQUAL(read_block.nVersion, 2);
     }
 

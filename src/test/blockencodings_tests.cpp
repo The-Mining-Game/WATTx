@@ -295,6 +295,24 @@ BOOST_AUTO_TEST_CASE(EmptyBlockRoundTripTest)
         stream >> shortIDs2;
 
         PartiallyDownloadedBlock partialBlock(&pool, m_node.chainman.get());
+        // WATTx: Use mock CheckBlock that only validates merkle root,
+        // since the test block wasn't mined with RandomX and would fail PoW check
+        partialBlock.m_check_block_mock = [](const CBlock& blk, BlockValidationState& state,
+            const Consensus::Params&, Chainstate&, bool, bool fCheckMerkleRoot, bool) {
+            if (fCheckMerkleRoot) {
+                bool mutated;
+                uint256 merkle = BlockMerkleRoot(blk, &mutated);
+                if (blk.hashMerkleRoot != merkle) {
+                    state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-txnmrklroot", "hashMerkleRoot mismatch");
+                    return false;
+                }
+                if (mutated) {
+                    state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-txns-duplicate", "duplicate transaction");
+                    return false;
+                }
+            }
+            return true;
+        };
         BOOST_CHECK(partialBlock.InitData(shortIDs2, empty_extra_txn) == READ_STATUS_OK);
         BOOST_CHECK(partialBlock.IsTxAvailable(0));
 

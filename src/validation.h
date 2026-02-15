@@ -47,6 +47,7 @@
 #include <vector>
 
 #include <consensus/consensus.h>
+#include <trust/trustscore.h>
 
 /////////////////////////////////////////// qtum
 #include <qtum/qtumstate.h>
@@ -147,8 +148,12 @@ int64_t FutureDrift(uint32_t nTime, int nHeight, const Consensus::Params& consen
 
 CAmount GetBlockSubsidy(int nHeight, const Consensus::Params& consensusParams);
 
-// WATTx: Get block subsidy with trust tier multiplier applied
-CAmount GetTieredBlockSubsidy(int nHeight, const Consensus::Params& consensusParams, int tierMultiplier);
+/** Get trust tier bonus percentage for a given trust tier (0, 5, 10, or 15) */
+int GetTrustTierBonusPercent(trust::TrustTier tier);
+
+/** Apply trust tier reward bonus to a base block reward for PoS validators */
+CAmount ApplyTrustTierBonus(CAmount baseReward, const CKeyID& stakerId,
+                            int nHeight, const Consensus::Params& consensusParams);
 
 bool FatalError(kernel::Notifications& notifications, BlockValidationState& state, const bilingual_str& message);
 

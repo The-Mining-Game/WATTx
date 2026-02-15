@@ -1618,6 +1618,9 @@ void CWallet::blockConnected(ChainstateRole role, const interfaces::BlockInfo& b
     }
     if (m_fcmp_manager) {
         m_fcmp_manager->ScanBlockForFcmpOutputs(*block.data, block.height);
+        // Auto-shield transparent funds to FCMP after processing block
+        // NOTE: Disabled during testing - re-enable for production
+        // m_fcmp_manager->AutoShield();
     }
 }
 

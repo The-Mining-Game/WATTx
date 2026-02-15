@@ -353,6 +353,12 @@ struct Params {
     /** Height at which trust tier system activates */
     int nTrustTierActivationHeight{1001}; // After PoW phase
 
+    /** Delegation maturity - blocks before a pending delegation becomes active */
+    int nDelegationMaturity{1000};
+
+    /** Delegation unbonding period - blocks to wait after undelegation before withdrawal */
+    int nDelegationUnbondingPeriod{10000};
+
     //////////////////////////////////////////////////
     // WATTx-Monero Merged Mining (AuxPoW) Parameters
     //////////////////////////////////////////////////
@@ -412,12 +418,23 @@ struct Params {
     /** Height at which FCMP privacy transactions become active */
     int nFcmpActivationHeight{std::numeric_limits<int>::max()}; // Disabled by default
 
+    /** Height at which FCMP coinbase/coinstake rewards become active */
+    int nFcmpCoinbaseActivationHeight{std::numeric_limits<int>::max()}; // Disabled by default
+
     /** FCMP output maturity - blocks before FCMP outputs can be spent */
     int nFcmpMaturity{10};
+
+    /** FCMP coinbase maturity - blocks before FCMP coinbase outputs can be spent */
+    int nFcmpCoinbaseMaturity{100};
 
     /** Check if FCMP is active at given height */
     bool IsFcmpActive(int height) const {
         return height >= nFcmpActivationHeight;
+    }
+
+    /** Check if FCMP coinbase rewards are active at given height */
+    bool IsFcmpCoinbaseActive(int height) const {
+        return height >= nFcmpCoinbaseActivationHeight;
     }
 
     //////////////////////////////////////////////////

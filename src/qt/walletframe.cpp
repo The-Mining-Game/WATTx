@@ -194,13 +194,6 @@ void WalletFrame::gotoMessagingPage()
         i.value()->gotoMessagingPage();
 }
 
-void WalletFrame::gotoTrustTierPage()
-{
-    QMap<WalletModel*, WalletView*>::const_iterator i;
-    for (i = mapWalletViews.constBegin(); i != mapWalletViews.constEnd(); ++i)
-        i.value()->gotoTrustTierPage();
-}
-
 void WalletFrame::gotoReceiveCoinsPage()
 {
     QMap<WalletModel*, WalletView*>::const_iterator i;

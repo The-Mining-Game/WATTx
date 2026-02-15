@@ -338,10 +338,12 @@ public:
     }
 };
 
-// Constants - lowered for testing (TODO: make these consensus params)
-static constexpr CAmount MIN_DELEGATION_AMOUNT = 1LL * 100000000LL; // 1 WATTx minimum for testing
-static constexpr int DELEGATION_MATURITY = 10;                      // 10 blocks maturity for testing
-static constexpr int DELEGATION_UNBONDING_PERIOD = 100;             // 100 blocks for testing
+// Minimum delegation amount (unchanged, not network-specific)
+static constexpr CAmount MIN_DELEGATION_AMOUNT = 1LL * 100000000LL; // 1 WATTx minimum
+
+// Delegation timing constants are now in Consensus::Params:
+//   nDelegationMaturity        - blocks before pending delegation becomes active
+//   nDelegationUnbondingPeriod - blocks to wait after undelegation before withdrawal
 
 /**
  * Global delegation database instance

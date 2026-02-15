@@ -14,8 +14,12 @@
 #define BITCOIN_NODE_TYPES_H
 
 #include <cstddef>
+#include <optional>
+#include <vector>
 #include <policy/policy.h>
 #include <script/script.h>
+
+namespace wallet { class CWallet; }
 
 namespace node {
 enum class TransactionError {
@@ -60,6 +64,24 @@ struct BlockCreateOptions {
      * coinbase_max_additional_weight and coinbase_output_max_additional_sigops.
      */
     CScript coinbase_output_script{CScript() << OP_TRUE};
+    /**
+     * Whether to create FCMP reward outputs instead of transparent ones.
+     * When true, the block reward goes to an FCMP OP_RETURN output
+     * containing (O, I, C, R) curve tree data.
+     */
+    bool use_fcmp_reward{false};
+    /**
+     * Stealth address data for FCMP reward output.
+     * scan_pubkey (33 bytes) + spend_pubkey (33 bytes).
+     * If empty and use_fcmp_reward is true, falls back to transparent.
+     */
+    std::vector<uint8_t> fcmp_stealth_scan_pubkey;
+    std::vector<uint8_t> fcmp_stealth_spend_pubkey;
+    /**
+     * Optional wallet pointer for FCMP stealth address auto-discovery.
+     * When set, the miner can look up stealth addresses directly.
+     */
+    wallet::CWallet* fcmp_wallet{nullptr};
 };
 } // namespace node
 

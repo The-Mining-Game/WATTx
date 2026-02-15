@@ -147,7 +147,6 @@
      <property name="maximumHeight"><number>130</number></property>
      <column><property name="text"><string>Tier</string></property></column>
      <column><property name="text"><string>Min Uptime</string></property></column>
-     <column><property name="text"><string>Reward Multiplier</string></property></column>
     </widget>
    </item>
 

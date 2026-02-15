@@ -8,6 +8,7 @@
 #include <hash.h>
 #include <consensus/params.h>
 #include <script/solver.h>
+#include <logging.h>
 
 #include <map>
 #include <mutex>
@@ -332,15 +333,19 @@ bool CPrivacyTransaction::VerifyFcmp() const
 {
     // 1. Check FCMP inputs exist
     if (fcmpInputs.empty()) {
+        LogPrintf("FCMP Verify: FAILED - no inputs\n");
         return false;
     }
 
     // 2. Verify key images are not spent
-    for (const auto& input : fcmpInputs) {
+    for (size_t i = 0; i < fcmpInputs.size(); i++) {
+        const auto& input = fcmpInputs[i];
         if (!input.keyImage.IsValid()) {
+            LogPrintf("FCMP Verify: FAILED - input %d key image invalid\n", i);
             return false;
         }
         if (IsKeyImageSpent(input.keyImage)) {
+            LogPrintf("FCMP Verify: FAILED - input %d key image already spent\n", i);
             return false;
         }
     }
@@ -351,12 +356,14 @@ bool CPrivacyTransaction::VerifyFcmp() const
     // 4. Get tree root (in production, this would come from chain state)
     // For now, use the root from the first input's proof
     if (!fcmpInputs[0].membershipProof.IsValid()) {
+        LogPrintf("FCMP Verify: FAILED - membership proof invalid\n");
         return false;
     }
     ed25519::Point treeRoot = fcmpInputs[0].membershipProof.treeRoot;
 
     // 5. Batch verify all FCMP inputs
     if (!BatchVerifyFcmpInputs(fcmpInputs, treeRoot, txHash)) {
+        LogPrintf("FCMP Verify: FAILED - batch input verification failed\n");
         return false;
     }
 
@@ -370,17 +377,70 @@ bool CPrivacyTransaction::VerifyFcmp() const
 
     if (!outputCommitments.empty()) {
         if (!VerifyFcmpBalance(fcmpInputs, outputCommitments, nFee)) {
+            LogPrintf("FCMP Verify: FAILED - commitment balance check failed (%d inputs, %d outputs, fee=%lld)\n",
+                      fcmpInputs.size(), outputCommitments.size(), nFee);
             return false;
         }
 
         // 7. Verify range proofs
         if (aggregatedRangeProof.IsValid()) {
             if (!VerifyAggregatedRangeProof(outputCommitments, aggregatedRangeProof)) {
+                LogPrintf("FCMP Verify: FAILED - range proof verification failed\n");
                 return false;
             }
         }
     }
 
+    LogPrintf("FCMP Verify: PASSED\n");
+    return true;
+}
+
+bool CPrivacyTransaction::VerifyFcmpSelfCheck() const
+{
+    // 1. Check FCMP inputs exist
+    if (fcmpInputs.empty()) {
+        LogPrintf("FCMP SelfCheck: FAILED - no inputs\n");
+        return false;
+    }
+
+    // 2. Verify key images are valid
+    for (size_t i = 0; i < fcmpInputs.size(); i++) {
+        if (!fcmpInputs[i].keyImage.IsValid()) {
+            LogPrintf("FCMP SelfCheck: FAILED - input %d key image invalid\n", i);
+            return false;
+        }
+    }
+
+    // 3. Verify SA+L signature for each input
+    auto G = ed25519::Point::BasePoint();
+    for (size_t i = 0; i < fcmpInputs.size(); i++) {
+        const auto& input = fcmpInputs[i];
+        auto sG = input.salSignature.s * G;
+        auto cO = input.salSignature.c * input.inputTuple.O_tilde;
+        auto R_plus_cO = input.inputTuple.R + cO;
+
+        if (sG.data != R_plus_cO.data) {
+            LogPrintf("FCMP SelfCheck: FAILED - input %d SA+L signature invalid\n", i);
+            return false;
+        }
+    }
+
+    // 4. Verify commitment balance
+    std::vector<CPedersenCommitment> outputCommitments;
+    for (const auto& output : privacyOutputs) {
+        if (output.confidentialOutput.IsValid()) {
+            outputCommitments.push_back(output.confidentialOutput.commitment);
+        }
+    }
+
+    if (!outputCommitments.empty()) {
+        if (!VerifyFcmpBalance(fcmpInputs, outputCommitments, nFee)) {
+            LogPrintf("FCMP SelfCheck: FAILED - commitment balance check failed\n");
+            return false;
+        }
+    }
+
+    LogPrintf("FCMP SelfCheck: PASSED (SA+L sig + balance verified, proof deferred to consensus)\n");
     return true;
 }
 

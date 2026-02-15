@@ -231,15 +231,11 @@ void TrustScoreManager::UpdateHeartbeatExpectations(int height) {
     for (auto& [id, info] : validators) {
         if (!info.isActive) continue;
 
-        // Calculate expected heartbeats since registration
+        // Calculate expected heartbeats based on the smaller of time since
+        // registration and the uptime tracking window
         int blocksSinceRegistration = height - info.registrationHeight;
         if (blocksSinceRegistration > 0) {
-            info.heartbeatsExpected = blocksSinceRegistration / consensusParams.nHeartbeatInterval;
-        }
-
-        // Apply uptime window limit
-        int windowBlocks = std::min(blocksSinceRegistration, consensusParams.nUptimeWindow);
-        if (windowBlocks > 0) {
+            int windowBlocks = std::min(blocksSinceRegistration, consensusParams.nUptimeWindow);
             info.heartbeatsExpected = windowBlocks / consensusParams.nHeartbeatInterval;
         }
     }
