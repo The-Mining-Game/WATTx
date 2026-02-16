@@ -1,0 +1,18 @@
+# WATTx Configuration File
+# Place this file in ~/.wattx/wattx.conf (Linux) or %APPDATA%\WATTx\wattx.conf (Windows)
+
+# Network
+server=1
+listen=1
+
+# Connect to other nodes (add peer IPs here)
+# For mainnet use port 1337, for testnet use port 11337
+# addnode=PEER_IP:1337
+# addnode=PEER_IP:11337
+
+# RPC Settings (optional - for CLI access)
+# rpcuser=wattxrpc
+# rpcpassword=your_secure_password_here
+
+# Staking (enable if you want to stake)
+# staking=1

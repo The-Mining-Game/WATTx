@@ -167,13 +167,11 @@ set_property(SOURCE macnotificationhandler.mm
 target_link_libraries(bitcoinqt
   PUBLIC
     Qt5::Widgets
-    Qt5::Quick
-    Qt5::QuickWidgets
-    Qt5::Qml
   PRIVATE
     core_interface
     bitcoin_cli
     leveldb
+    secp256k1
     Boost::headers
     Boost::filesystem
     Boost::program_options

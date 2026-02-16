@@ -44,7 +44,9 @@
 #include <QJsonArray>
 #include <QCryptographicHash>
 #include <QVBoxLayout>
+#if QT_CONFIG(colordialog)
 #include <QColorDialog>
+#endif
 #include <QUuid>
 #include <QHeaderView>
 #include <qt/chatbubblewidget.h>
@@ -2365,6 +2367,7 @@ void MessagingPage::showMessageNotification(const QString& title, const QString&
 
 void MessagingPage::onChatBackgroundClicked()
 {
+#if QT_CONFIG(colordialog)
     QColor color = QColorDialog::getColor(m_chatBackgroundColor, this,
         tr("Select Chat Background Color"));
 
@@ -2373,6 +2376,7 @@ void MessagingPage::onChatBackgroundClicked()
         saveChatBackgroundColor();
         applyChatBackgroundColor();
     }
+#endif
 }
 
 void MessagingPage::loadChatBackgroundColor()
