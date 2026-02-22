@@ -20,6 +20,7 @@
 #include <interfaces/wallet.h>
 #include <qt/transactiondescdialog.h>
 #include <qt/styleSheet.h>
+#include <kernel/chainparams.h>
 
 #include <QAbstractItemDelegate>
 #include <QApplication>
@@ -438,6 +439,9 @@ void OverviewPage::setWalletModel(WalletModel *model)
         if (!walletModel || !clientModel) return;
         // Don't auto-shield during initial block download
         if (clientModel->node().isInitialBlockDownload()) return;
+        // Don't auto-shield before FCMP activation
+        int currentHeight = clientModel->getNumBlocks();
+        if (!Params().GetConsensus().IsFcmpActive(currentHeight)) return;
         interfaces::WalletBalances bal = walletModel->getCachedBalance();
         if (bal.balance > 0) {
             std::string error;

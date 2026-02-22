@@ -12,6 +12,7 @@
 #include <privacy/ed25519/pedersen.h>
 #include <privacy/stealth.h>
 #include <hash.h>
+#include <chainparams.h>
 #include <logging.h>
 #include <script/script.h>
 #include <util/moneystr.h>
@@ -293,6 +294,10 @@ void CFcmpWalletManager::AutoShield()
 
     // Skip if wallet is locked
     if (m_wallet->IsLocked()) return;
+
+    // Skip if FCMP is not yet active
+    int currentHeight = m_wallet->chain().getHeight().value_or(0);
+    if (!Params().GetConsensus().IsFcmpActive(currentHeight)) return;
 
     // Check transparent balance
     Balance bal = GetBalance(*m_wallet, /*min_depth=*/1);
@@ -1053,7 +1058,8 @@ curvetree::OutputTuple CFcmpWalletManager::CreateOutputTuple(
                         privKey = outputScalar;
                         LogPrintf("FCMP CreateOutputTuple: derived spending key, O = privKey*G\n");
                     } else {
-                        LogPrintf("FCMP CreateOutputTuple: DeriveStealthSpendingKey FAILED\n");
+                        LogDebug(BCLog::PRIVACY, "FCMP CreateOutputTuple: DeriveStealthSpendingKey failed for stealth address (scanPrivKey valid=%d, spendPrivKey valid=%d)\n",
+                                  addrData.scanPrivKey.IsValid(), addrData.spendPrivKey.IsValid());
                     }
                     break;
                 }
