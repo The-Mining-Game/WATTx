@@ -346,7 +346,7 @@ void RandomXMiner::StartMining(const CBlock& block, const uint256& target,
     }
 
     if (numThreads <= 0) {
-        numThreads = std::max(1, static_cast<int>(std::thread::hardware_concurrency()) - 1);
+        numThreads = std::min(2, std::max(1, static_cast<int>(std::thread::hardware_concurrency()) - 1));
     }
 
     LogPrintf("RandomX: Starting mining with %d threads\n", numThreads);
