@@ -288,12 +288,13 @@ public:
         consensus.nFcmpCoinbaseMaturity = 100; // FCMP coinbase outputs need 100 blocks
 
         // PoS Difficulty Fix (Hard Fork)
-        // Fixes: RBTPosLimit too easy (blocks every ~10s instead of 120s target),
-        // stakeTimestampMask=0 allowing 1-second grinding, weak adjustment algorithm.
-        // After this height: tighter PoS limit (QTUM standard), 16-second timestamp mask,
-        // and 4x stronger difficulty adjustment multiplier.
+        // Fixes: stakeTimestampMask=0 allowing 1-second grinding, weak adjustment algorithm.
+        // After this height: 16-second timestamp mask (16x fewer staking attempts),
+        // and 4x stronger difficulty adjustment multiplier for faster convergence.
+        // The timestamp mask alone slows blocks from ~10s to ~160s, then the 4x multiplier
+        // converges toward the 120s target within a few blocks.
         consensus.nPoSDifficultyFixHeight = 210000;
-        consensus.FixedRBTPosLimit = uint256{"0000000000003fffffffffffffffffffffffffffffffffffffffffffffffffff"};
+        consensus.FixedRBTPosLimit = uint256{"0000000fffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
 
         // WATTx Trust Tier parameters (to be added to consensus struct)
         // consensus.nMinValidatorStake = 100000 * COIN;

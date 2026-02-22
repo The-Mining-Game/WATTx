@@ -309,11 +309,11 @@ struct Params {
         return height >= nRandomXActivationHeight;
     }
 
-    /** Block reward share for miner (PoW) - percentage */
-    int nPoWRewardPercent{50}; // 50% to PoW miner
+    /** Block reward share for miner (PoW) - percentage of base reward */
+    int nPoWRewardPercent{100}; // 100% = full 5 WATTx to PoW miner
 
-    /** Block reward share for validator (PoS) - percentage */
-    int nPoSRewardPercent{50}; // 50% to PoS validator
+    /** Block reward share for validator (PoS) - percentage of base reward */
+    int nPoSRewardPercent{100}; // 100% = full 5 WATTx to PoS validator
 
     /** Supported algorithms for X25X merged mining */
     /** Miners can submit proofs from: SHA256, Scrypt, X11, Ethash, RandomX, etc. */
