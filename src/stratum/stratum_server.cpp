@@ -608,10 +608,15 @@ void StratumServer::CreateNewJob() {
         LogPrintf("Stratum: Created job blob=%d bytes (nonce at 39-42)\n", miningBlob.size());
 
         // Seed hash - for RandomX, use the genesis block hash as the key.
-        // This MUST match the key the validator uses in ValidateAndSubmitShare
-        // (Params().GenesisBlock().GetHash()); otherwise miners compute RandomX
-        // with a different key and every share is rejected.
-        job.seed_hash = Params().GenesisBlock().GetHash().GetHex();
+        // This MUST match the key the validator uses in ValidateAndSubmitShare,
+        // which keys RandomX with genesisHash.data() (raw internal byte order).
+        // XMRig uses the seed_hash hex bytes directly as the RandomX key, so emit
+        // them in that SAME internal order — NOT uint256::GetHex(), which reverses
+        // to display order and would give the miner a byte-reversed (wrong) key,
+        // causing every share to hash differently and be rejected.
+        const uint256 rxKey = Params().GenesisBlock().GetHash();
+        std::vector<unsigned char> rxKeyBytes(rxKey.begin(), rxKey.end());
+        job.seed_hash = HexStr(rxKeyBytes);
 
         // Store job
         {
