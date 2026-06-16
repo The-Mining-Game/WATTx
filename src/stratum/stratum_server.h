@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -139,6 +140,7 @@ private:
     // Jobs
     mutable std::mutex m_jobs_mutex;
     std::unordered_map<std::string, StratumJob> m_jobs;
+    std::deque<std::string> m_job_order;   // job_ids in insertion order, for FIFO eviction
     StratumJob m_current_job;
     std::atomic<uint64_t> m_job_counter{0};
 

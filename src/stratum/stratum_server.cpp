@@ -45,6 +45,30 @@ typedef int socklen_t;
 
 namespace stratum {
 
+// Maximum number of recent jobs kept for share validation. Miners may submit
+// against a job that has just been superseded, so keep a generous backlog.
+static constexpr size_t MAX_CACHED_JOBS = 64;
+
+// Decode a cryptonote/XMRig compact share target (little-endian hex, 4 or 8
+// bytes) into a 64-bit target. A share is valid when the high 64 bits of the
+// RandomX result (bytes 24..31, little-endian) are strictly below this value —
+// the same rule XMRig applies before it submits.
+static uint64_t DecodeShareTarget(const std::string& target_hex) {
+    std::vector<unsigned char> t = ParseHex(target_hex);
+    if (t.size() == 4) {
+        uint32_t compact = uint32_t(t[0]) | (uint32_t(t[1]) << 8) |
+                           (uint32_t(t[2]) << 16) | (uint32_t(t[3]) << 24);
+        if (compact == 0) return 0;
+        return 0xFFFFFFFFFFFFFFFFULL / (0xFFFFFFFFULL / compact);
+    }
+    if (t.size() >= 8) {
+        uint64_t v = 0;
+        for (int i = 0; i < 8; i++) v |= uint64_t(t[i]) << (8 * i);
+        return v;
+    }
+    return 0;
+}
+
 // Global instance
 static std::unique_ptr<StratumServer> g_stratum_server;
 
@@ -583,19 +607,29 @@ void StratumServer::CreateNewJob() {
 
         LogPrintf("Stratum: Created job blob=%d bytes (nonce at 39-42)\n", miningBlob.size());
 
-        // Seed hash - for RandomX, use genesis block hash as key
-        job.seed_hash = block.hashPrevBlock.GetHex();
+        // Seed hash - for RandomX, use the genesis block hash as the key.
+        // This MUST match the key the validator uses in ValidateAndSubmitShare
+        // (Params().GenesisBlock().GetHash()); otherwise miners compute RandomX
+        // with a different key and every share is rejected.
+        job.seed_hash = Params().GenesisBlock().GetHash().GetHex();
 
         // Store job
         {
             std::lock_guard<std::mutex> lock(m_jobs_mutex);
             m_jobs[job.job_id] = job;
+            m_job_order.push_back(job.job_id);
             m_current_job = job;
 
-            // Limit stored jobs
-            if (m_jobs.size() > 10) {
-                auto oldest = m_jobs.begin();
-                m_jobs.erase(oldest);
+            // Limit stored jobs (true FIFO: m_jobs is an unordered_map, so its
+            // begin() is an arbitrary bucket — never use it to pick the oldest,
+            // it can evict the job we just inserted and break share validation).
+            // Never evict the current job.
+            while (m_job_order.size() > MAX_CACHED_JOBS) {
+                const std::string oldest = m_job_order.front();
+                m_job_order.pop_front();
+                if (oldest != m_current_job.job_id) {
+                    m_jobs.erase(oldest);
+                }
             }
         }
 
@@ -752,8 +786,24 @@ bool StratumServer::ValidateAndSubmitShare(int client_id, const std::string& job
             }
         }
 
-        // Share doesn't meet block target - just accept for pool tracking
-        // (In a real pool, you'd track shares for payment purposes)
+        // Not a full block — validate against the easier share target before
+        // accepting, so reported hashrate reflects real work (and bogus
+        // submissions are rejected). Uses the same rule XMRig applies: the high
+        // 64 bits of the result (bytes 24..31, little-endian) must be below the
+        // decoded share target.
+        const uint64_t shareTarget = DecodeShareTarget(job.target);
+        if (shareTarget != 0) {
+            const unsigned char* hb = hash.data();
+            uint64_t result64 = 0;
+            for (int i = 0; i < 8; i++) result64 |= uint64_t(hb[24 + i]) << (8 * i);
+            if (result64 >= shareTarget) {
+                LogPrintf("Stratum: Low-difficulty share rejected result=%016x target=%016x\n",
+                          result64, shareTarget);
+                return false;
+            }
+        }
+
+        // Valid share (meets share target, below block target).
         return true;
 
     } catch (const std::exception& e) {
