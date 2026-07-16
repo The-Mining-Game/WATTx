@@ -1105,13 +1105,13 @@ public:
         return chainman().ProcessNewBlock(block_ptr, /*force_processing=*/true, /*min_pow_checked=*/true, /*new_block=*/nullptr);
     }
 
-    bool submitAuxPowSolution(uint32_t version, uint32_t timestamp, uint32_t nonce,
-                               CTransactionRef coinbase, std::shared_ptr<CAuxPow> auxpow_proof) override
+    // Assemble the AuxPoW block from the template. Shared by submitAuxPowSolution
+    // and getAuxPowBlockHash so the committed hash and the submitted block are
+    // guaranteed identical. Pass a null coinbase to use the template's own vtx[0].
+    CBlock buildAuxPowBlock(uint32_t version, uint32_t timestamp, uint32_t nonce,
+                            CTransactionRef coinbase) const
     {
-        // Create a CBlock with AuxPoW data attached
         CBlock block;
-
-        // Copy base block data from template
         CBlock& base_block = m_block_template->block;
         block.nVersion = version | AUXPOW_VERSION_FLAG;
         block.hashPrevBlock = base_block.hashPrevBlock;
@@ -1126,16 +1126,32 @@ public:
         block.nAdder = base_block.nAdder;
         block.nGapSize = base_block.nGapSize;
 
-        // Set transactions
+        if (!coinbase) coinbase = base_block.vtx.empty() ? nullptr : base_block.vtx[0];
         if (base_block.vtx.empty()) {
-            block.vtx.push_back(coinbase);
+            if (coinbase) block.vtx.push_back(coinbase);
         } else {
             block.vtx = base_block.vtx;
             block.vtx[0] = coinbase;
         }
 
-        // Calculate merkle root
         block.hashMerkleRoot = BlockMerkleRoot(block);
+        return block;
+    }
+
+    uint256 getAuxPowBlockHash(CTransactionRef coinbase) override
+    {
+        CBlock& base_block = m_block_template->block;
+        // Match submitAuxPowSolution's inputs exactly: template version + flag,
+        // template timestamp, nNonce=0. `coinbase` (nullptr => template's own) lets
+        // the pool commit to a payout-split coinbase so the aux hash reflects it.
+        CBlock block = buildAuxPowBlock(base_block.nVersion, base_block.nTime, 0, coinbase);
+        return block.GetHash();
+    }
+
+    bool submitAuxPowSolution(uint32_t version, uint32_t timestamp, uint32_t nonce,
+                               CTransactionRef coinbase, std::shared_ptr<CAuxPow> auxpow_proof) override
+    {
+        CBlock block = buildAuxPowBlock(version, timestamp, nonce, coinbase);
 
         // CRITICAL: Attach the AuxPoW proof to the block
         // This is used by CheckBlock for AuxPoW validation

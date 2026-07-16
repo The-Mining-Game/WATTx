@@ -36,6 +36,22 @@ RandomXMiner& GetRandomXMiner() {
     return *g_randomx_miner;
 }
 
+// Separate RandomX context for verifying MERGED-MINED parent (Monero) blocks.
+// It is keyed with the parent chain's own RandomX seed (which rotates every
+// 2048 Monero blocks), NOT the WATTx genesis key used by the native-PoW miner
+// above — so aux verification never disturbs (or is disturbed by) native mining.
+// LIGHT mode: ~256 MB cache, no 2 GB dataset; validation is a single hash so the
+// slower LIGHT hashing is irrelevant, and the memory footprint stays modest.
+static std::unique_ptr<RandomXMiner> g_randomx_aux_miner;
+
+RandomXMiner& GetRandomXAuxMiner() {
+    static std::once_flag flag;
+    std::call_once(flag, []() {
+        g_randomx_aux_miner = std::make_unique<RandomXMiner>();
+    });
+    return *g_randomx_aux_miner;
+}
+
 RandomXMiner::RandomXMiner() {
     m_flags = GetRecommendedFlags();
     LogPrintf("RandomX: Initialized with flags 0x%x (AES=%d, JIT=%d)\n",

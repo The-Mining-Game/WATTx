@@ -39,8 +39,22 @@ public:
     uint32_t GetChainId() const override { return m_config.chain_id; }
 
     std::string HttpPost(const std::string& path, const std::string& body) override {
-        int sock = socket(AF_INET, SOCK_STREAM, 0);
-        if (sock < 0) return "";
+        // Resolve host with getaddrinfo (thread-safe, unlike gethostbyname)
+        struct addrinfo hints{};
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+        std::string port_str = std::to_string(m_config.daemon_port);
+        struct addrinfo* res = nullptr;
+        if (getaddrinfo(m_config.daemon_host.c_str(), port_str.c_str(), &hints, &res) != 0 || !res) {
+            if (res) freeaddrinfo(res);
+            return "";
+        }
+
+        int sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+        if (sock < 0) {
+            freeaddrinfo(res);
+            return "";
+        }
 
 #ifdef WIN32
         DWORD timeout_ms = 10000;
@@ -54,12 +68,8 @@ public:
         setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 #endif
 
-        struct sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(m_config.daemon_port);
-
-        struct hostent* he = gethostbyname(m_config.daemon_host.c_str());
-        if (!he) {
+        if (connect(sock, res->ai_addr, res->ai_addrlen) < 0) {
+            freeaddrinfo(res);
 #ifdef WIN32
             closesocket(sock);
 #else
@@ -67,16 +77,7 @@ public:
 #endif
             return "";
         }
-        std::memcpy(&addr.sin_addr, he->h_addr, he->h_length);
-
-        if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-#ifdef WIN32
-            closesocket(sock);
-#else
-            close(sock);
-#endif
-            return "";
-        }
+        freeaddrinfo(res);
 
         // Build HTTP request
         std::string auth_header;
@@ -210,6 +211,79 @@ protected:
         }
 
         return branch;
+    }
+
+    // Build the synthetic parent coinbase that carries the WATTx merge-mining
+    // commitment. Deterministic from (tag, height) so a handler's BuildHashingBlob
+    // (the header the miner grinds) and CreateAuxPow (the proof the validator
+    // checks) commit to a byte-identical coinbase — and therefore an identical
+    // single-tx merkle root. Every Bitcoin-style handler (SHA256d, Scrypt, X11,
+    // Equihash, kHeavyHash) must use THIS so the two paths never desync.
+    //
+    // The MM tag is placed FIRST in the scriptSig: TX_EXTRA_MERGE_MINING_TAG is
+    // 0x03, which is also the "push 3 bytes" opcode of a BIP34 height prefix —
+    // ParseMergeMiningTag scans for the first 0x03, so the tag must precede any
+    // height push or the height would be misread as the commitment.
+    //
+    // The scriptSig ends with an AUX_COINBASE_EXTRANONCE_SIZE-byte extranonce
+    // region: zeros for XMRig-protocol miners (who grind only the header nonce),
+    // filled per-miner for Bitcoin-stratum clients, which rebuild the coinbase
+    // from coinb1 + extranonce1 + extranonce2 + coinb2 and derive their own
+    // merkle root from it. It sits LAST so the tag scan and height parse are
+    // unaffected by its content.
+public:
+    static constexpr size_t AUX_COINBASE_EXTRANONCE_SIZE = 8;
+
+    static CMutableTransaction BuildAuxMergedCoinbase(
+        const std::vector<uint8_t>& merge_mining_tag, uint64_t height,
+        const std::vector<uint8_t>* extranonce = nullptr)
+    {
+        CMutableTransaction cb;
+        cb.version = 2;
+
+        CTxIn in;
+        in.prevout.SetNull();
+        std::vector<uint8_t> ss(merge_mining_tag.begin(), merge_mining_tag.end());
+        ss.push_back(0x03);                      // BIP34-style height, AFTER the tag
+        ss.push_back(height & 0xFF);
+        ss.push_back((height >> 8) & 0xFF);
+        ss.push_back((height >> 16) & 0xFF);
+        for (size_t i = 0; i < AUX_COINBASE_EXTRANONCE_SIZE; ++i) {
+            ss.push_back(extranonce && i < extranonce->size() ? (*extranonce)[i] : 0x00);
+        }
+        in.scriptSig = CScript(ss.begin(), ss.end());
+        in.nSequence = 0xffffffff;
+        cb.vin.push_back(in);
+
+        CTxOut out;
+        out.nValue = 0;
+        cb.vout.push_back(out);
+
+        return cb;
+    }
+
+    // Build an 80-byte Bitcoin-style LE header from its 6 fields.
+    // Used by SHA256d, Scrypt, X11, and kHeavyHash handlers for parentHeaderRaw.
+    static std::vector<uint8_t> BuildBitcoinHeader(uint32_t version,
+                                                    const uint256& prevhash,
+                                                    const uint256& merkle_root,
+                                                    uint32_t time,
+                                                    uint32_t bits,
+                                                    uint32_t nonce) {
+        std::vector<uint8_t> raw(80);
+        auto w32 = [&](int off, uint32_t v) {
+            raw[off]   =  v        & 0xFF;
+            raw[off+1] = (v >>  8) & 0xFF;
+            raw[off+2] = (v >> 16) & 0xFF;
+            raw[off+3] = (v >> 24) & 0xFF;
+        };
+        w32(0, version);
+        std::memcpy(raw.data() +  4, prevhash.begin(),    32);
+        std::memcpy(raw.data() + 36, merkle_root.begin(), 32);
+        w32(68, time);
+        w32(72, bits);
+        w32(76, nonce);
+        return raw;
     }
 
     // Helper: Parse JSON string value

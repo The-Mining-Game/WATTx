@@ -5247,8 +5247,31 @@ CBlockIndex* Chainstate::FindMostWorkChain()
             }
             pindexTest = pindexTest->pprev;
         }
-        if (!fInvalidAncestor)
+        if (!fInvalidAncestor) {
+            // WATTx max-reorg-depth guard: if switching to this candidate would
+            // require reorganizing the active chain deeper than nMaxReorgDepth
+            // blocks below the current tip, reject the candidate. This stops a
+            // node that was partitioned from the network (e.g. a solo miner that
+            // lost its peers) from replacing the canonical chain with a long
+            // private fork on reconnect — the node keeps its current chain.
+            // pindexTest is now the fork point (the highest ancestor of the
+            // candidate that is on the active chain). Depth 0 == simple extension.
+            const int nMaxReorgDepth{m_chainman.GetParams().GetConsensus().nMaxReorgDepth};
+            const CBlockIndex* pindexTip{m_chain.Tip()};
+            if (nMaxReorgDepth > 0 && pindexTip && pindexTest &&
+                (pindexTip->nHeight - pindexTest->nHeight) > nMaxReorgDepth) {
+                LogPrintf("%s: REJECTING deep reorg to %s (height=%d): fork at height %d is %d blocks below tip height %d (max %d)\n",
+                          __func__, pindexNew->GetBlockHash().ToString(), pindexNew->nHeight,
+                          pindexTest->nHeight, pindexTip->nHeight - pindexTest->nHeight,
+                          pindexTip->nHeight, nMaxReorgDepth);
+                // Drop this candidate so we don't reconsider or loop forever; the
+                // current tip remains in setBlockIndexCandidates and will be
+                // selected on the next iteration.
+                setBlockIndexCandidates.erase(pindexNew);
+                continue;
+            }
             return pindexNew;
+        }
     } while(true);
 }
 

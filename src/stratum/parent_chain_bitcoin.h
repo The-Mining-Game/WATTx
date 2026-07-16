@@ -9,6 +9,7 @@
 #include <arith_uint256.h>
 #include <crypto/sha256.h>
 #include <hash.h>
+#include <streams.h>
 #include <uint256.h>
 
 namespace merged_stratum {
@@ -129,7 +130,8 @@ public:
     ) override {
         // Bitcoin uses getblocktemplate RPC
         std::string response = JsonRpcCall("getblocktemplate",
-            "[{\"rules\":[\"segwit\"],\"capabilities\":[\"coinbasetxn\",\"workid\",\"coinbase/append\"]}]");
+            "[{\"rules\":" + GetGbtRules() +
+            ",\"capabilities\":[\"coinbasetxn\",\"workid\",\"coinbase/append\"]}]");
 
         if (response.empty()) {
             LogPrintf("BitcoinChain: Failed to get block template\n");
@@ -164,6 +166,62 @@ public:
             coinbase_data.coinbase_tx = ParseHex(coinbase_hex);
         }
 
+        // Core daemons return no coinbasetxn — build a REAL coinbase paying the
+        // pool's parent-chain address, so a winning share submits as a VALID
+        // parent block (true merged mining: miner work earns the parent coin
+        // AND WATTx). Layout:
+        //   scriptSig = BIP34 height push | 34B MM-tag reserve | 8B extranonce
+        // Coinbase-only block: no witness txs → no witness commitment required;
+        // single tx → its txid IS the merkle root (empty branch everywhere).
+        if (coinbase_data.coinbase_tx.empty() && !m_config.wallet_address.empty()) {
+            if (m_payout_spk.empty()) {
+                std::string va = JsonRpcCall("validateaddress",
+                                             "[\"" + m_config.wallet_address + "\"]");
+                m_payout_spk = ParseHex(ParseJsonString(va, "scriptPubKey"));
+            }
+            std::string cbv_str = ParseJsonString(response, "coinbasevalue");
+            uint64_t cbvalue = cbv_str.empty() ? 0 : std::stoull(cbv_str);
+            uint64_t h = height_str.empty() ? 0 : std::stoull(height_str);
+
+            if (!m_payout_spk.empty() && m_payout_spk.size() < 0xFD && cbvalue > 0 && h > 0) {
+                // BIP34: minimal CScriptNum encoding of the height, pushed first
+                std::vector<uint8_t> hb;
+                for (uint64_t v = h; v; v >>= 8) hb.push_back(v & 0xFF);
+                if (hb.back() & 0x80) hb.push_back(0x00);
+
+                std::vector<uint8_t> ss;
+                ss.push_back(static_cast<uint8_t>(hb.size()));
+                ss.insert(ss.end(), hb.begin(), hb.end());
+                size_t tag_off = ss.size();
+                ss.insert(ss.end(), 34, 0x00);   // MM tag reserve
+                size_t en_off = ss.size();
+                ss.insert(ss.end(), 8, 0x00);    // extranonce region
+
+                std::vector<uint8_t> tx;
+                auto w32 = [&tx](uint32_t v) { for (int i = 0; i < 4; i++) tx.push_back((v >> (8*i)) & 0xFF); };
+                auto w64 = [&tx](uint64_t v) { for (int i = 0; i < 8; i++) tx.push_back((v >> (8*i)) & 0xFF); };
+                w32(2);                            // tx version
+                tx.push_back(0x01);                // vin count
+                tx.insert(tx.end(), 32, 0x00);     // prevout hash (null)
+                w32(0xffffffff);                   // prevout index
+                tx.push_back(static_cast<uint8_t>(ss.size()));
+                size_t ss_base = tx.size();
+                tx.insert(tx.end(), ss.begin(), ss.end());
+                w32(0xffffffff);                   // sequence
+                tx.push_back(0x01);                // vout count
+                w64(cbvalue);
+                tx.push_back(static_cast<uint8_t>(m_payout_spk.size()));
+                tx.insert(tx.end(), m_payout_spk.begin(), m_payout_spk.end());
+                w32(0);                            // locktime
+
+                coinbase_data.coinbase_tx       = tx;
+                coinbase_data.reserve_offset    = ss_base + tag_off;
+                coinbase_data.reserve_size      = 34;
+                coinbase_data.extranonce_offset = ss_base + en_off;
+                m_real_coinbase = true;
+            }
+        }
+
         // Build header for hashing
         BitcoinBlockHeader header;
         header.nVersion = version_str.empty() ? 0x20000000 : std::stoi(version_str);
@@ -176,10 +234,22 @@ public:
         m_current_header = header;
         m_current_prevhash = prevhash;
         m_current_bits = bits_str;
+        m_current_height = height;
+
+        // Snapshot the header fields into the job's coinbase_data so the mined
+        // header and the AuxPoW proof are rebuilt from the SAME frozen values,
+        // immune to poller refreshes of m_current_header (see ParentCoinbaseData).
+        coinbase_data.parent_version  = header.nVersion;
+        coinbase_data.parent_prevhash = header.hashPrevBlock;
+        coinbase_data.parent_time     = header.nTime;
+        coinbase_data.parent_bits     = header.nBits;
+        coinbase_data.parent_height   = height;
+        coinbase_data.header_snapshot = true;
 
         // Calculate difficulty from target
         if (!target_str.empty()) {
             uint256 target = uint256::FromHex(target_str).value_or(uint256{});
+            coinbase_data.parent_target = target;  // exact target for meets_parent
             // difficulty = max_target / target
             arith_uint256 target_arith = UintToArith256(target);
             if (target_arith > 0) {
@@ -195,10 +265,45 @@ public:
         auto header_data = header.Serialize();
         hashing_blob = HexStr(header_data);
 
+        // Parse raw non-coinbase transactions from the "transactions" JSON array.
+        // With a REAL pool coinbase the block is coinbase-only: including template
+        // txs would require the witness commitment + a real merkle branch; a
+        // coinbase-only block is fully valid (merely forgoes fees) and keeps the
+        // single-tx merkle assumption (txid == root) everywhere.
+        coinbase_data.raw_transactions.clear();
+        size_t tx_arr = coinbase_data.extranonce_offset > 0
+            ? std::string::npos : response.find("\"transactions\":[");
+        if (tx_arr != std::string::npos) {
+            tx_arr += 16;
+            size_t tx_end = response.find(']', tx_arr);
+            if (tx_end != std::string::npos) {
+                std::string arr = response.substr(tx_arr, tx_end - tx_arr);
+                size_t p = 0;
+                while (p < arr.size()) {
+                    size_t ob = arr.find('{', p);
+                    if (ob == std::string::npos) break;
+                    // Find matching close brace (handle nesting)
+                    int depth = 1; size_t cb = ob + 1;
+                    while (cb < arr.size() && depth > 0) {
+                        if (arr[cb] == '{') depth++;
+                        else if (arr[cb] == '}') depth--;
+                        cb++;
+                    }
+                    std::string obj = arr.substr(ob, cb - ob);
+                    std::string tx_hex = ParseJsonString(obj, "data");
+                    if (!tx_hex.empty()) {
+                        coinbase_data.raw_transactions.push_back(ParseHex(tx_hex));
+                    }
+                    p = cb;
+                }
+            }
+        }
+
         full_template = response;
         seed_hash = "";  // Not used for SHA256d
 
-        LogPrintf("BitcoinChain: Got template at height %lu\n", height);
+        LogPrintf("BitcoinChain: Got template at height %lu, %zu txs\n",
+                  height, coinbase_data.raw_transactions.size());
         return true;
     }
 
@@ -304,39 +409,29 @@ public:
         const ParentCoinbaseData& coinbase_data,
         const std::vector<uint8_t>& merge_mining_tag
     ) override {
-        // For Bitcoin, the merge mining tag goes in the coinbase scriptSig
-        // We need to recalculate the merkle root after modifying coinbase
-
-        std::vector<uint8_t> modified_coinbase = coinbase_data.coinbase_tx;
-
-        // Inject merge mining tag at reserve offset
-        if (coinbase_data.reserve_offset > 0 &&
-            coinbase_data.reserve_offset + merge_mining_tag.size() <= modified_coinbase.size()) {
-            std::memcpy(&modified_coinbase[coinbase_data.reserve_offset],
-                       merge_mining_tag.data(),
-                       merge_mining_tag.size());
+        // The miner grinds this exact 80-byte header. Its merkle root commits to
+        // the parent coinbase carrying the WATTx merge-mining tag — the REAL
+        // pool-paying coinbase when GetBlockTemplate built one (true merged
+        // mining), else the synthetic fallback — and every other field comes from
+        // the per-job header snapshot, so the AuxPoW proof built later in
+        // CreateAuxPow reproduces these identical bytes.
+        uint256 merkle_root;
+        if (!coinbase_data.coinbase_tx.empty() && coinbase_data.extranonce_offset > 0 &&
+            coinbase_data.reserve_offset + merge_mining_tag.size() <= coinbase_data.coinbase_tx.size()) {
+            std::vector<uint8_t> cbv = coinbase_data.coinbase_tx;
+            std::memcpy(cbv.data() + coinbase_data.reserve_offset,
+                        merge_mining_tag.data(), merge_mining_tag.size());
+            merkle_root = Hash(cbv);  // legacy-serialized single tx: sha256d == txid
+        } else {
+            CMutableTransaction cb = BuildAuxMergedCoinbase(merge_mining_tag, coinbase_data.parent_height);
+            merkle_root = CTransaction(cb).GetHash();
         }
 
-        // Recalculate coinbase hash
-        uint256 new_coinbase_hash = Hash(modified_coinbase);
-
-        // Rebuild merkle root
-        uint256 new_merkle_root = new_coinbase_hash;
-        int idx = 0;
-        for (const auto& branch_hash : coinbase_data.merkle_branch) {
-            if (idx & 1) {
-                new_merkle_root = Hash(branch_hash, new_merkle_root);
-            } else {
-                new_merkle_root = Hash(new_merkle_root, branch_hash);
-            }
-            idx >>= 1;
-        }
-
-        // Build new header with updated merkle root
-        BitcoinBlockHeader header = m_current_header;
-        header.hashMerkleRoot = new_merkle_root;
-
-        return HexStr(header.Serialize());
+        std::vector<uint8_t> raw = BuildBitcoinHeader(
+            static_cast<uint32_t>(coinbase_data.parent_version),
+            coinbase_data.parent_prevhash, merkle_root,
+            coinbase_data.parent_time, coinbase_data.parent_bits, /*nonce=*/0);
+        return HexStr(raw);
     }
 
     uint256 CalculatePoWHash(
@@ -365,51 +460,67 @@ public:
     }
 
     CAuxPow CreateAuxPow(
-        const CBlockHeader& wattx_header,
+        const CBlockHeader& /*wattx_header*/,
         const ParentCoinbaseData& coinbase_data,
         uint32_t nonce,
-        const std::vector<uint8_t>& merge_mining_tag
+        const std::vector<uint8_t>& merge_mining_tag,
+        const std::string& extra_data = ""
     ) override {
         CAuxPow proof;
 
-        // Build parent block header
-        BitcoinBlockHeader parent_header = m_current_header;
-        parent_header.hashMerkleRoot = coinbase_data.merkle_root;
-        parent_header.nNonce = nonce;
+        // Bitcoin-stratum submits carry "extranonce8_hex:ntime8_hex" in extra_data
+        // so the proof rebuilds the miner's exact coinbase (per-miner extranonce)
+        // and header time. XMRig submits leave it empty: zero extranonce, snapshot
+        // ntime — matching BuildHashingBlob byte-for-byte.
+        std::vector<uint8_t> extranonce;
+        uint32_t time_val = coinbase_data.parent_time;
+        if (size_t colon = extra_data.find(':'); colon != std::string::npos) {
+            extranonce = ParseHex(extra_data.substr(0, colon));
+            time_val = static_cast<uint32_t>(
+                strtoul(extra_data.substr(colon + 1).c_str(), nullptr, 16));
+        }
 
-        // Convert to CMoneroBlockHeader format (reuse for all parent chains)
-        proof.parentBlock.major_version = (parent_header.nVersion >> 24) & 0xFF;
-        proof.parentBlock.minor_version = (parent_header.nVersion >> 16) & 0xFF;
-        proof.parentBlock.timestamp = parent_header.nTime;
-        proof.parentBlock.prev_id = parent_header.hashPrevBlock;
-        proof.parentBlock.nonce = parent_header.nNonce;
-        proof.parentBlock.merkle_root = parent_header.hashMerkleRoot;
+        // Rebuild the SAME coinbase the miner committed to in BuildHashingBlob —
+        // the REAL pool-paying coinbase (tag + per-miner extranonce patched in)
+        // when one was built, else the synthetic fallback — so its txid, the
+        // single-tx merkle root, matches the mined header exactly.
+        CMutableTransaction cb;
+        uint256 merkle_root;
+        if (!coinbase_data.coinbase_tx.empty() && coinbase_data.extranonce_offset > 0 &&
+            coinbase_data.reserve_offset + merge_mining_tag.size() <= coinbase_data.coinbase_tx.size() &&
+            coinbase_data.extranonce_offset + 8 <= coinbase_data.coinbase_tx.size()) {
+            std::vector<uint8_t> cbv = coinbase_data.coinbase_tx;
+            std::memcpy(cbv.data() + coinbase_data.reserve_offset,
+                        merge_mining_tag.data(), merge_mining_tag.size());
+            if (!extranonce.empty()) {
+                std::memcpy(cbv.data() + coinbase_data.extranonce_offset,
+                            extranonce.data(), std::min<size_t>(extranonce.size(), 8));
+            }
+            merkle_root = Hash(cbv);
+            DataStream ds{cbv};
+            ds >> TX_NO_WITNESS(cb);
+        } else {
+            cb = BuildAuxMergedCoinbase(
+                merge_mining_tag, coinbase_data.parent_height,
+                extranonce.empty() ? nullptr : &extranonce);
+            merkle_root = CTransaction(cb).GetHash();
+        }
 
-        // Build coinbase transaction with MM tag
-        CMutableTransaction coinbase_tx;
-        coinbase_tx.version = 2;
+        // parentBlock carries merkle_root for Check() and timestamp for time validation
+        proof.parentBlock.timestamp   = time_val;
+        proof.parentBlock.merkle_root = merkle_root;
 
-        CTxIn coinbase_in;
-        coinbase_in.prevout.SetNull();
+        // Raw 80-byte Bitcoin header for SHA256d PoW verification — identical to
+        // the mined blob except for the winning nonce supplied by the miner.
+        proof.parentAlgoId    = static_cast<uint8_t>(AuxPowAlgo::SHA256D);
+        proof.parentHeaderRaw = BuildBitcoinHeader(
+            static_cast<uint32_t>(coinbase_data.parent_version),
+            coinbase_data.parent_prevhash, merkle_root,
+            time_val, coinbase_data.parent_bits, nonce);
 
-        // scriptSig contains height + merge mining tag
-        std::vector<uint8_t> scriptSig_data;
-        scriptSig_data.push_back(0x03);  // Push 3 bytes for height
-        uint64_t height = m_current_height;
-        scriptSig_data.push_back(height & 0xFF);
-        scriptSig_data.push_back((height >> 8) & 0xFF);
-        scriptSig_data.push_back((height >> 16) & 0xFF);
-        scriptSig_data.insert(scriptSig_data.end(), merge_mining_tag.begin(), merge_mining_tag.end());
-
-        coinbase_in.scriptSig = CScript(scriptSig_data.begin(), scriptSig_data.end());
-        coinbase_tx.vin.push_back(coinbase_in);
-
-        CTxOut coinbase_out;
-        coinbase_out.nValue = 0;
-        coinbase_tx.vout.push_back(coinbase_out);
-
-        proof.coinbaseTxMut = coinbase_tx;
-        proof.coinbaseBranch.vHash = coinbase_data.merkle_branch;
+        // Single-transaction block: the coinbase IS the merkle root, empty branch.
+        proof.coinbaseTxMut = cb;
+        proof.coinbaseBranch.vHash.clear();
         proof.coinbaseBranch.nIndex = 0;
         proof.nChainId = m_config.chain_id;
 
@@ -427,8 +538,19 @@ public:
         return ArithToUint256(target);
     }
 
-private:
+protected:
+    // GBT rules array; subclasses override for chains with extra required rules
+    // (litecoind refuses GBT without "mweb").
+    virtual std::string GetGbtRules() const { return "[\"segwit\"]"; }
+
+    // Pool payout scriptPubKey on the parent chain (from validateaddress, cached)
+    std::vector<uint8_t> m_payout_spk;
+    // True once GetBlockTemplate built a REAL parent coinbase (vs synthetic)
+    bool m_real_coinbase{false};
+
     BitcoinBlockHeader m_current_header;
+
+private:
     std::string m_current_prevhash;
     std::string m_current_bits;
     uint64_t m_current_height{0};

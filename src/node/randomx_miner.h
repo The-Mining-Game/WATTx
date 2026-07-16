@@ -222,6 +222,10 @@ private:
  */
 RandomXMiner& GetRandomXMiner();
 
+// Dedicated context for verifying merged-mined parent (Monero) RandomX PoW,
+// keyed with the parent chain's own seed rather than the WATTx genesis key.
+RandomXMiner& GetRandomXAuxMiner();
+
 } // namespace node
 
 #endif // BITCOIN_NODE_RANDOMX_MINER_H

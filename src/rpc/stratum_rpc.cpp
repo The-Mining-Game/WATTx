@@ -183,6 +183,126 @@ static RPCHelpMan stopmergedstratum()
     };
 }
 
+static RPCHelpMan startmultimergedstratum()
+{
+    return RPCHelpMan{"startmultimergedstratum",
+        "\nStart merged mining stratum servers for all supported parent-chain algorithms.\n"
+        "Each algorithm gets its own port starting at base_port.\n",
+        {
+            {"bind_address", RPCArg::Type::STR, RPCArg::Default{"0.0.0.0"}, "Address to bind to"},
+            {"base_port",    RPCArg::Type::NUM, RPCArg::Default{3333},       "Base port (each algo gets base_port + algo_index)"},
+            {"parent_chains", RPCArg::Type::ARR, RPCArg::Optional::NO, "Array of parent chain configs",
+                {
+                    {"", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Parent chain",
+                        {
+                            {"name",     RPCArg::Type::STR, RPCArg::Optional::NO,  "Chain name (e.g. 'bitcoin', 'monero')"},
+                            {"algo",     RPCArg::Type::STR, RPCArg::Optional::NO,  "Algorithm: sha256d|scrypt|ethash|randomx|equihash|x11|kheavyhash"},
+                            {"host",     RPCArg::Type::STR, RPCArg::Default{"127.0.0.1"}, "Daemon host"},
+                            {"port",     RPCArg::Type::NUM, RPCArg::Optional::NO,  "Daemon RPC port"},
+                            {"user",     RPCArg::Type::STR, RPCArg::Default{""},   "RPC username"},
+                            {"password", RPCArg::Type::STR, RPCArg::Default{""},   "RPC password"},
+                            {"address",  RPCArg::Type::STR, RPCArg::Default{""},   "Pool wallet address on parent chain"},
+                            {"chain_id", RPCArg::Type::NUM, RPCArg::Default{0},    "Chain ID for replay protection"},
+                        }
+                    },
+                }
+            },
+            {"wattx_wallet", RPCArg::Type::STR, RPCArg::Optional::NO, "Default WATTx address for block rewards"},
+            {"share_difficulty", RPCArg::Type::NUM, RPCArg::Default{10000}, "Pool share difficulty (lower = easier shares; set low for regtest)"},
+            {"share_nbits", RPCArg::Type::NUM, RPCArg::Default{0}, "Explicit share target as nBits compact (0 = derive from share_difficulty; testing knob, e.g. 522190847 = 0x1f0fffff for regtest)"},
+        },
+        RPCResult{
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::BOOL, "success",    "Whether server started successfully"},
+                {RPCResult::Type::NUM,  "base_port",  "Base port"},
+                {RPCResult::Type::NUM,  "chain_count","Number of parent chains configured"},
+            }
+        },
+        RPCExamples{
+            HelpExampleCli("startmultimergedstratum",
+                "\"0.0.0.0\" 3333 "
+                "'[{\"name\":\"monero\",\"algo\":\"randomx\",\"host\":\"127.0.0.1\",\"port\":18081,\"user\":\"\",\"password\":\"\",\"address\":\"4...\",\"chain_id\":1}]' "
+                "\"WATTxAddr\"")
+        },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+        {
+            NodeContext& node = EnsureAnyNodeContext(request.context);
+
+            merged_stratum::MultiMergedConfig config;
+            config.bind_address     = request.params[0].isNull() ? "0.0.0.0" : request.params[0].get_str();
+            config.base_port        = request.params[1].isNull() ? 3333       : request.params[1].getInt<int>();
+            config.wattx_wallet_address = request.params[3].get_str();
+            if (request.params.size() > 4 && !request.params[4].isNull()) {
+                config.share_difficulty = static_cast<uint64_t>(request.params[4].getInt<int64_t>());
+            }
+            if (request.params.size() > 5 && !request.params[5].isNull()) {
+                config.share_nbits = static_cast<uint32_t>(request.params[5].getInt<int64_t>());
+            }
+
+            static const std::unordered_map<std::string, merged_stratum::ParentChainAlgo> algoMap{
+                {"sha256d",    merged_stratum::ParentChainAlgo::SHA256D},
+                {"scrypt",     merged_stratum::ParentChainAlgo::SCRYPT},
+                {"ethash",     merged_stratum::ParentChainAlgo::ETHASH},
+                {"randomx",    merged_stratum::ParentChainAlgo::RANDOMX},
+                {"equihash",   merged_stratum::ParentChainAlgo::EQUIHASH},
+                {"x11",        merged_stratum::ParentChainAlgo::X11},
+                {"kheavyhash", merged_stratum::ParentChainAlgo::KHEAVYHASH},
+            };
+
+            const UniValue& chains = request.params[2].get_array();
+            for (size_t i = 0; i < chains.size(); ++i) {
+                const UniValue& c = chains[i];
+                merged_stratum::ParentChainConfig pc;
+                pc.name     = c["name"].get_str();
+                pc.daemon_host     = c.exists("host")     ? c["host"].get_str()           : "127.0.0.1";
+                pc.daemon_port     = c.exists("port")     ? c["port"].getInt<int>()        : 0;
+                pc.daemon_user     = c.exists("user")     ? c["user"].get_str()            : "";
+                pc.daemon_password = c.exists("password") ? c["password"].get_str()        : "";
+                pc.wallet_address  = c.exists("address")  ? c["address"].get_str()         : "";
+                pc.chain_id        = c.exists("chain_id") ? c["chain_id"].getInt<int>()    : (int)i + 1;
+
+                std::string algoStr = c["algo"].get_str();
+                auto it = algoMap.find(algoStr);
+                if (it == algoMap.end()) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "Unknown algo: " + algoStr);
+                }
+                pc.algo = it->second;
+                config.parent_chains.push_back(pc);
+            }
+
+            merged_stratum::MultiMergedStratumServer& server = merged_stratum::GetMultiMergedStratumServer();
+            if (server.IsRunning()) {
+                throw JSONRPCError(RPC_MISC_ERROR, "Multi-merged stratum server already running");
+            }
+
+            bool success = server.Start(config, node.mining.get());
+
+            UniValue result(UniValue::VOBJ);
+            result.pushKV("success",     success);
+            result.pushKV("base_port",   (int)config.base_port);
+            result.pushKV("chain_count", (int)config.parent_chains.size());
+            return result;
+        },
+    };
+}
+
+static RPCHelpMan stopsmultimergedstratum()
+{
+    return RPCHelpMan{"stopmultimergedstratum",
+        "\nStop the multi-algorithm merged stratum server.\n",
+        {},
+        RPCResult{RPCResult::Type::BOOL, "", "Always returns true"},
+        RPCExamples{HelpExampleCli("stopmultimergedstratum", "")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+        {
+            merged_stratum::MultiMergedStratumServer& server = merged_stratum::GetMultiMergedStratumServer();
+            server.Stop();
+            return true;
+        },
+    };
+}
+
 static RPCHelpMan startbitcoinmergedstratum()
 {
     return RPCHelpMan{"startbitcoinmergedstratum",
@@ -244,13 +364,116 @@ static RPCHelpMan startbitcoinmergedstratum()
     };
 }
 
+static RPCHelpMan getmergeminingdashboard()
+{
+    return RPCHelpMan{"getmergeminingdashboard",
+        "\nGet live merged mining dashboard stats for all configured algorithms.\n",
+        {},
+        RPCResult{
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::BOOL, "running", "Whether stratum server is running"},
+                {RPCResult::Type::NUM,  "wtx_blocks_found", "WATTx blocks found via merged mining"},
+                {RPCResult::Type::NUM,  "started_at", "Unix timestamp when server started"},
+                {RPCResult::Type::ARR,  "algos",  "Per-algorithm stats", {{RPCResult::Type::OBJ, std::string{""}, std::string{""}, {}}}},
+                {RPCResult::Type::ARR,  "miners", "Connected miners",     {{RPCResult::Type::OBJ, std::string{""}, std::string{""}, {}}}},
+            }
+        },
+        RPCExamples{HelpExampleCli("getmergeminingdashboard", "")},
+        [&](const RPCHelpMan&, const JSONRPCRequest&) -> UniValue
+        {
+            merged_stratum::MultiMergedStratumServer& srv = merged_stratum::GetMultiMergedStratumServer();
+            auto d = srv.GetDashboard();
+
+            UniValue result(UniValue::VOBJ);
+            result.pushKV("running",          d.running);
+            result.pushKV("wtx_blocks_found", (uint64_t)d.wtx_blocks_found);
+            result.pushKV("started_at",       d.started_at);
+
+            UniValue algos(UniValue::VARR);
+            for (const auto& a : d.algos) {
+                UniValue o(UniValue::VOBJ);
+                o.pushKV("algo",                 a.algo);
+                o.pushKV("chain_name",           a.chain_name);
+                o.pushKV("port",                 (int)a.port);
+                o.pushKV("miners_connected",     (uint64_t)a.miners_connected);
+                o.pushKV("shares_accepted",      (uint64_t)a.shares_accepted);
+                o.pushKV("shares_rejected",      (uint64_t)a.shares_rejected);
+                o.pushKV("parent_blocks_found",  (uint64_t)a.parent_blocks_found);
+                o.pushKV("daemon_host",          a.daemon_host);
+                o.pushKV("daemon_port",          a.daemon_port);
+                o.pushKV("wallet_address",       a.wallet_address);
+                algos.push_back(o);
+            }
+            result.pushKV("algos", algos);
+
+            UniValue miners(UniValue::VARR);
+            for (const auto& m : d.miners) {
+                UniValue o(UniValue::VOBJ);
+                o.pushKV("client_id",       m.client_id);
+                o.pushKV("login",           m.login);
+                o.pushKV("algo",            m.algo);
+                o.pushKV("shares_accepted", (uint64_t)m.shares_accepted);
+                o.pushKV("shares_rejected", (uint64_t)m.shares_rejected);
+                o.pushKV("wtx_blocks",      (uint64_t)m.wtx_blocks_found);
+                o.pushKV("connected_since", m.connected_since);
+                o.pushKV("last_activity",   m.last_activity);
+                miners.push_back(o);
+            }
+            result.pushKV("miners", miners);
+            return result;
+        },
+    };
+}
+
+static RPCHelpMan setparentchainconfig()
+{
+    return RPCHelpMan{"setparentchainconfig",
+        "\nUpdate a parent chain's daemon connection config at runtime.\n",
+        {
+            {"name",     RPCArg::Type::STR, RPCArg::Optional::NO,  "Chain name (e.g. 'bitcoin', 'monero')"},
+            {"host",     RPCArg::Type::STR, RPCArg::Optional::NO,  "Daemon host"},
+            {"port",     RPCArg::Type::NUM, RPCArg::Optional::NO,  "Daemon RPC port"},
+            {"user",     RPCArg::Type::STR, RPCArg::Default{""},   "RPC username"},
+            {"password", RPCArg::Type::STR, RPCArg::Default{""},   "RPC password"},
+            {"address",  RPCArg::Type::STR, RPCArg::Default{""},   "Pool wallet address on parent chain"},
+        },
+        RPCResult{RPCResult::Type::BOOL, "", "true if chain was found and updated"},
+        RPCExamples{
+            HelpExampleCli("setparentchainconfig",
+                "\"monero\" \"127.0.0.1\" 18081 \"\" \"\" \"4MyAddress...\"")
+        },
+        [&](const RPCHelpMan&, const JSONRPCRequest& request) -> UniValue
+        {
+            merged_stratum::MultiMergedStratumServer& srv = merged_stratum::GetMultiMergedStratumServer();
+            if (!srv.IsRunning())
+                throw JSONRPCError(RPC_MISC_ERROR, "Multi-merged stratum server not running");
+
+            std::string name = request.params[0].get_str();
+            merged_stratum::ParentChainConfig pc;
+            pc.name            = name;
+            pc.daemon_host     = request.params[1].get_str();
+            pc.daemon_port     = request.params[2].getInt<int>();
+            pc.daemon_user     = request.params[3].isNull() ? "" : request.params[3].get_str();
+            pc.daemon_password = request.params[4].isNull() ? "" : request.params[4].get_str();
+            pc.wallet_address  = request.params[5].isNull() ? "" : request.params[5].get_str();
+
+            return srv.UpdateParentChainConfig(name, pc);
+        },
+    };
+}
+
 void RegisterStratumRPCCommands(CRPCTable& t)
 {
     static const CRPCCommand commands[]{
         {"mining", &startstratum},
         {"mining", &stopstratum},
         {"mining", &getstratuminfo},
+        {"mining", &startmultimergedstratum},
+        {"mining", &stopsmultimergedstratum},
         {"mining", &startbitcoinmergedstratum},
+        {"mining", &getmergeminingdashboard},
+        {"mining", &setparentchainconfig},
         {"mining", &startmergedstratum},
         {"mining", &stopmergedstratum},
     };

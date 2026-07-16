@@ -74,17 +74,31 @@ public:
         return header;
     }
 
-    uint256 DifficultyToTarget(uint64_t difficulty) override {
-        // Litecoin uses same difficulty calculation as Bitcoin
-        // but with Scrypt's different max target
-        if (difficulty == 0) difficulty = 1;
+    CAuxPow CreateAuxPow(
+        const CBlockHeader& wattx_header,
+        const ParentCoinbaseData& coinbase_data,
+        uint32_t nonce,
+        const std::vector<uint8_t>& merge_mining_tag,
+        const std::string& extra_data = ""
+    ) override {
+        CAuxPow proof = BitcoinChainHandler::CreateAuxPow(
+            wattx_header, coinbase_data, nonce, merge_mining_tag, extra_data);
+        // Override algo to Scrypt so GetParentBlockPoWHash() uses scrypt()
+        proof.parentAlgoId = static_cast<uint8_t>(AuxPowAlgo::SCRYPT);
+        return proof;
+    }
 
-        // Litecoin's genesis difficulty target
+    uint256 DifficultyToTarget(uint64_t difficulty) override {
+        if (difficulty == 0) difficulty = 1;
         arith_uint256 max_target;
         max_target.SetCompact(0x1e0ffff0);  // Litecoin's max target
         arith_uint256 target = max_target / difficulty;
         return ArithToUint256(target);
     }
+
+protected:
+    // litecoind refuses getblocktemplate unless the client claims mweb support
+    std::string GetGbtRules() const override { return "[\"segwit\",\"mweb\"]"; }
 
 private:
     LitecoinBlockHeader m_current_header;

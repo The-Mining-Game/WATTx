@@ -224,13 +224,71 @@ PeerDAS allows nodes to verify block data availability by sampling instead of do
 - Add DA commitment to block header structure
 - Wire up P2P handlers in devp2p layer
 
+## Recent Work (2026-05-26)
+
+**Full WATTx Node + FCMP++ Build** - COMPLETE ✅
+
+Built the complete WATTx 0.1.7-dev node including the FCMP++ privacy subsystem.
+
+**Build Command:**
+```bash
+cd /home/nuts/Documents/WATTx/WATTx-0.1.7-dev/build
+make -j$(nproc)
+# Run with:
+LD_LIBRARY_PATH=/home/nuts/Documents/WATTx/WATTx-0.1.7-dev/build/bin ./bin/wattxd
+```
+
+**Test Results (all pass):**
+| Binary | Tests | Result |
+|--------|-------|--------|
+| `test_ed25519` | Ed25519 scalar/point/Pedersen ops | ✅ All pass |
+| `test_curvetree` | Curve tree CRUD, LevelDB persistence | ✅ All pass |
+| `test_fcmp` | Rust FFI wrapper (init, scalars, points, commitments) | ✅ 14/14 |
+| `test_wattx --run_test=privacy*` | Ring sigs, stealth addrs, RingCT, FCMP tx types | ✅ 25/25 |
+
+**Reference Rust FCMP++ tests (fcmp-research/fcmp-plus-plus):**
+```bash
+cd /home/nuts/Documents/WATTx/fcmp-research/fcmp-plus-plus
+cargo test -p monero-fcmp-plus-plus --lib -- tests::test
+# → 1 passed (full prove+verify, ~60s)
+```
+
+**Key Binaries Built:**
+- `build/bin/wattxd` - Full daemon with FCMP++ compiled in (`HAVE_FCMP` defined)
+- `build/bin/wattx-cli` - RPC client
+- `build/bin/test_fcmp` - FCMP FFI test suite
+- `build/bin/test_curvetree` - Curve tree test suite
+
+**FCMP Architecture Note:**
+- The Rust FFI (`src/privacy/fcmp/rust/`) is a scaffold using `curve25519-dalek` for now
+- The reference Rust FCMP++ library (`fcmp-research/fcmp-plus-plus`) uses Ed25519+Selene+Helios curve cycle
+- Full wiring (uncomment `full-chain-membership-proofs` in `rust/Cargo.toml`) is the next step for production-grade proofs
+- LevelDB curvetree + key image DB in `.wattx/fcmp/` are operational
+
+## Recent Work (2026-05-26 continued)
+
+**FCMP++ Full Wiring — COMPLETE ✅**
+- Replaced Schnorr-sigma scaffold with real `full-chain-membership-proofs` crate
+- **Cargo.toml**: Added 7 path deps (`monero-fcmp-plus-plus`, `dalek-ff-group`, `ciphersuite`, `ec-divisors`, `multiexp`, `generalized-bulletproofs`, `monero-generators`) + `[patch.crates-io]` for `lazy_static` and `crypto-bigint`
+- **Three new FFI functions added to `src/privacy/fcmp/rust/src/lib.rs`:**
+  - `fcmp_prove_full` — full curve-tree membership proof (Generalized Bulletproofs + SAL)
+  - `fcmp_verify_full` — verifies a `fcmp_prove_full` proof via batch verifiers
+  - `fcmp_compute_leaf_root` — computes the Selene (C1) root from a leaf branch
+- **`fcmp_proof_size`** updated to use `FcmpPlusPlus::proof_size` (exact real size, ~5KB for 1 input/10 layers)
+- **`fcmp_version`** bumped to `"0.2.0"`
+- **All 14 C++ FFI tests pass** — `test_fcmp` suite green
+- **All 7 Rust unit tests pass**
+- **Architecture**: 1-layer proof (leaves → Selene root). Multi-layer support requires adding `curve_1_layers`/`curve_2_layers` to Path.
+
+**Declared in `fcmp_ffi.h`:** `fcmp_prove_full`, `fcmp_verify_full`, `fcmp_compute_leaf_root`
+
 ## Pending Work
 
 1. **EIP-7594 PeerDAS Network Integration** - Wire protocol into devp2p (Altcoinchain)
 2. **LayerZero Bridge** - Contracts compiled, awaiting Sepolia deployment
 3. **Trust Tier System** - Planned, not implemented
 4. **AuxPoW Testing** - Integration testing with Monero testnet needed
-5. **UTXO Privacy Primitives** - Ring signatures, stealth addresses on native chain
+5. **FCMP++ Multi-Layer Support** - Extend `fcmp_prove_full`/`fcmp_verify_full` to handle `curve_1_layers` and `curve_2_layers` for trees deeper than 1 layer
 6. **ZK Circuits** - Groth16 circuits for withdraw proofs (circom)
 7. **Altcoinchain Mainnet Sync** - Blocked on getting fresh enode addresses
 

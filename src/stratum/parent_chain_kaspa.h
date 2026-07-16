@@ -209,11 +209,19 @@ public:
     }
 
     std::string BuildHashingBlob(
-        const ParentCoinbaseData& coinbase_data,
+        const ParentCoinbaseData& /*coinbase_data*/,
         const std::vector<uint8_t>& merge_mining_tag
     ) override {
-        // For Kaspa, merge mining data goes in the block's blue work or similar
-        return HexStr(m_current_header.SerializePrePoW());
+        // Commit the mined header to the synthetic coinbase carrying the WATTx
+        // merge-mining tag (CreateAuxPow rebuilds the identical coinbase). We hash
+        // the full serialization (nonce=0) so blob and parentHeaderRaw differ only
+        // in the nonce region the miner grinds — required since the kHeavyHash PoW
+        // check currently falls back to SHA256d over parentHeaderRaw.
+        CMutableTransaction cb = BuildAuxMergedCoinbase(merge_mining_tag, m_current_header.blueScore);
+        KaspaBlockHeader header = m_current_header;
+        header.hashMerkleRoot = CTransaction(cb).GetHash();
+        header.SetNonce(0);
+        return HexStr(header.Serialize());
     }
 
     uint256 CalculatePoWHash(
@@ -245,37 +253,31 @@ public:
         const CBlockHeader& wattx_header,
         const ParentCoinbaseData& coinbase_data,
         uint32_t nonce,
-        const std::vector<uint8_t>& merge_mining_tag
+        const std::vector<uint8_t>& merge_mining_tag,
+        const std::string& /*extra_data*/ = ""
     ) override {
         CAuxPow proof;
 
-        // Convert Kaspa header to generic format
+        // Rebuild the SAME synthetic coinbase committed by the mined header so its
+        // txid is the merkle root of both, and include the nonce in parentHeaderRaw
+        // so the (placeholder SHA256d) PoW check actually depends on the nonce.
+        CMutableTransaction cb = BuildAuxMergedCoinbase(merge_mining_tag, m_current_header.blueScore);
+        uint256 merkle_root = CTransaction(cb).GetHash();
+
         KaspaBlockHeader parent_header = m_current_header;
+        parent_header.hashMerkleRoot = merkle_root;
         parent_header.SetNonce(nonce);
 
-        proof.parentBlock.major_version = parent_header.version >> 8;
-        proof.parentBlock.minor_version = parent_header.version & 0xFF;
-        proof.parentBlock.timestamp = parent_header.timestamp;
-        if (!parent_header.parentHashes.empty()) {
-            proof.parentBlock.prev_id = parent_header.parentHashes[0];
-        }
-        proof.parentBlock.nonce = nonce;
-        proof.parentBlock.merkle_root = parent_header.hashMerkleRoot;
+        // parentBlock: merkle_root for Check(), timestamp for time validation
+        proof.parentBlock.timestamp   = parent_header.timestamp;
+        proof.parentBlock.merkle_root = merkle_root;
 
-        // Kaspa coinbase is different - create minimal proof
-        CMutableTransaction coinbase_tx;
-        coinbase_tx.version = 2;
+        proof.parentAlgoId    = static_cast<uint8_t>(AuxPowAlgo::KHEAVYHASH);
+        proof.parentHeaderRaw = parent_header.Serialize();  // includes nonce
 
-        CTxIn coinbase_in;
-        coinbase_in.prevout.SetNull();
-        coinbase_in.scriptSig = CScript(merge_mining_tag.begin(), merge_mining_tag.end());
-        coinbase_tx.vin.push_back(coinbase_in);
-
-        CTxOut coinbase_out;
-        coinbase_out.nValue = 0;
-        coinbase_tx.vout.push_back(coinbase_out);
-
-        proof.coinbaseTxMut = coinbase_tx;
+        proof.coinbaseTxMut = cb;
+        proof.coinbaseBranch.vHash.clear();
+        proof.coinbaseBranch.nIndex = 0;
         proof.nChainId = m_config.chain_id;
 
         return proof;

@@ -22,6 +22,9 @@ struct CMoneroBlockHeader {
     uint256 prev_id;           // Previous block hash
     uint32_t nonce;
     uint256 merkle_root;       // Transaction merkle root
+    uint256 seed_hash;         // RandomX seed for this block's epoch (Monero seed_hash)
+    uint64_t num_txs{1};       // Total tx count incl. miner tx — the hashing blob
+                               // ends with this varint; monerod rejects PoW otherwise
 
     SERIALIZE_METHODS(CMoneroBlockHeader, obj) {
         READWRITE(obj.major_version);
@@ -30,6 +33,8 @@ struct CMoneroBlockHeader {
         READWRITE(obj.prev_id);
         READWRITE(obj.nonce);
         READWRITE(obj.merkle_root);
+        READWRITE(obj.seed_hash);
+        READWRITE(VARINT(obj.num_txs));
     }
 
     uint256 GetHash() const;
@@ -42,6 +47,8 @@ struct CMoneroBlockHeader {
         prev_id.SetNull();
         nonce = 0;
         merkle_root.SetNull();
+        seed_hash.SetNull();
+        num_txs = 1;
     }
 
     bool IsNull() const {
@@ -79,13 +86,27 @@ public:
 static const uint8_t TX_EXTRA_MERGE_MINING_TAG = 0x03;
 
 /**
+ * Parent chain algorithm identifier for multi-algo AuxPoW.
+ * Each value selects the PoW hash function used in GetParentBlockPoWHash().
+ */
+enum class AuxPowAlgo : uint8_t {
+    RANDOMX    = 0,  // Monero RandomX (original, default for backward compat)
+    SHA256D    = 1,  // Bitcoin SHA256d  — 80-byte header
+    SCRYPT     = 2,  // Litecoin Scrypt  — 80-byte header
+    ETHASH     = 3,  // ETC Ethash       — 32B header_hash + 8B nonce + 32B mix_hash
+    EQUIHASH   = 4,  // Zcash Equihash   — 140-byte header + solution bytes
+    X11        = 5,  // Dash X11         — 80-byte header
+    KHEAVYHASH = 6,  // Kaspa kHeavyHash — kaspa-specific header bytes
+};
+
+/**
  * Auxiliary Proof of Work
- * Contains all data needed to prove merged mining with Monero
+ * Contains all data needed to prove merged mining with a parent chain.
+ * Supports 7 parent chain algorithms via parentAlgoId + parentHeaderRaw.
  */
 class CAuxPow {
 public:
-    // The Monero coinbase transaction containing the aux chain commitment
-    // Using CMutableTransaction since CTransaction is not assignable
+    // The parent chain coinbase transaction containing the aux chain commitment
     CMutableTransaction coinbaseTxMut;
 
     // Merkle branch proving coinbase is in parent block
@@ -94,13 +115,26 @@ public:
     // Merkle branch for multiple aux chains (depth 0 for single chain)
     CMerkleBranch auxChainBranch;
 
-    // The parent (Monero) block header
+    // The parent (Monero) block header — kept for backward compat and Check() merkle root
     CMoneroBlockHeader parentBlock;
 
     // Chain ID for this aux chain (prevents cross-chain replay)
     int32_t nChainId;
 
+    // ---- Multi-algo AuxPoW fields ----
+    // Which algorithm the parent chain uses (AuxPowAlgo cast to uint8_t)
+    uint8_t parentAlgoId{0};  // 0 = RANDOMX (default, backward compat)
+
+    // Raw parent block header bytes for PoW verification (format varies by algo):
+    //   RANDOMX:    Monero hashing blob (76+ bytes)
+    //   SHA256D/SCRYPT/X11/KHEAVYHASH: 80-byte Bitcoin-style header
+    //   ETHASH:     32B header_hash + 8B nonce_LE + 32B mix_hash = 72 bytes
+    //   EQUIHASH:   140-byte header (without solution) + solution bytes
+    std::vector<uint8_t> parentHeaderRaw;
+
     CAuxPow() : nChainId(0) {}
+
+    AuxPowAlgo GetParentAlgo() const { return static_cast<AuxPowAlgo>(parentAlgoId); }
 
     // Get coinbase as immutable transaction
     CTransaction GetCoinbaseTx() const { return CTransaction(coinbaseTxMut); }
@@ -111,6 +145,8 @@ public:
         READWRITE(obj.auxChainBranch);
         READWRITE(obj.parentBlock);
         READWRITE(obj.nChainId);
+        READWRITE(obj.parentAlgoId);
+        READWRITE(obj.parentHeaderRaw);
     }
 
     /**
@@ -282,6 +318,22 @@ bool ParseMergeMiningTag(const std::vector<uint8_t>& extra,
  * Build the merge mining tag for coinbase extra field
  */
 std::vector<uint8_t> BuildMergeMiningTag(const uint256& merkleRoot, uint8_t depth = 0);
+
+/**
+ * Monero (CryptoNote) transaction hash of a miner tx.
+ * v1: keccak256 of the whole serialized tx.
+ * v2 (rct, modern): keccak(keccak(prefix) || keccak(rct_base) || null_prunable) —
+ * a miner tx's rct base is the single byte RCTTypeNull (0x00) and its prunable
+ * hash is null. `tx_bytes` holds the tx PREFIX (version..extra), as parsed from
+ * the block template.
+ */
+uint256 MoneroTxHash(const std::vector<uint8_t>& tx_bytes);
+
+/**
+ * Fold a leaf hash up a Monero tree-hash branch (keccak256 pairs, left/right by
+ * index parity). Empty branch => the leaf itself (single-tx block).
+ */
+uint256 MoneroTreeFold(const uint256& leaf, const std::vector<uint256>& branch, int index);
 
 }  // namespace auxpow
 

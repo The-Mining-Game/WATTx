@@ -60,12 +60,23 @@ public:
         return header;
     }
 
-    uint256 DifficultyToTarget(uint64_t difficulty) override {
-        // Dash uses same difficulty calculation as Bitcoin
-        if (difficulty == 0) difficulty = 1;
+    CAuxPow CreateAuxPow(
+        const CBlockHeader& wattx_header,
+        const ParentCoinbaseData& coinbase_data,
+        uint32_t nonce,
+        const std::vector<uint8_t>& merge_mining_tag,
+        const std::string& extra_data = ""
+    ) override {
+        CAuxPow proof = BitcoinChainHandler::CreateAuxPow(
+            wattx_header, coinbase_data, nonce, merge_mining_tag, extra_data);
+        proof.parentAlgoId = static_cast<uint8_t>(AuxPowAlgo::X11);
+        return proof;
+    }
 
+    uint256 DifficultyToTarget(uint64_t difficulty) override {
+        if (difficulty == 0) difficulty = 1;
         arith_uint256 max_target;
-        max_target.SetCompact(0x1e0ffff0);  // Dash's max target
+        max_target.SetCompact(0x1e0ffff0);
         arith_uint256 target = max_target / difficulty;
         return ArithToUint256(target);
     }

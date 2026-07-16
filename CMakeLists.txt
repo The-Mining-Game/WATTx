@@ -637,6 +637,12 @@ add_subdirectory(doc)
 
 add_subdirectory(src)
 
+# Isolated ported Monero Bulletproofs+ (ed25519 range proofs). Outside src/ so it
+# does not inherit src/'s global include_directories (which would collide its
+# span.h/crypto headers with Bitcoin Core's). Placed AFTER src/ because C is only
+# enabled at src/CMakeLists.txt (enable_language(C)), and bpplus has .c files.
+add_subdirectory(bpplus)
+
 include(cmake/tests.cmake)
 
 include(Maintenance)

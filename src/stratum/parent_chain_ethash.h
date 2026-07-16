@@ -352,32 +352,65 @@ public:
         const CBlockHeader& wattx_header,
         const ParentCoinbaseData& coinbase_data,
         uint32_t nonce,
-        const std::vector<uint8_t>& merge_mining_tag
+        const std::vector<uint8_t>& merge_mining_tag,
+        const std::string& extra_data = ""   // "nonce64_hex:mix_hash_hex"
     ) override {
         CAuxPow proof;
 
-        // For Ethash, we store the header hash and nonce in the AuxPow structure
-        // The proof format is different from Bitcoin-style chains
-
-        // Store Ethash-specific data in the parent block header
-        proof.parentBlock.major_version = 0;  // Ethash marker
-        proof.parentBlock.minor_version = 1;
+        // parentBlock timestamp for time validation
         proof.parentBlock.timestamp = GetTime();
-        proof.parentBlock.nonce = nonce;
 
-        // Store header hash as prev_id
-        std::vector<uint8_t> hash_bytes = ParseHex(m_header_hash);
-        if (hash_bytes.size() >= 32) {
-            std::memcpy(proof.parentBlock.prev_id.data(), hash_bytes.data(), 32);
+        // Build parentHeaderRaw = 32B header_hash + 8B nonce_LE + 32B mix_hash = 72 bytes
+        // extra_data format: "nonce64_hex:mix_hash_hex" (passed by ValidateShare for Ethash)
+        std::string nonce64_hex, mix_hash_hex;
+        size_t colon = extra_data.find(':');
+        if (colon != std::string::npos) {
+            nonce64_hex  = extra_data.substr(0, colon);
+            mix_hash_hex = extra_data.substr(colon + 1);
         }
 
-        // Store seed hash as merkle_root
-        std::vector<uint8_t> seed_bytes = ParseHex(m_seed_hash);
-        if (seed_bytes.size() >= 32) {
-            std::memcpy(proof.parentBlock.merkle_root.data(), seed_bytes.data(), 32);
+        std::vector<uint8_t> raw(72, 0);
+
+        // header_hash (32 bytes) — strip "0x" prefix if present
+        std::string hh = m_header_hash;
+        if (hh.size() >= 2 && hh[0] == '0' && hh[1] == 'x') hh = hh.substr(2);
+        auto hh_bytes = ParseHex(hh);
+        if (hh_bytes.size() >= 32) std::memcpy(raw.data(), hh_bytes.data(), 32);
+
+        // nonce (8 bytes LE) — use extra_data nonce64 if available, else fall back to nonce param
+        if (!nonce64_hex.empty()) {
+            std::string nh = nonce64_hex;
+            if (nh.size() >= 2 && nh[0] == '0' && nh[1] == 'x') nh = nh.substr(2);
+            auto nb = ParseHex(nh);
+            size_t copy_len = std::min(nb.size(), size_t(8));
+            std::memcpy(raw.data() + 32, nb.data(), copy_len);
+        } else {
+            std::memcpy(raw.data() + 32, &nonce, 4);
         }
 
-        proof.nChainId = m_config.chain_id;
+        // mix_hash (32 bytes)
+        if (!mix_hash_hex.empty()) {
+            std::string mh = mix_hash_hex;
+            if (mh.size() >= 2 && mh[0] == '0' && mh[1] == 'x') mh = mh.substr(2);
+            auto mb = ParseHex(mh);
+            if (mb.size() >= 32) std::memcpy(raw.data() + 40, mb.data(), 32);
+        }
+
+        proof.parentAlgoId    = static_cast<uint8_t>(AuxPowAlgo::ETHASH);
+        proof.parentHeaderRaw = raw;
+
+        // Ethash has no coinbase in its PoW, but CAuxPow::Check() extracts the WATTx
+        // commitment from a coinbase (scriptSig/OP_RETURN) and verifies a coinbase
+        // merkle proof. Provide a synthetic coinbase carrying the merge-mining tag so
+        // the proof is structurally valid; empty branch => merkle_root == its txid.
+        // NOTE: this asserts the commitment pool-side — true trustless ETC merged
+        // mining requires the parent block itself to embed the WATTx aux hash.
+        CMutableTransaction cb = BuildAuxMergedCoinbase(merge_mining_tag, 0);
+        proof.coinbaseTxMut         = cb;
+        proof.parentBlock.merkle_root = CTransaction(cb).GetHash();
+        proof.coinbaseBranch.vHash.clear();
+        proof.coinbaseBranch.nIndex = 0;
+        proof.nChainId        = m_config.chain_id;
 
         return proof;
     }

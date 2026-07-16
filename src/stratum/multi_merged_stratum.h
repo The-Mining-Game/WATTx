@@ -128,6 +128,11 @@ struct MultiMergedConfig {
     // Pool settings
     int job_timeout_seconds = 60;
     uint64_t share_difficulty = 10000;
+    // Optional explicit share target as an nBits compact value. When nonzero it
+    // overrides share_difficulty for the share-acceptance gate — mainly a testing
+    // knob so regtest can use an easy target (e.g. 0x1f0fffff) instead of the
+    // diff-1 floor of DifficultyToTarget(). Zero = derive target from share_difficulty.
+    uint32_t share_nbits = 0;
     double pool_fee_percent = 0.1;   // 0.1% fee for WATTx Mining Game pools
 
     // Hashrate tracking settings
@@ -157,6 +162,11 @@ struct MultiAlgoJob {
     uint32_t wattx_bits{0};
     uint256 wattx_target;
 
+    // Payout-split coinbase: the WATTx block reward divided among contributing miners
+    // by reward_share, frozen at job creation. Committed to by aux_merkle_root and
+    // submitted verbatim. Null => fall back to the template's default coinbase.
+    CTransactionRef payout_coinbase;
+
     // Merge mining commitment
     uint256 aux_merkle_root;
     std::vector<uint8_t> merge_mining_tag;
@@ -171,11 +181,22 @@ struct MultiAlgoJob {
 /**
  * Connected miner for multi-algo mining
  */
+// Stratum wire protocol used by a connected miner
+enum class StratumProtocol {
+    XMRIG,      // login / submit / getjob  (Monero-style, all algos default)
+    BTC,        // mining.subscribe / mining.authorize / mining.submit
+    ETHASH,     // eth_submitLogin / eth_getWork / eth_submitWork
+};
+
 struct MultiMergedClient {
     int socket_fd{-1};
     std::string session_id;
     std::string worker_name;
     ParentChainAlgo algo;
+    StratumProtocol protocol{StratumProtocol::XMRIG};  // detected at subscribe/login time
+
+    // Per-miner extranonce for BTC stratum (4 bytes hex)
+    std::string extranonce1;
 
     // Addresses for each chain
     std::unordered_map<std::string, std::string> chain_addresses;  // chain_name -> address
@@ -244,6 +265,50 @@ public:
     uint16_t GetPort(ParentChainAlgo algo) const;
 
     /**
+     * Rich dashboard stats for the merged mining app / RPC
+     */
+    struct AlgoStats {
+        std::string algo;         // "sha256d", "randomx", etc.
+        std::string chain_name;   // "bitcoin", "monero", etc.
+        uint16_t port{0};
+        bool daemon_reachable{false};
+        size_t miners_connected{0};
+        uint64_t shares_accepted{0};
+        uint64_t shares_rejected{0};
+        uint64_t parent_blocks_found{0};
+        std::string daemon_host;
+        int daemon_port{0};
+        std::string wallet_address;
+    };
+
+    struct MinerStats {
+        int client_id{0};
+        std::string login;
+        std::string wtx_address;
+        std::string algo;
+        uint64_t shares_accepted{0};
+        uint64_t shares_rejected{0};
+        uint64_t wtx_blocks_found{0};
+        int64_t connected_since{0};
+        int64_t last_activity{0};
+    };
+
+    struct Dashboard {
+        bool running{false};
+        uint64_t wtx_blocks_found{0};
+        int64_t started_at{0};
+        std::vector<AlgoStats> algos;
+        std::vector<MinerStats> miners;
+    };
+
+    Dashboard GetDashboard() const;
+
+    /**
+     * Update parent chain config at runtime (reconnect on next job cycle)
+     */
+    bool UpdateParentChainConfig(const std::string& chain_name, const ParentChainConfig& new_config);
+
+    /**
      * Notify of new blocks
      */
     void NotifyNewParentBlock(const std::string& chain_name);
@@ -258,21 +323,44 @@ private:
 
     // Protocol handlers
     void HandleMessage(int client_id, const std::string& message);
+    // XMRig-style (Monero) protocol
     void HandleLogin(int client_id, const std::string& id, const std::vector<std::string>& params);
     void HandleSubmit(int client_id, const std::string& id, const std::vector<std::string>& params);
     void HandleGetJob(int client_id, const std::string& id);
+    // Bitcoin stratum protocol
+    void HandleSubscribe(int client_id, const std::string& id, const std::vector<std::string>& params);
+    void HandleAuthorize(int client_id, const std::string& id, const std::vector<std::string>& params);
+    void HandleBtcSubmit(int client_id, const std::string& id, const std::vector<std::string>& params);
+    // Ethash protocol
+    void HandleEthSubmitLogin(int client_id, const std::string& id, const std::vector<std::string>& params);
+    void HandleEthGetWork(int client_id, const std::string& id);
+    void HandleEthSubmitWork(int client_id, const std::string& id, const std::vector<std::string>& params);
+    // Shared helpers
+    void SendMiningNotify(int client_id, const MultiAlgoJob& job, bool clean_jobs = false);
+    void SendSetDifficulty(int client_id, double diff);
+    std::string BuildBtcNotifyParams(const MultiAlgoJob& job, bool clean_jobs) const;
+    static std::string MakeExtranonce1(int client_id);
 
     // Job management
     void CreateJob(ParentChainAlgo algo);
+    // Build the payout-split WATTx coinbase: divides the block reward among the
+    // currently-scored miners by reward_share (value-conserving). Returns the
+    // template's default coinbase if no miners are scored yet.
+    CTransactionRef BuildPayoutCoinbase(const std::shared_ptr<interfaces::BlockTemplate>& tmpl);
     void BroadcastJob(ParentChainAlgo algo, const MultiAlgoJob& job);
+    // proto_extra: protocol-specific payload for CreateAuxPow — Bitcoin stratum
+    // passes "extranonce8_hex:ntime8_hex" so the proof rebuilds the miner's exact
+    // coinbase/header; XMRig submits leave it empty.
     bool ValidateShare(int client_id, const std::string& job_id,
-                       const std::string& nonce, const std::string& result);
+                       const std::string& nonce, const std::string& result,
+                       const std::string& proto_extra = "");
 
     // Network helpers
     void SendToClient(int client_id, const std::string& message);
     void SendResult(int client_id, const std::string& id, const std::string& result);
     void SendError(int client_id, const std::string& id, int code, const std::string& msg);
-    void SendJob(int client_id, const MultiAlgoJob& job);
+    void SendJob(int client_id, const MultiAlgoJob& job,
+                 StratumProtocol proto = StratumProtocol::XMRIG);
     void DisconnectClient(int client_id);
 
     // Utility
@@ -289,6 +377,7 @@ private:
 
     // Server state
     std::atomic<bool> m_running{false};
+    std::atomic<int64_t> m_started_at{0};
     std::unordered_map<ParentChainAlgo, int> m_listen_sockets;
 
     // Threads

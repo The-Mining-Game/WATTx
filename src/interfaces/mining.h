@@ -72,6 +72,16 @@ public:
      */
     virtual bool submitAuxPowSolution(uint32_t version, uint32_t timestamp, uint32_t nonce,
                                        CTransactionRef coinbase, std::shared_ptr<CAuxPow> auxpow) = 0;
+
+    /**
+     * Canonical hash of the WATTx block this template will become once submitted
+     * as an AuxPoW block (AUXPOW_VERSION_FLAG set, nNonce=0, merkle root finalized).
+     * This is the exact hash consensus checks, and the value the parent-chain
+     * merge-mining commitment must bind to. Single source of truth so the stratum's
+     * commitment and the assembled block never desync (the template header itself
+     * carries a not-yet-finalized zero merkle root).
+     */
+    virtual uint256 getAuxPowBlockHash(CTransactionRef coinbase = nullptr) = 0;
 };
 
 //! Interface giving clients (RPC, Stratum v2 Template Provider in the future)

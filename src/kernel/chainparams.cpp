@@ -210,6 +210,7 @@ public:
         // WATTx mainnet fixed seed nodes
         // Format: BIP155 (network_id, addr_len, addr_bytes, port_be)
         static const uint8_t wattx_seeds[] = {
+            0x01,0x04,0x81,0x50,0x94,0x0B,0x05,0x39,  // 129.80.148.11:1337 (Oracle canonical seed)
             0x01,0x04,0xBC,0x19,0xA8,0x95,0x05,0x39,  // 188.25.168.149:1337
             0x01,0x04,0x6C,0xD9,0x40,0xB4,0x05,0x39,  // 108.217.64.180:1337
             0x01,0x04,0x5F,0xAD,0xCD,0x42,0x49,0xD8,  // 95.173.205.66:18888
@@ -269,6 +270,7 @@ public:
         consensus.nFixUTXOCacheHFHeight = 0;
         consensus.nEnableHeaderSignatureHeight = 0;
         consensus.nCheckpointSpan = 500; // Sync checkpoint span - don't use nCoinbaseMaturity (too restrictive)
+        consensus.nMaxReorgDepth = 100; // WATTx: refuse reorgs deeper than 100 blocks below the tip (chain-split finality)
         consensus.nRBTCheckpointSpan = 500;
         consensus.delegationsAddress = uint160(ParseHex("0000000000000000000000000000000000000086"));
         consensus.historyStorageAddress = uint160(ParseHex("0000F90827F1C53a10cb7A02335B175320002935"));
@@ -390,8 +392,12 @@ public:
 
         vFixedSeeds.clear();
         vSeeds.clear();
-        // WATTx testnet - isolated mode (no external seeds for now)
-        // When ready for public testnet, add: vSeeds.emplace_back("testnet-seed1.wattxchange.app");
+        // WATTx testnet canonical seed node (Oracle: 129.80.148.11:11337)
+        vSeeds.emplace_back("129.80.148.11");
+        static const uint8_t wattx_testnet_seeds[] = {
+            0x01,0x04,0x81,0x50,0x94,0x0B,0x2C,0x49,  // 129.80.148.11:11337 (Oracle canonical testnet seed)
+        };
+        vFixedSeeds = std::vector<uint8_t>(std::begin(wattx_testnet_seeds), std::end(wattx_testnet_seeds));
 
         // WATTx testnet addresses start with 'w' (base58 prefix 135)
         base58Prefixes[PUBKEY_ADDRESS] = std::vector<unsigned char>(1,135);
@@ -448,6 +454,7 @@ public:
         consensus.nEnableHeaderSignatureHeight = 0;
         consensus.nCheckpointSpan = consensus.nCoinbaseMaturity;
         consensus.nRBTCheckpointSpan = consensus.nRBTCoinbaseMaturity;
+        consensus.nMaxReorgDepth = 100; // WATTx testnet: refuse reorgs deeper than 100 blocks below the tip
         consensus.delegationsAddress = uint160(ParseHex("0000000000000000000000000000000000000086")); // Same as mainnet
         consensus.historyStorageAddress = uint160(ParseHex("0000F90827F1C53a10cb7A02335B175320002935")); // EVM block hash history contract address
         consensus.nStakeTimestampMask = 0;  // Allow staking every second

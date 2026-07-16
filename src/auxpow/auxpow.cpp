@@ -5,12 +5,20 @@
 #include <auxpow/auxpow.h>
 #include <arith_uint256.h>
 #include <hash.h>
+#include <algorithm>
 #include <logging.h>
 #include <node/randomx_miner.h>
 #include <streams.h>
 #include <util/strencodings.h>
 
 #include <cstring>
+
+// Multi-algo PoW hash functions
+#include <eth_client/utils/libscrypt/libscrypt.h>
+#include <crypto/sphlib/x11.h>
+#include <crypto/equihash/equihash.h>
+#include <ethash/ethash.h>
+#include <ethash/keccak.h>
 
 // ============================================================================
 // CMoneroBlockHeader
@@ -72,20 +80,38 @@ uint256 CMoneroBlockHeader::GetPoWHash() const {
     // Tree root / merkle_root (32 bytes)
     blob.insert(blob.end(), merkle_root.begin(), merkle_root.end());
 
-    // Pad to 76 bytes if needed (Monero expects fixed size for RandomX)
-    while (blob.size() < 76) {
-        blob.push_back(0);
+    // Total tx count (incl. miner tx) as varint — Monero's hashing blob ends
+    // with this; monerod recomputes the blob on submit_block and rejects the
+    // PoW if it's missing (the old zero-pad happened to be one wrong byte).
+    uint64_t n = num_txs;
+    while (n >= 0x80) {
+        blob.push_back((n & 0x7F) | 0x80);
+        n >>= 7;
     }
+    blob.push_back(static_cast<uint8_t>(n));
 
-    // Calculate RandomX hash
+    // Calculate the parent RandomX hash. Merged-mined Monero blocks must be hashed
+    // with the PARENT chain's RandomX seed (seed_hash), NOT the WATTx genesis key —
+    // so use the dedicated aux context, re-keyed to this block's seed. Fall back to
+    // SHA256d only when no seed is present (legacy/degenerate proofs).
     uint256 hash;
-    auto& miner = node::GetRandomXMiner();
-    if (miner.IsInitialized()) {
-        miner.CalculateHash(blob.data(), blob.size(), hash.data());
+    if (!seed_hash.IsNull()) {
+        auto& miner = node::GetRandomXAuxMiner();
+        if (miner.ReinitializeIfNeeded(seed_hash.data(), 32)) {
+            miner.CalculateHash(blob.data(), blob.size(), hash.data());
+        } else {
+            LogPrintf("AuxPoW: Failed to init aux RandomX with seed %s\n",
+                      seed_hash.GetHex().substr(0, 16));
+            return uint256();
+        }
     } else {
-        // Fallback: use SHA256d if RandomX not initialized
-        hash = Hash(blob);
-        LogPrintf("AuxPoW: Warning - RandomX not initialized, using SHA256d fallback\n");
+        auto& miner = node::GetRandomXMiner();
+        if (miner.IsInitialized()) {
+            miner.CalculateHash(blob.data(), blob.size(), hash.data());
+        } else {
+            hash = Hash(blob);
+            LogPrintf("AuxPoW: Warning - no seed and RandomX not initialized, using SHA256d fallback\n");
+        }
     }
 
     return hash;
@@ -127,31 +153,75 @@ bool CAuxPow::Check(const uint256& hashAuxBlock, int expectedChainId) const {
         return false;
     }
 
-    // 2. Extract merkle root from coinbase extra field
-    uint256 auxMerkleRoot;
-    if (!GetAuxChainMerkleRoot(auxMerkleRoot)) {
-        LogPrintf("AuxPoW: Failed to extract aux merkle root from coinbase\n");
-        return false;
+    // Monero (RandomX) proofs commit via the coinbase tx_extra + a Monero-style
+    // tree hash, not a Bitcoin coinbase scriptSig. For those, parentHeaderRaw holds
+    // the raw (tag-injected) Monero coinbase and coinbaseBranch the tree path.
+    if (GetParentAlgo() == AuxPowAlgo::RANDOMX && !parentHeaderRaw.empty()) {
+        // (a) The exact merge-mining tag committing to THIS aux block must appear
+        //     verbatim in the coinbase — an unambiguous 34-byte needle (no offset
+        //     guessing, no false 0x03 matches).
+        uint256 expectedRoot = auxpow::CalcAuxChainMerkleRoot(hashAuxBlock, nChainId);
+        std::vector<uint8_t> tag = auxpow::BuildMergeMiningTag(expectedRoot, 0);
+        auto it = std::search(parentHeaderRaw.begin(), parentHeaderRaw.end(),
+                              tag.begin(), tag.end());
+        if (it == parentHeaderRaw.end()) {
+            LogPrintf("AuxPoW(monero): merge-mining tag not found in coinbase\n");
+            return false;
+        }
+        // (b) The coinbase must be committed by the tree root the PoW blob hashed.
+        // Monero semantics: CryptoNote tx hash + keccak tree fold (NOT SHA256d),
+        // so the root matches what monerod itself computes for the same block.
+        uint256 cbHash = auxpow::MoneroTxHash(parentHeaderRaw);
+        uint256 calcRoot = auxpow::MoneroTreeFold(cbHash, coinbaseBranch.vHash,
+                                                  coinbaseBranch.nIndex);
+        if (calcRoot != parentBlock.merkle_root) {
+            LogPrintf("AuxPoW(monero): coinbase tree proof failed (got %s want %s)\n",
+                      calcRoot.GetHex().substr(0, 16),
+                      parentBlock.merkle_root.GetHex().substr(0, 16));
+            return false;
+        }
+        return true;
     }
 
-    // 3. Calculate expected aux chain merkle root
+    // 2-4. Verify the coinbase commits to THIS aux block.
     uint256 expectedRoot = auxpow::CalcAuxChainMerkleRoot(hashAuxBlock, nChainId);
+    uint256 calculatedRoot = auxChainBranch.IsNull()
+        ? expectedRoot                          // single aux chain (depth 0)
+        : auxChainBranch.GetRoot(expectedRoot); // multiple aux chains
 
-    // 4. For single aux chain (depth 0), the merkle root should match directly
-    //    For multiple chains, verify merkle path
-    uint256 calculatedRoot;
-    if (auxChainBranch.IsNull()) {
-        // Single aux chain
-        calculatedRoot = expectedRoot;
-    } else {
-        // Multiple aux chains - calculate root from branch
-        calculatedRoot = auxChainBranch.GetRoot(expectedRoot);
+    // Primary: the expected 34-byte tag must appear VERBATIM in the coinbase
+    // scriptSig or an OP_RETURN output. Unlike first-0x03 extraction this is
+    // immune to false positives from a BIP34 height push (0x03 = push-3-bytes),
+    // which real parent-chain coinbases place FIRST in the scriptSig.
+    bool commitment_ok = false;
+    {
+        std::vector<uint8_t> tag = auxpow::BuildMergeMiningTag(calculatedRoot, 0);
+        const CTransaction coinbaseTx = GetCoinbaseTx();
+        if (!coinbaseTx.vin.empty()) {
+            const auto& ss = coinbaseTx.vin[0].scriptSig;
+            commitment_ok = std::search(ss.begin(), ss.end(),
+                                        tag.begin(), tag.end()) != ss.end();
+        }
+        for (const auto& out : coinbaseTx.vout) {
+            if (commitment_ok) break;
+            const auto& spk = out.scriptPubKey;
+            commitment_ok = std::search(spk.begin(), spk.end(),
+                                        tag.begin(), tag.end()) != spk.end();
+        }
     }
 
-    if (calculatedRoot != auxMerkleRoot) {
-        LogPrintf("AuxPoW: Aux merkle root mismatch\n");
-        LogPrintf("  Expected: %s\n", expectedRoot.GetHex());
-        LogPrintf("  Got:      %s\n", auxMerkleRoot.GetHex());
+    // Fallback: legacy first-0x03 extraction (covers proofs whose tag was built
+    // with nonzero depth, where the verbatim depth byte differs).
+    if (!commitment_ok) {
+        uint256 auxMerkleRoot;
+        if (GetAuxChainMerkleRoot(auxMerkleRoot) && calculatedRoot == auxMerkleRoot) {
+            commitment_ok = true;
+        }
+    }
+
+    if (!commitment_ok) {
+        LogPrintf("AuxPoW: coinbase does not commit to aux block\n");
+        LogPrintf("  Expected root: %s\n", expectedRoot.GetHex());
         return false;
     }
 
@@ -177,7 +247,78 @@ bool CAuxPow::Check(const uint256& hashAuxBlock, int expectedChainId) const {
 }
 
 uint256 CAuxPow::GetParentBlockPoWHash() const {
-    return parentBlock.GetPoWHash();
+    // If no raw bytes or algo is RANDOMX, fall back to Monero blob via parentBlock
+    if (parentHeaderRaw.empty() || parentAlgoId == static_cast<uint8_t>(AuxPowAlgo::RANDOMX)) {
+        return parentBlock.GetPoWHash();
+    }
+
+    const uint8_t* data = parentHeaderRaw.data();
+    const size_t   len  = parentHeaderRaw.size();
+
+    switch (GetParentAlgo()) {
+
+        case AuxPowAlgo::SHA256D:
+            // SHA256d of 80-byte Bitcoin-style header
+            return Hash(Span{data, len});
+
+        case AuxPowAlgo::SCRYPT: {
+            // Scrypt(N=1024, r=1, p=1) of 80-byte header
+            uint256 hash;
+            libscrypt_scrypt(data, len, data, len,
+                             1024, 1, 1, hash.begin(), 32);
+            return hash;
+        }
+
+        case AuxPowAlgo::X11: {
+            // X11 chained hash of 80-byte header
+            uint256 hash;
+            x11_hash(data, len, hash.begin());
+            return hash;
+        }
+
+        case AuxPowAlgo::KHEAVYHASH:
+            // kHeavyHash placeholder — TODO replace with real kHeavyHash when available
+            // Until then SHA256d gives deterministic, verifiable results for regtest
+            return Hash(Span{data, len});
+
+        case AuxPowAlgo::ETHASH: {
+            // parentHeaderRaw = 32B header_hash + 8B nonce_LE + 32B mix_hash = 72 bytes
+            // Compute ethash final_hash = keccak256(keccak512(header_hash+nonce) + mix_hash)
+            // This is DAG-free; full mix_hash validity is guaranteed by the ETC network.
+            if (len < 72) return uint256();
+
+            ethash_hash256 header_hash;
+            std::memcpy(header_hash.bytes, data, 32);
+
+            uint64_t nonce = 0;
+            std::memcpy(&nonce, data + 32, 8);
+
+            // seed = keccak512(header_hash_bytes + nonce_LE)
+            uint8_t seed_input[40];
+            std::memcpy(seed_input,      header_hash.bytes, 32);
+            std::memcpy(seed_input + 32, &nonce, 8);
+            ethash_hash512 seed = ethash_keccak512(seed_input, 40);
+
+            // final = keccak256(seed + mix_hash)
+            uint8_t final_input[96];
+            std::memcpy(final_input,      seed.bytes, 64);
+            std::memcpy(final_input + 64, data + 40, 32);
+            ethash_hash256 final_hash = ethash_keccak256(final_input, 96);
+
+            uint256 result;
+            std::memcpy(result.begin(), final_hash.bytes, 32);
+            return result;
+        }
+
+        case AuxPowAlgo::EQUIHASH:
+            // parentHeaderRaw = 140-byte Equihash header (without solution)
+            // Difficulty is checked against SHA256d of the header bytes only
+            if (len < 140) return Hash(Span{data, len});
+            return Hash(Span{data, 140});
+
+        default:
+            return parentBlock.GetPoWHash();
+    }
 }
 
 bool CAuxPow::GetAuxChainMerkleRoot(uint256& hashOut) const {
@@ -331,6 +472,51 @@ std::vector<uint8_t> BuildMergeMiningTag(const uint256& merkleRoot, uint8_t dept
     tag.insert(tag.end(), merkleRoot.begin(), merkleRoot.end());
 
     return tag;
+}
+
+uint256 MoneroTxHash(const std::vector<uint8_t>& tx_bytes) {
+    uint256 out;
+    if (tx_bytes.empty()) return out;
+
+    if (tx_bytes[0] == 0x01) {
+        // v1 tx: hash of the whole serialized tx
+        ethash_hash256 h = ethash_keccak256(tx_bytes.data(), tx_bytes.size());
+        std::memcpy(out.begin(), h.bytes, 32);
+        return out;
+    }
+
+    // v2 (rct): keccak(keccak(prefix) || keccak(rct_base) || null_prunable).
+    // tx_bytes is the prefix; a miner tx's rct base is one RCTTypeNull byte.
+    ethash_hash256 prefix_hash = ethash_keccak256(tx_bytes.data(), tx_bytes.size());
+    const uint8_t rct_null = 0x00;
+    ethash_hash256 base_hash = ethash_keccak256(&rct_null, 1);
+
+    uint8_t buf[96];
+    std::memcpy(buf,      prefix_hash.bytes, 32);
+    std::memcpy(buf + 32, base_hash.bytes,   32);
+    std::memset(buf + 64, 0, 32);  // null prunable hash
+    ethash_hash256 tx_hash = ethash_keccak256(buf, 96);
+    std::memcpy(out.begin(), tx_hash.bytes, 32);
+    return out;
+}
+
+uint256 MoneroTreeFold(const uint256& leaf, const std::vector<uint256>& branch, int index) {
+    uint256 hash = leaf;
+    int idx = index;
+    uint8_t buf[64];
+    for (const auto& b : branch) {
+        if (idx & 1) {
+            std::memcpy(buf,      b.begin(),    32);
+            std::memcpy(buf + 32, hash.begin(), 32);
+        } else {
+            std::memcpy(buf,      hash.begin(), 32);
+            std::memcpy(buf + 32, b.begin(),    32);
+        }
+        ethash_hash256 h = ethash_keccak256(buf, 64);
+        std::memcpy(hash.begin(), h.bytes, 32);
+        idx >>= 1;
+    }
+    return hash;
 }
 
 }  // namespace auxpow

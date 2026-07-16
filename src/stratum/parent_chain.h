@@ -57,7 +57,44 @@ struct ParentCoinbaseData {
     size_t reserve_offset{0};
     size_t reserve_size{0};
 
-    bool IsValid() const { return !coinbase_tx.empty(); }
+    // Offset of the 8-byte extranonce region within coinbase_tx (0 = none).
+    // Only set when a REAL parent coinbase was built (true merged mining);
+    // Bitcoin-stratum miners fill it via coinb1/coinb2, XMRig miners leave zeros.
+    size_t extranonce_offset{0};
+
+    // The parent chain's ACTUAL block target from its template, snapshot at
+    // template time. Null = derive from difficulty (which floors at diff-1 and
+    // makes easy regtest targets unreachable — difficulty rounds to 0).
+    uint256 parent_target;
+
+    // Raw non-coinbase transactions for full block submission (Bitcoin-style chains)
+    std::vector<std::vector<uint8_t>> raw_transactions;
+
+    // Snapshot of the parent block header taken at template time (Bitcoin-style
+    // chains). BuildHashingBlob (the header the miner grinds) and CreateAuxPow
+    // (the AuxPoW proof the validator checks) both rebuild the parent header from
+    // THIS snapshot instead of the handler's live m_current_header, so a poller
+    // refresh between job creation and share submit cannot desync the two headers.
+    // The merkle root and nonce are filled in per job / per share.
+    int32_t  parent_version{0};
+    uint256  parent_prevhash;
+    uint32_t parent_time{0};
+    uint32_t parent_bits{0};
+    uint64_t parent_height{0};
+    bool     header_snapshot{false};
+
+    // Monero (RandomX) header snapshot, frozen at template time so the mined blob
+    // and the AuxPoW proof agree even though monerod bumps the template timestamp
+    // every poll. mono_seed holds the RandomX seed bytes in ParseHex order (the raw
+    // key fed to randomx_init_cache — NOT uint256 display order).
+    uint8_t  mono_major{0};
+    uint8_t  mono_minor{0};
+    uint64_t mono_timestamp{0};
+    uint256  mono_prev_id;
+    uint256  mono_seed;
+    uint64_t mono_tx_count{1};  // total txs incl. miner tx (hashing blob tail varint)
+
+    bool IsValid() const { return !coinbase_tx.empty() || header_snapshot; }
 };
 
 /**
@@ -131,12 +168,16 @@ public:
     // Submit block to parent chain
     virtual bool SubmitBlock(const std::string& block_blob) = 0;
 
-    // Create AuxPoW proof
+    // Create AuxPoW proof.
+    // extra_data carries algo-specific data not captured by the other params.
+    // Ethash: "nonce64_hex:mix_hash_hex"  (nonce as 16 hex chars + mix as 64 hex chars)
+    // All others: empty string
     virtual CAuxPow CreateAuxPow(
         const CBlockHeader& wattx_header,
         const ParentCoinbaseData& coinbase_data,
         uint32_t nonce,
-        const std::vector<uint8_t>& merge_mining_tag
+        const std::vector<uint8_t>& merge_mining_tag,
+        const std::string& extra_data = ""
     ) = 0;
 
     // Calculate target from difficulty

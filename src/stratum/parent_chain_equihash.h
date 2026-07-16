@@ -230,12 +230,16 @@ public:
     }
 
     std::string BuildHashingBlob(
-        const ParentCoinbaseData& coinbase_data,
+        const ParentCoinbaseData& /*coinbase_data*/,
         const std::vector<uint8_t>& merge_mining_tag
     ) override {
-        // Update merkle root with modified coinbase
-        m_current_header.hashMerkleRoot = coinbase_data.merkle_root;
-        return HexStr(m_current_header.GetEquihashInput());
+        // Commit the mined 140-byte header to the synthetic coinbase that carries
+        // the WATTx merge-mining tag; CreateAuxPow rebuilds the identical coinbase
+        // so the proof reproduces this exact merkle root (single-tx tree).
+        CMutableTransaction cb = BuildAuxMergedCoinbase(merge_mining_tag, m_current_height);
+        EquihashBlockHeader header = m_current_header;
+        header.hashMerkleRoot = CTransaction(cb).GetHash();
+        return HexStr(header.GetEquihashInput());
     }
 
     uint256 CalculatePoWHash(
@@ -276,46 +280,30 @@ public:
         const CBlockHeader& wattx_header,
         const ParentCoinbaseData& coinbase_data,
         uint32_t nonce,
-        const std::vector<uint8_t>& merge_mining_tag
+        const std::vector<uint8_t>& merge_mining_tag,
+        const std::string& /*extra_data*/ = ""
     ) override {
         CAuxPow proof;
 
-        // Build parent block header
+        // Rebuild the SAME synthetic coinbase the miner committed to, so its txid
+        // is the single-tx merkle root of both the mined header and the proof.
+        CMutableTransaction cb = BuildAuxMergedCoinbase(merge_mining_tag, m_current_height);
+        uint256 merkle_root = CTransaction(cb).GetHash();
+
         EquihashBlockHeader parent_header = m_current_header;
-        parent_header.hashMerkleRoot = coinbase_data.merkle_root;
+        parent_header.hashMerkleRoot = merkle_root;
         parent_header.SetNonce(nonce);
 
-        // Convert to generic format
-        proof.parentBlock.major_version = (parent_header.nVersion >> 24) & 0xFF;
-        proof.parentBlock.minor_version = (parent_header.nVersion >> 16) & 0xFF;
-        proof.parentBlock.timestamp = parent_header.nTime;
-        proof.parentBlock.prev_id = parent_header.hashPrevBlock;
-        proof.parentBlock.nonce = nonce;
-        proof.parentBlock.merkle_root = parent_header.hashMerkleRoot;
+        // parentBlock: merkle_root for Check(), timestamp for time validation
+        proof.parentBlock.timestamp   = parent_header.nTime;
+        proof.parentBlock.merkle_root = merkle_root;
 
-        // Build coinbase with MM tag
-        CMutableTransaction coinbase_tx;
-        coinbase_tx.version = 2;
+        // Raw 140-byte Equihash header (without solution) for SHA256d PoW check
+        proof.parentAlgoId    = static_cast<uint8_t>(AuxPowAlgo::EQUIHASH);
+        proof.parentHeaderRaw = parent_header.GetEquihashInput();  // 140-byte header only
 
-        CTxIn coinbase_in;
-        coinbase_in.prevout.SetNull();
-
-        std::vector<uint8_t> scriptSig_data;
-        scriptSig_data.push_back(0x03);
-        scriptSig_data.push_back(m_current_height & 0xFF);
-        scriptSig_data.push_back((m_current_height >> 8) & 0xFF);
-        scriptSig_data.push_back((m_current_height >> 16) & 0xFF);
-        scriptSig_data.insert(scriptSig_data.end(), merge_mining_tag.begin(), merge_mining_tag.end());
-
-        coinbase_in.scriptSig = CScript(scriptSig_data.begin(), scriptSig_data.end());
-        coinbase_tx.vin.push_back(coinbase_in);
-
-        CTxOut coinbase_out;
-        coinbase_out.nValue = 0;
-        coinbase_tx.vout.push_back(coinbase_out);
-
-        proof.coinbaseTxMut = coinbase_tx;
-        proof.coinbaseBranch.vHash = coinbase_data.merkle_branch;
+        proof.coinbaseTxMut = cb;
+        proof.coinbaseBranch.vHash.clear();
         proof.coinbaseBranch.nIndex = 0;
         proof.nChainId = m_config.chain_id;
 

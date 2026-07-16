@@ -197,6 +197,11 @@ struct Params {
     /** Block sync-checkpoint span*/
     int nCheckpointSpan;
     int nRBTCheckpointSpan;
+    /** WATTx max-reorg-depth guard: refuse to reorg the active chain deeper than
+     *  this many blocks below the current tip. Stops a node that was partitioned
+     *  from the network (e.g. a solo miner) from replacing the canonical chain with
+     *  a long private fork on reconnect. 0 disables the guard (used for regtest). */
+    int nMaxReorgDepth{0};
     uint160 delegationsAddress;
     uint160 historyStorageAddress;
     int nLastMPoSBlock;
