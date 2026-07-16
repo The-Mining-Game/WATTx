@@ -251,14 +251,12 @@ int32_t fcmp_hash_to_point(uint8_t *out, const uint8_t *data, uintptr_t data_len
 int32_t fcmp_pedersen_commit(uint8_t *out, const uint8_t *value, const uint8_t *blinding);
 
 /**
- * Estimate the proof size for given parameters
+ * Return the exact FCMP++ proof size for the given parameters.
  *
- * # Arguments
- * - `num_inputs` - Number of inputs being proven
- * - `num_layers` - Number of tree layers
+ * Uses the real `FcmpPlusPlus::proof_size` calculation.
  *
  * # Returns
- * - Estimated proof size in bytes, or 0 on error
+ * - Exact proof size in bytes, or 0 if either argument is zero
  */
 uintptr_t fcmp_proof_size(uint32_t num_inputs, uint32_t num_layers);
 
@@ -307,6 +305,71 @@ int32_t fcmp_verify(const uint8_t *tree_root,
                     const struct FcmpInput *input,
                     const uint8_t *proof,
                     uintptr_t proof_len);
+
+/**
+ * Generate a real FCMP++ membership proof for a leaf-level tree (1 layer: leaves → root).
+ *
+ * The caller provides all outputs in the leaf branch (`leaves_data`, `num_leaves` × 96 bytes,
+ * each output encoded as O‖I‖C where each point is 32-byte compressed Ed25519), the index of
+ * the output being spent (`our_leaf_index`), the spending key components `x` and `y` satisfying
+ * `O = x·G + y·T`, and the 32-byte `signable_tx_hash`.
+ *
+ * On success the serialised `FcmpPlusPlus` proof is written to `proof_out`, its length to
+ * `*proof_len_out`, the key image `L = x·I` to `key_image_out`, and the pseudo-out `C~` to
+ * `c_tilde_out`.  Both 32-byte output buffers must be provided by the caller.
+ *
+ * # Safety
+ * All pointers must be valid for the described lengths.
+ */
+int32_t fcmp_prove_full(uint8_t *proof_out,
+                        uintptr_t *proof_len_out,
+                        uintptr_t proof_max_len,
+                        const uint8_t *leaves_data,
+                        uintptr_t num_leaves,
+                        uintptr_t our_leaf_index,
+                        const uint8_t *x_bytes,
+                        const uint8_t *y_bytes,
+                        const uint8_t *tx_hash,
+                        uint8_t *key_image_out,
+                        uint8_t *c_tilde_out);
+
+/**
+ * Verify a real FCMP++ membership proof produced by `fcmp_prove_full`.
+ *
+ * `tree_root` is the 32-byte compressed Selene (C1) root point (for a 1-layer tree where
+ * `num_layers` is odd, i.e. 1).  `pseudo_out` is the C~ value returned in `c_tilde_out` by
+ * `fcmp_prove_full`.  `tx_hash` must be identical to the one used during proving.
+ *
+ * # Returns
+ * - `FCMP_SUCCESS` if the proof verifies
+ * - `FCMP_ERROR_PROOF_VERIFICATION` if it does not
+ * - Other error codes on bad inputs
+ *
+ * # Safety
+ * All pointers must be valid for 32 bytes each.
+ */
+int32_t fcmp_verify_full(const uint8_t *tree_root,
+                         uintptr_t num_layers,
+                         const uint8_t *proof_data,
+                         uintptr_t proof_len,
+                         const uint8_t *key_image,
+                         const uint8_t *pseudo_out,
+                         const uint8_t *tx_hash);
+
+/**
+ * Compute the Selene (C1) tree root from a leaf branch for a 1-layer tree.
+ *
+ * `leaves_data` points to `num_leaves` × 96 bytes (O‖I‖C for each output, each 32-byte
+ * compressed Ed25519).  The computed Selene root is written as 32 compressed bytes to
+ * `root_out`.
+ *
+ * This mirrors the root computation inside `Fcmp::prove` for a single leaf branch, and must
+ * be used to obtain the `tree_root` value passed to `fcmp_verify_full`.
+ *
+ * # Safety
+ * All pointers must be valid for the described lengths.
+ */
+int32_t fcmp_compute_leaf_root(uint8_t *root_out, const uint8_t *leaves_data, uintptr_t num_leaves);
 
 /**
  * Get the library version string

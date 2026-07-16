@@ -253,6 +253,76 @@ int32_t fcmp_verify(
 );
 
 // ============================================================================
+// Full FCMP++ Proof Operations (Real Implementation)
+// ============================================================================
+
+/**
+ * Generate a real FCMP++ membership proof for a 1-layer (leaf-only) tree.
+ *
+ * leaves_data   - num_leaves * 96 bytes (O || I || C per output, each 32-byte compressed Ed25519)
+ * num_leaves    - number of outputs in the leaf branch (1 .. LAYER_ONE_LEN=38)
+ * our_leaf_index - index of the output being spent within leaves_data (0-based)
+ * x_bytes       - 32-byte spend key x  (O = x*G + y*T)
+ * y_bytes       - 32-byte spend key y
+ * tx_hash       - 32-byte signable transaction hash
+ * key_image_out - 32-byte output: key image L = x*I
+ * c_tilde_out   - 32-byte output: pseudo-out C~ (pass to fcmp_verify_full)
+ *
+ * @return FCMP_SUCCESS on success
+ */
+int32_t fcmp_prove_full(
+    uint8_t*       proof_out,
+    size_t*        proof_len_out,
+    size_t         proof_max_len,
+    const uint8_t* leaves_data,
+    size_t         num_leaves,
+    size_t         our_leaf_index,
+    const uint8_t* x_bytes,
+    const uint8_t* y_bytes,
+    const uint8_t* tx_hash,
+    uint8_t*       key_image_out,
+    uint8_t*       c_tilde_out
+);
+
+/**
+ * Verify a real FCMP++ membership proof produced by fcmp_prove_full.
+ *
+ * tree_root  - 32-byte Selene (C1) root (num_layers odd) or Helios (even)
+ * num_layers - number of tree layers (1 for a leaf-only tree)
+ * proof_data - proof bytes from fcmp_prove_full
+ * proof_len  - length of proof_data
+ * key_image  - 32-byte key image from fcmp_prove_full
+ * pseudo_out - 32-byte C~ from fcmp_prove_full
+ * tx_hash    - 32-byte hash, identical to the one used in fcmp_prove_full
+ *
+ * @return FCMP_SUCCESS if valid, FCMP_ERROR_PROOF_VERIFICATION if invalid
+ */
+int32_t fcmp_verify_full(
+    const uint8_t* tree_root,
+    size_t         num_layers,
+    const uint8_t* proof_data,
+    size_t         proof_len,
+    const uint8_t* key_image,
+    const uint8_t* pseudo_out,
+    const uint8_t* tx_hash
+);
+
+/**
+ * Compute the Selene (C1) tree root from a leaf branch for a 1-layer tree.
+ *
+ * root_out    - 32-byte output: Selene root (pass as tree_root to fcmp_verify_full)
+ * leaves_data - num_leaves * 96 bytes (same layout as fcmp_prove_full)
+ * num_leaves  - number of outputs (1 .. 38)
+ *
+ * @return FCMP_SUCCESS on success
+ */
+int32_t fcmp_compute_leaf_root(
+    uint8_t*       root_out,
+    const uint8_t* leaves_data,
+    size_t         num_leaves
+);
+
+// ============================================================================
 // Utility Functions
 // ============================================================================
 

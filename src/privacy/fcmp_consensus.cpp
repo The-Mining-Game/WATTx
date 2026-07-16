@@ -4,6 +4,8 @@
 
 #include <privacy/fcmp_consensus.h>
 #include <privacy/fcmp_tx.h>
+#include <privacy/confidential.h>
+#include <bpplus_api.h>             // wattx_bpplus::verify — sound ed25519 BP+ range proofs
 #include <privacy/ed25519/pedersen.h>
 #include <privacy/curvetree/tree_db.h>
 #include <chain.h>
@@ -324,6 +326,23 @@ bool CFcmpConsensusState::CheckFcmpTransaction(const CTransaction& tx, TxValidat
         return true;
     }
 
+    // SECURITY — FAIL-CLOSED: the FCMP amount layer is not curve-coherent. Input
+    // pseudo-outputs are ed25519 Pedersen commitments (fcmp_tx.cpp builds them with
+    // an "Ed25519 prefix") while output commitments are secp256k1 (CreateCommitment).
+    // Value conservation CANNOT be soundly verified across two different curves, so a
+    // shielded output could carry unbacked value (DASH/Particl/Ghost-class inflation).
+    // Until the amount layer is unified on ed25519 (ed25519 commitments + Bulletproofs+
+    // range proofs; the balance + membership checks are already ed25519), reject any
+    // FCMP transaction that creates confidential outputs. No shielded value can be
+    // minted. Re-enable by removing this guard once the coherent ed25519 amount layer
+    // and its range-proof verifier are wired and tested end-to-end.
+    if (!privTx.privacyOutputs.empty()) {
+        return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                             "fcmp-amount-layer-disabled",
+                             "FCMP confidential outputs are disabled pending a curve-coherent, "
+                             "range-proven amount layer (anti-inflation fail-closed)");
+    }
+
     // Check FCMP inputs
     for (const auto& input : privTx.fcmpInputs) {
         // 1. Key image must be valid (non-empty)
@@ -424,12 +443,34 @@ bool CFcmpConsensusState::CheckFcmpInputs(const CTransaction& tx, TxValidationSt
         }
     }
 
-    // 4. Verify balance (sum of pseudo-outputs = sum of outputs + fee)
+    // 4. SECURITY — every confidential output MUST carry a valid ed25519 Bulletproofs+
+    // range proof over its commitment. The homomorphic balance check (step 5) only
+    // proves the commitments SUM correctly; without a range proof an output can commit
+    // to an out-of-range (negative / >2^64 wraparound) value that still balances and
+    // mints on redemption (the Particl/Ghost/DASH inflation-bug class). Verified by the
+    // ported Monero BP+ (libwattx_bpplus): the proof must verify AND commit to exactly
+    // this output's commitment (enforced internally via the 8*V == C cofactor match).
     std::vector<CPedersenCommitment> outputCommitments;
     for (const auto& output : privTx.privacyOutputs) {
+        const std::vector<unsigned char>& cdata = output.confidentialOutput.commitment.data;
+        const std::vector<unsigned char>& pdata = output.confidentialOutput.rangeProof.data;
+        // 32-byte compressed ed25519 commitment (drop a 33-byte length/type prefix).
+        const uint8_t* c32 = cdata.data();
+        if (cdata.size() == 33) c32 = cdata.data() + 1;
+        else if (cdata.size() != 32) {
+            return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                                 "fcmp-bad-commitment",
+                                 "FCMP output commitment is not a 32-byte ed25519 point");
+        }
+        if (!wattx_bpplus::verify(c32, 1, pdata.data(), pdata.size())) {
+            return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                                 "fcmp-rangeproof-invalid",
+                                 "FCMP output Bulletproofs+ range proof missing or invalid");
+        }
         outputCommitments.push_back(output.confidentialOutput.commitment);
     }
 
+    // 5. Verify balance (sum of pseudo-outputs = sum of outputs + fee)
     if (!VerifyFcmpBalance(privTx.fcmpInputs, outputCommitments, privTx.nFee)) {
         return state.Invalid(TxValidationResult::TX_CONSENSUS,
                              "fcmp-balance-invalid",

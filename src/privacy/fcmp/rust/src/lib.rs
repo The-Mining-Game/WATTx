@@ -523,21 +523,20 @@ pub unsafe extern "C" fn fcmp_pedersen_commit(
     let v = Scalar::from_bytes_mod_order(v_arr);
     let b = Scalar::from_bytes_mod_order(b_arr);
 
-    // G = base point, H = hash_to_point("WATTx_Pedersen_H")
+    // Monero commitment convention: C = value*H + blinding*G, where H is MONERO's
+    // generator (monero_generators::H) and G is the ed25519 basepoint. This is the
+    // single convention that is consistent across the whole shielded stack:
+    //   - Monero Bulletproofs+ range proofs prove exactly C = v*H + gamma*G;
+    //   - the FCMP++ membership proof consumes each output's C as a MoneroOutput
+    //     commitment (see fcmp_prove_full -> MoneroOutput::new(O,I,C)).
+    // The previous code used a custom hash-to-point H with value/blinding REVERSED
+    // (C = v*G + b*H_custom), which matched NEITHER the range proof nor the membership
+    // proof — it could never verify end-to-end.
     let g = ED25519_BASEPOINT_POINT;
+    let h = monero_generators::H();
 
-    // Derive H deterministically
-    let mut h_out = [0u8; POINT_SIZE];
-    let h_seed = b"WATTx_Pedersen_H_v1";
-    if fcmp_hash_to_point(h_out.as_mut_ptr(), h_seed.as_ptr(), h_seed.len()) != FCMP_SUCCESS {
-        return FCMP_ERROR_INTERNAL;
-    }
-
-    use curve25519_dalek::edwards::CompressedEdwardsY;
-    let h = CompressedEdwardsY(h_out).decompress().unwrap();
-
-    // C = v*G + b*H
-    let commitment = v * g + b * h;
+    // C = value*H + blinding*G
+    let commitment = v * h + b * g;
     let result = commitment.compress().to_bytes();
 
     ptr::copy_nonoverlapping(result.as_ptr(), out, POINT_SIZE);
@@ -548,31 +547,19 @@ pub unsafe extern "C" fn fcmp_pedersen_commit(
 // FCMP Proof Operations (Placeholder)
 // ============================================================================
 
-/// Estimate the proof size for given parameters
+/// Return the exact FCMP++ proof size for the given parameters.
 ///
-/// # Arguments
-/// - `num_inputs` - Number of inputs being proven
-/// - `num_layers` - Number of tree layers
+/// Uses the real `FcmpPlusPlus::proof_size` calculation.
 ///
 /// # Returns
-/// - Estimated proof size in bytes, or 0 on error
+/// - Exact proof size in bytes, or 0 if either argument is zero
 #[no_mangle]
 pub unsafe extern "C" fn fcmp_proof_size(num_inputs: u32, num_layers: u32) -> usize {
     if num_inputs == 0 || num_layers == 0 {
         return 0;
     }
-
-    // Simplified estimate based on FCMP++ paper:
-    // Base: 16 elements for bulletproof components
-    // + IPA rounds: 2 * log2(rows) per curve
-    // + commitments
-    // Roughly: 32 * (16 + 2*log2(n) + inputs*layers) + 64
-
-    let base = 32 * 16;
-    let ipa = 32 * 2 * (32 - (num_layers as u32).leading_zeros()) as usize;
-    let commits = 32 * (num_inputs as usize) * (num_layers as usize);
-
-    base + ipa + commits + 64
+    use monero_fcmp_plus_plus::FcmpPlusPlus;
+    FcmpPlusPlus::proof_size(num_inputs as usize, num_layers as usize)
 }
 
 /// Generate an FCMP proof (Schnorr sigma protocol on curve tree branch)
@@ -894,6 +881,417 @@ pub unsafe extern "C" fn fcmp_verify(
 }
 
 // ============================================================================
+// Full FCMP++ Proof Generation (Real Implementation)
+// ============================================================================
+
+/// Generate a real FCMP++ membership proof for a leaf-level tree (1 layer: leaves → root).
+///
+/// The caller provides all outputs in the leaf branch (`leaves_data`, `num_leaves` × 96 bytes,
+/// each output encoded as O‖I‖C where each point is 32-byte compressed Ed25519), the index of
+/// the output being spent (`our_leaf_index`), the spending key components `x` and `y` satisfying
+/// `O = x·G + y·T`, and the 32-byte `signable_tx_hash`.
+///
+/// On success the serialised `FcmpPlusPlus` proof is written to `proof_out`, its length to
+/// `*proof_len_out`, the key image `L = x·I` to `key_image_out`, and the pseudo-out `C~` to
+/// `c_tilde_out`.  Both 32-byte output buffers must be provided by the caller.
+///
+/// # Safety
+/// All pointers must be valid for the described lengths.
+#[no_mangle]
+pub unsafe extern "C" fn fcmp_prove_full(
+    proof_out: *mut u8,
+    proof_len_out: *mut usize,
+    proof_max_len: usize,
+    leaves_data: *const u8,   // num_leaves * 96 bytes
+    num_leaves: usize,
+    our_leaf_index: usize,
+    x_bytes: *const u8,       // 32 bytes: spend key x
+    y_bytes: *const u8,       // 32 bytes: spend key y
+    tx_hash: *const u8,       // 32 bytes: signable tx hash
+    key_image_out: *mut u8,   // 32 bytes output
+    c_tilde_out: *mut u8,     // 32 bytes output (pseudo-out)
+) -> i32 {
+    use monero_fcmp_plus_plus::{
+        FCMP_PARAMS, Output as MoneroOutput, Curves, FcmpPlusPlus,
+        fcmps::{Fcmp, Path, Branches, OBlind, IBlind, IBlindBlind, CBlind, OutputBlinds},
+        sal::{RerandomizedOutput, OpenedInputTuple, SpendAuthAndLinkability},
+    };
+    use ciphersuite::{
+        group::{Group, GroupEncoding, ff::PrimeField},
+        Ciphersuite, Ed25519,
+    };
+    use dalek_ff_group::EdwardsPoint as DfgPoint;
+    use ec_divisors::ScalarDecomposition;
+    use monero_generators::{T as MoneroT, FCMP_U, FCMP_V};
+
+    if proof_out.is_null() || proof_len_out.is_null() || leaves_data.is_null() ||
+       x_bytes.is_null() || y_bytes.is_null() || tx_hash.is_null() ||
+       key_image_out.is_null() || c_tilde_out.is_null() {
+        return FCMP_ERROR_INVALID_PARAM;
+    }
+    if num_leaves == 0 || our_leaf_index >= num_leaves {
+        return FCMP_ERROR_INVALID_PARAM;
+    }
+
+    // Parse x and y scalars.
+    let mut x_arr = [0u8; 32];
+    let mut y_arr = [0u8; 32];
+    x_arr.copy_from_slice(slice::from_raw_parts(x_bytes, 32));
+    y_arr.copy_from_slice(slice::from_raw_parts(y_bytes, 32));
+
+    let x: <Ed25519 as Ciphersuite>::F =
+        match Option::from(<Ed25519 as Ciphersuite>::F::from_repr(x_arr)) {
+            Some(s) => s,
+            None => return FCMP_ERROR_INVALID_SCALAR,
+        };
+    let y: <Ed25519 as Ciphersuite>::F =
+        match Option::from(<Ed25519 as Ciphersuite>::F::from_repr(y_arr)) {
+            Some(s) => s,
+            None => return FCMP_ERROR_INVALID_SCALAR,
+        };
+
+    // Parse tx hash.
+    let mut tx_hash_arr = [0u8; 32];
+    tx_hash_arr.copy_from_slice(slice::from_raw_parts(tx_hash, 32));
+
+    // Parse leaf outputs (each output is 3 × 32-byte compressed Ed25519 points: O, I, C).
+    let all_leaf_bytes = slice::from_raw_parts(leaves_data, num_leaves * 96);
+    let mut all_outputs: Vec<MoneroOutput> = Vec::with_capacity(num_leaves);
+    for i in 0..num_leaves {
+        let base = i * 96;
+        let mut o_arr = [0u8; 32];
+        let mut ii_arr = [0u8; 32];
+        let mut c_arr = [0u8; 32];
+        o_arr.copy_from_slice(&all_leaf_bytes[base..base + 32]);
+        ii_arr.copy_from_slice(&all_leaf_bytes[base + 32..base + 64]);
+        c_arr.copy_from_slice(&all_leaf_bytes[base + 64..base + 96]);
+
+        let O: DfgPoint = match Option::from(DfgPoint::from_bytes(&o_arr)) {
+            Some(p) => p,
+            None => return FCMP_ERROR_INVALID_POINT,
+        };
+        let I: DfgPoint = match Option::from(DfgPoint::from_bytes(&ii_arr)) {
+            Some(p) => p,
+            None => return FCMP_ERROR_INVALID_POINT,
+        };
+        let C: DfgPoint = match Option::from(DfgPoint::from_bytes(&c_arr)) {
+            Some(p) => p,
+            None => return FCMP_ERROR_INVALID_POINT,
+        };
+
+        match MoneroOutput::new(O, I, C) {
+            Ok(out) => all_outputs.push(out),
+            Err(_) => return FCMP_ERROR_INVALID_POINT,
+        }
+    }
+
+    let our_output = all_outputs[our_leaf_index];
+
+    // Re-randomise: generates the four blinds (r_o, r_i, r_r_i, r_c) internally.
+    let rerandomized = RerandomizedOutput::new(&mut OsRng, our_output);
+
+    // Open the input tuple proving we know the spending key.
+    let opening = match OpenedInputTuple::open(rerandomized.clone(), &x, &y) {
+        Some(o) => o,
+        None => return FCMP_ERROR_PROOF_GENERATION,
+    };
+
+    // Spend-Authorisation and Linkability proof → (key_image, SAL).
+    let (key_image, sal) = SpendAuthAndLinkability::prove(&mut OsRng, tx_hash_arr, opening);
+    let monero_input = rerandomized.input();
+
+    // Path for a 1-layer tree: leaves are the root branch.
+    let path = Path::<Curves> {
+        output: our_output,
+        leaves: all_outputs,
+        curve_2_layers: vec![],
+        curve_1_layers: vec![],
+    };
+
+    let branches = match Branches::new(vec![path]) {
+        Some(b) => b,
+        None => return FCMP_ERROR_PROOF_GENERATION,
+    };
+
+    // Build OutputBlinds from the re-randomisation scalars.
+    let t_pt = DfgPoint(MoneroT());
+    let u_pt = DfgPoint(FCMP_U());
+    let v_pt = DfgPoint(FCMP_V());
+    let g_pt = DfgPoint::generator();
+
+    macro_rules! decompose {
+        ($scalar:expr) => {
+            match ScalarDecomposition::new($scalar) {
+                Some(d) => d,
+                None => return FCMP_ERROR_PROOF_GENERATION,
+            }
+        };
+    }
+
+    let output_blinds = OutputBlinds::new(
+        OBlind::new(t_pt, decompose!(rerandomized.o_blind())),
+        IBlind::new(u_pt, v_pt, decompose!(rerandomized.i_blind())),
+        IBlindBlind::new(t_pt, decompose!(rerandomized.i_blind_blind())),
+        CBlind::new(g_pt, decompose!(rerandomized.c_blind())),
+    );
+
+    let blinded = match branches.blind(vec![output_blinds], vec![], vec![]) {
+        Ok(b) => b,
+        Err(_) => return FCMP_ERROR_PROOF_GENERATION,
+    };
+
+    // Generate the Generalized-Bulletproofs FCMP.
+    let fcmp = match Fcmp::prove(&mut OsRng, FCMP_PARAMS(), blinded) {
+        Ok(f) => f,
+        Err(_) => return FCMP_ERROR_PROOF_GENERATION,
+    };
+
+    let pp = FcmpPlusPlus::new(vec![(monero_input, sal)], fcmp);
+
+    // Serialise the proof.
+    let mut buf: Vec<u8> = Vec::new();
+    if pp.write(&mut buf).is_err() {
+        return FCMP_ERROR_PROOF_GENERATION;
+    }
+
+    if buf.len() > proof_max_len {
+        return FCMP_ERROR_MEMORY;
+    }
+
+    ptr::copy_nonoverlapping(buf.as_ptr(), proof_out, buf.len());
+    *proof_len_out = buf.len();
+
+    // Write key image and pseudo-out.
+    let ki = key_image.to_bytes();
+    ptr::copy_nonoverlapping(ki.as_ptr(), key_image_out, 32);
+    let ct = monero_input.C_tilde().to_bytes();
+    ptr::copy_nonoverlapping(ct.as_ptr(), c_tilde_out, 32);
+
+    FCMP_SUCCESS
+}
+
+/// Verify a real FCMP++ membership proof produced by `fcmp_prove_full`.
+///
+/// `tree_root` is the 32-byte compressed Selene (C1) root point (for a 1-layer tree where
+/// `num_layers` is odd, i.e. 1).  `pseudo_out` is the C~ value returned in `c_tilde_out` by
+/// `fcmp_prove_full`.  `tx_hash` must be identical to the one used during proving.
+///
+/// # Returns
+/// - `FCMP_SUCCESS` if the proof verifies
+/// - `FCMP_ERROR_PROOF_VERIFICATION` if it does not
+/// - Other error codes on bad inputs
+///
+/// # Safety
+/// All pointers must be valid for 32 bytes each.
+#[no_mangle]
+pub unsafe extern "C" fn fcmp_verify_full(
+    tree_root: *const u8,   // 32 bytes: Selene (C1) root
+    num_layers: usize,
+    proof_data: *const u8,
+    proof_len: usize,
+    key_image: *const u8,   // 32 bytes
+    pseudo_out: *const u8,  // 32 bytes (C_tilde)
+    tx_hash: *const u8,     // 32 bytes
+) -> i32 {
+    use monero_fcmp_plus_plus::{
+        SELENE_GENERATORS, HELIOS_GENERATORS, FCMP_PARAMS,
+        FcmpPlusPlus,
+        fcmps::TreeRoot,
+    };
+    use ciphersuite::{
+        group::{Group, GroupEncoding, ff::PrimeField},
+        Ciphersuite, Ed25519, Selene, Helios,
+    };
+    use dalek_ff_group::EdwardsPoint as DfgPoint;
+    use generalized_bulletproofs::Generators;
+
+    if tree_root.is_null() || proof_data.is_null() || key_image.is_null() ||
+       pseudo_out.is_null() || tx_hash.is_null() {
+        return FCMP_ERROR_INVALID_PARAM;
+    }
+    if num_layers == 0 || proof_len == 0 {
+        return FCMP_ERROR_INVALID_PARAM;
+    }
+
+    // Parse the tree root (Selene point for odd num_layers, Helios for even).
+    let mut root_arr = [0u8; 32];
+    root_arr.copy_from_slice(slice::from_raw_parts(tree_root, 32));
+
+    let tree: TreeRoot<<monero_fcmp_plus_plus::Curves as monero_fcmp_plus_plus::fcmps::FcmpCurves>::C1,
+                        <monero_fcmp_plus_plus::Curves as monero_fcmp_plus_plus::fcmps::FcmpCurves>::C2> =
+        if num_layers % 2 == 1 {
+            // Odd number of layers → root is on C1 = Selene.
+            let pt: <Selene as Ciphersuite>::G =
+                match Option::from(<Selene as Ciphersuite>::G::from_bytes(&root_arr)) {
+                    Some(p) => p,
+                    None => return FCMP_ERROR_INVALID_POINT,
+                };
+            TreeRoot::C1(pt)
+        } else {
+            // Even number of layers → root is on C2 = Helios.
+            let pt: <Helios as Ciphersuite>::G =
+                match Option::from(<Helios as Ciphersuite>::G::from_bytes(&root_arr)) {
+                    Some(p) => p,
+                    None => return FCMP_ERROR_INVALID_POINT,
+                };
+            TreeRoot::C2(pt)
+        };
+
+    // Parse key image.
+    let mut ki_arr = [0u8; 32];
+    ki_arr.copy_from_slice(slice::from_raw_parts(key_image, 32));
+    let ki_pt: <Ed25519 as Ciphersuite>::G =
+        match Option::from(DfgPoint::from_bytes(&ki_arr)) {
+            Some(p) => p,
+            None => return FCMP_ERROR_INVALID_POINT,
+        };
+
+    // Parse pseudo-out (C_tilde).
+    let mut pseudo_arr = [0u8; 32];
+    pseudo_arr.copy_from_slice(slice::from_raw_parts(pseudo_out, 32));
+
+    // Parse tx hash.
+    let mut tx_hash_arr = [0u8; 32];
+    tx_hash_arr.copy_from_slice(slice::from_raw_parts(tx_hash, 32));
+
+    // Deserialise the proof.  FcmpPlusPlus::read takes the pseudo-out as C_tilde.
+    let proof_bytes = slice::from_raw_parts(proof_data, proof_len);
+    let mut reader: &[u8] = proof_bytes;
+    let pp = match FcmpPlusPlus::read(&[pseudo_arr], num_layers, &mut reader) {
+        Ok(p) => p,
+        Err(_) => return FCMP_ERROR_PROOF_VERIFICATION,
+    };
+
+    // Create batch verifiers.
+    let mut ed_verifier = multiexp::BatchVerifier::<(), <Ed25519 as Ciphersuite>::G>::new(1);
+    let mut c1_verifier = Generators::<Selene>::batch_verifier();
+    let mut c2_verifier = Generators::<Helios>::batch_verifier();
+
+    // Queue verification (fills the batch verifiers).
+    if pp
+        .verify(
+            &mut OsRng,
+            &mut ed_verifier,
+            &mut c1_verifier,
+            &mut c2_verifier,
+            tree,
+            num_layers,
+            tx_hash_arr,
+            vec![ki_pt],
+        )
+        .is_err()
+    {
+        return FCMP_ERROR_PROOF_VERIFICATION;
+    }
+
+    // Flush the batch verifiers.
+    if ed_verifier.verify_vartime()
+        && SELENE_GENERATORS().verify(c1_verifier)
+        && HELIOS_GENERATORS().verify(c2_verifier)
+    {
+        FCMP_SUCCESS
+    } else {
+        FCMP_ERROR_PROOF_VERIFICATION
+    }
+}
+
+/// Compute the Selene (C1) tree root from a leaf branch for a 1-layer tree.
+///
+/// `leaves_data` points to `num_leaves` × 96 bytes (O‖I‖C for each output, each 32-byte
+/// compressed Ed25519).  The computed Selene root is written as 32 compressed bytes to
+/// `root_out`.
+///
+/// This mirrors the root computation inside `Fcmp::prove` for a single leaf branch, and must
+/// be used to obtain the `tree_root` value passed to `fcmp_verify_full`.
+///
+/// # Safety
+/// All pointers must be valid for the described lengths.
+#[no_mangle]
+pub unsafe extern "C" fn fcmp_compute_leaf_root(
+    root_out: *mut u8,       // 32 bytes output
+    leaves_data: *const u8,  // num_leaves * 96 bytes
+    num_leaves: usize,
+) -> i32 {
+    use monero_fcmp_plus_plus::{
+        SELENE_GENERATORS, SELENE_HASH_INIT,
+        Output as MoneroOutput,
+        fcmps::LAYER_ONE_LEN,
+    };
+    use ciphersuite::{group::{Group, GroupEncoding}, Ciphersuite, Ed25519, Selene};
+    use dalek_ff_group::EdwardsPoint as DfgPoint;
+    use ec_divisors::DivisorCurve;
+    use multiexp::multiexp_vartime;
+
+    if root_out.is_null() || leaves_data.is_null() {
+        return FCMP_ERROR_INVALID_PARAM;
+    }
+    if num_leaves == 0 || num_leaves > LAYER_ONE_LEN {
+        return FCMP_ERROR_INVALID_PARAM;
+    }
+
+    let all_leaf_bytes = slice::from_raw_parts(leaves_data, num_leaves * 96);
+
+    // Flatten to Selene field elements: 6 per output (Ox, Oy, Ix, Iy, Cx, Cy).
+    // to_xy() on an Ed25519 point yields (Selene::F, Selene::F).
+    let mut scalars: Vec<<Selene as Ciphersuite>::F> = Vec::with_capacity(num_leaves * 6);
+
+    for i in 0..num_leaves {
+        let base = i * 96;
+        let mut o_arr = [0u8; 32];
+        let mut ii_arr = [0u8; 32];
+        let mut c_arr = [0u8; 32];
+        o_arr.copy_from_slice(&all_leaf_bytes[base..base + 32]);
+        ii_arr.copy_from_slice(&all_leaf_bytes[base + 32..base + 64]);
+        c_arr.copy_from_slice(&all_leaf_bytes[base + 64..base + 96]);
+
+        let O: DfgPoint = match Option::from(DfgPoint::from_bytes(&o_arr)) {
+            Some(p) => p,
+            None => return FCMP_ERROR_INVALID_POINT,
+        };
+        let I: DfgPoint = match Option::from(DfgPoint::from_bytes(&ii_arr)) {
+            Some(p) => p,
+            None => return FCMP_ERROR_INVALID_POINT,
+        };
+        let C: DfgPoint = match Option::from(DfgPoint::from_bytes(&c_arr)) {
+            Some(p) => p,
+            None => return FCMP_ERROR_INVALID_POINT,
+        };
+
+        // Decompose each point into its (x, y) field elements on the Selene field.
+        let (ox, oy) = match <Ed25519 as Ciphersuite>::G::to_xy(O) {
+            Some(c) => c,
+            None => return FCMP_ERROR_INVALID_POINT,
+        };
+        let (ix, iy) = match <Ed25519 as Ciphersuite>::G::to_xy(I) {
+            Some(c) => c,
+            None => return FCMP_ERROR_INVALID_POINT,
+        };
+        let (cx, cy) = match <Ed25519 as Ciphersuite>::G::to_xy(C) {
+            Some(c) => c,
+            None => return FCMP_ERROR_INVALID_POINT,
+        };
+
+        scalars.extend_from_slice(&[ox, oy, ix, iy, cx, cy]);
+    }
+
+    // Zip non-zero field elements with the first generators in g_bold (identical to
+    // what Fcmp::prove computes for the leaf-branch root).
+    let g_bold = SELENE_GENERATORS().g_bold_slice();
+    let pairs: Vec<_> = scalars
+        .iter()
+        .copied()
+        .zip(g_bold.iter().copied())
+        .filter(|(s, _)| bool::from(!ciphersuite::group::ff::Field::is_zero(s)))
+        .collect();
+
+    let root: <Selene as Ciphersuite>::G = SELENE_HASH_INIT() + multiexp_vartime(&pairs);
+    let root_bytes = root.to_bytes();
+    ptr::copy_nonoverlapping(root_bytes.as_ptr(), root_out, 32);
+
+    FCMP_SUCCESS
+}
+
+// ============================================================================
 // Utility Functions
 // ============================================================================
 
@@ -903,7 +1301,7 @@ pub unsafe extern "C" fn fcmp_verify(
 /// Pointer to a null-terminated version string
 #[no_mangle]
 pub extern "C" fn fcmp_version() -> *const i8 {
-    b"0.1.0\0".as_ptr() as *const i8
+    b"0.2.0\0".as_ptr() as *const i8
 }
 
 /// Get error message for an error code

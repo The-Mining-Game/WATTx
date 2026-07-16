@@ -337,8 +337,10 @@ bool ContextualCheckPrivacyTransaction(
             }
         }
 
-        // Verify range proofs
-        if (!outputCommitments.empty() && tx.aggregatedRangeProof.IsValid()) {
+        // Verify range proofs. SECURITY: mandatory when confidential outputs exist;
+        // the prior `&& tx.aggregatedRangeProof.IsValid()` gate let an attacker skip
+        // the check by omitting the proof (inflation path). Now absent/invalid fails.
+        if (!outputCommitments.empty()) {
             if (!VerifyAggregatedRangeProof(outputCommitments, tx.aggregatedRangeProof)) {
                 return state.Invalid(TxValidationResult::TX_CONSENSUS,
                     "privacy-invalid-range-proof");

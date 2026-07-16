@@ -592,10 +592,10 @@ bool VerifyRangeProof(
         return false;
     }
 
-    // Check for legacy placeholder marker (for backwards compatibility during transition)
-    if (rangeProof.data.back() == 0xFF && rangeProof.data.size() == 33) {
-        return true; // Accept placeholder during transition period
-    }
+    // SECURITY: the "legacy placeholder" bypass that returned true for a 33-byte
+    // 0xFF proof was an unconditional inflation backdoor (any output could claim a
+    // valid range without proving it). Removed — every commitment must present a
+    // real, cryptographically verified range proof. A stub proof is now rejected.
 
     // Version 1 proof: 1 + 33 + 33 + 33 + 33 + 32 + 32 + 32 = 229 bytes minimum
     if (rangeProof.data.size() < 229 || rangeProof.data[0] != 0x01) {
@@ -860,10 +860,8 @@ bool VerifyAggregatedRangeProof(
         return false;
     }
 
-    // Check for legacy placeholder marker
-    if (rangeProof.data.back() == 0xFE && rangeProof.data.size() == 33) {
-        return true; // Accept placeholder during transition
-    }
+    // SECURITY: removed the 0xFE 33-byte placeholder bypass — it accepted any
+    // aggregated range proof without verification (inflation backdoor).
 
     // Version 2: aggregated proof
     if (rangeProof.data[0] != 0x02 || rangeProof.data.size() < 2) {

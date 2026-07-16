@@ -318,8 +318,11 @@ bool CPrivacyTransaction::Verify() const
             }
         }
 
-        // Verify range proofs
-        if (!outputCommitments.empty() && aggregatedRangeProof.IsValid()) {
+        // Verify range proofs. SECURITY: mandatory whenever confidential outputs
+        // exist — the previous `&& aggregatedRangeProof.IsValid()` gate let an
+        // attacker SKIP verification by simply omitting the proof, allowing an
+        // out-of-range output to mint. Absent/empty proof now rejects the tx.
+        if (!outputCommitments.empty()) {
             if (!VerifyAggregatedRangeProof(outputCommitments, aggregatedRangeProof)) {
                 return false;
             }
@@ -382,8 +385,10 @@ bool CPrivacyTransaction::VerifyFcmp() const
             return false;
         }
 
-        // 7. Verify range proofs
-        if (aggregatedRangeProof.IsValid()) {
+        // 7. Verify range proofs. SECURITY: mandatory when outputs exist — omitting
+        // the proof must NOT skip the check (that was an inflation path). An empty
+        // or invalid aggregated proof now fails the transaction.
+        if (!outputCommitments.empty()) {
             if (!VerifyAggregatedRangeProof(outputCommitments, aggregatedRangeProof)) {
                 LogPrintf("FCMP Verify: FAILED - range proof verification failed\n");
                 return false;

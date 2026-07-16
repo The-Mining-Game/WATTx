@@ -21,10 +21,15 @@ PedersenGenerators::PedersenGenerators()
     m_G = Point::BasePoint();
 
     // H is derived by hashing G
-    std::vector<uint8_t> h_seed;
-    h_seed.insert(h_seed.end(), m_seed.begin(), m_seed.end());
-    h_seed.push_back('H');
-    m_H = Point::HashToPoint(h_seed);
+    // H is MONERO's value generator (H = keccak256(G) -> point -> *cofactor), hardcoded
+    // as its compressed bytes so C++ Pedersen commitments match the ported Monero
+    // Bulletproofs+ (rct::H) and the Rust fcmp_pedersen_commit EXACTLY. Was a custom
+    // HashToPoint H — inconsistent with the range proof and the wallet, which is the
+    // whole reason the FCMP amount layer couldn't verify. Do not change.
+    static const uint8_t MONERO_H[32] = {
+        0x8b,0x65,0x59,0x70,0x15,0x37,0x99,0xaf,0x2a,0xea,0xdc,0x9f,0xf1,0xad,0xd0,0xea,
+        0x6c,0x72,0x51,0xd5,0x41,0x54,0xcf,0xa9,0x2c,0x17,0x3a,0x0d,0xd3,0x9c,0x1f,0x94};
+    m_H = Point(MONERO_H);
 
     // Pre-generate some vector generators
     DeriveGenerators(64);
@@ -34,10 +39,15 @@ PedersenGenerators::PedersenGenerators(const std::string& seed)
     : m_seed(seed) {
     m_G = Point::BasePoint();
 
-    std::vector<uint8_t> h_seed;
-    h_seed.insert(h_seed.end(), m_seed.begin(), m_seed.end());
-    h_seed.push_back('H');
-    m_H = Point::HashToPoint(h_seed);
+    // H is MONERO's value generator (H = keccak256(G) -> point -> *cofactor), hardcoded
+    // as its compressed bytes so C++ Pedersen commitments match the ported Monero
+    // Bulletproofs+ (rct::H) and the Rust fcmp_pedersen_commit EXACTLY. Was a custom
+    // HashToPoint H — inconsistent with the range proof and the wallet, which is the
+    // whole reason the FCMP amount layer couldn't verify. Do not change.
+    static const uint8_t MONERO_H[32] = {
+        0x8b,0x65,0x59,0x70,0x15,0x37,0x99,0xaf,0x2a,0xea,0xdc,0x9f,0xf1,0xad,0xd0,0xea,
+        0x6c,0x72,0x51,0xd5,0x41,0x54,0xcf,0xa9,0x2c,0x17,0x3a,0x0d,0xd3,0x9c,0x1f,0x94};
+    m_H = Point(MONERO_H);
 
     DeriveGenerators(64);
 }
@@ -95,11 +105,13 @@ PedersenCommitment PedersenCommitment::Commit(const Scalar& value) {
 PedersenCommitment PedersenCommitment::Commit(const Scalar& value, const Scalar& blinding) {
     PedersenGenerators& gens = PedersenGenerators::Default();
 
-    // C = v*G + r*H
-    Point vG = gens.G() * value;
-    Point rH = gens.H() * blinding;
+    // C = v*H + r*G  (Monero convention: VALUE on H, BLINDING on G). This matches
+    // Monero Bulletproofs+ and fcmp_pedersen_commit, so a commitment made here can be
+    // range-proven and balance-checked consistently. (Was v*G + r*H — reversed.)
+    Point vH = gens.H() * value;
+    Point rG = gens.G() * blinding;
 
-    return PedersenCommitment(vG + rH);
+    return PedersenCommitment(vH + rG);
 }
 
 PedersenCommitment PedersenCommitment::CommitAmount(uint64_t amount) {
@@ -190,8 +202,8 @@ bool PedersenOpening::Verify(const PedersenCommitment& commitment) const {
 }
 
 bool PedersenOpening::Verify(const PedersenCommitment& commitment, const PedersenGenerators& gens) const {
-    // Check: C == v*G + r*H
-    Point expected = gens.G() * value + gens.H() * blinding;
+    // Check: C == v*H + r*G  (must match Commit's Monero convention above).
+    Point expected = gens.H() * value + gens.G() * blinding;
     return expected == commitment.GetPoint();
 }
 

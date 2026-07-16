@@ -1,6 +1,6 @@
 [package]
 name = "wattx-fcmp"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "FCMP++ (Full-Chain Membership Proofs) FFI library for WATTx"
 license = "MIT"
@@ -11,30 +11,31 @@ name = "wattx_fcmp"
 crate-type = ["staticlib", "cdylib"]
 
 [dependencies]
-# Core dependencies from FCMP++
 rand_core = { version = "0.6", features = ["getrandom"] }
 zeroize = { version = "1.5", features = ["zeroize_derive"] }
-
-# Crypto dependencies
 blake2 = "0.10"
 subtle = "2"
-
-# Group/field traits
 ff = { version = "0.13", features = ["bits"] }
 group = "0.13"
-
-# Ed25519 support
 curve25519-dalek = { version = "4", features = ["digest", "rand_core"] }
-
-# For FFI
 libc = "0.2"
 
-# Optional: full FCMP++ library (when available)
-# full-chain-membership-proofs = { path = "../../../../fcmp-research/fcmp-plus-plus/crypto/fcmps" }
-# helioselene = { path = "../../../../fcmp-research/fcmp-plus-plus/crypto/helioselene" }
+# Real FCMP++ library (full-chain-membership-proofs via monero-fcmp-plus-plus)
+monero-fcmp-plus-plus = { path = "../../../../../fcmp-research/fcmp-plus-plus/networks/monero/ringct/fcmp++" }
+dalek-ff-group          = { path = "../../../../../fcmp-research/fcmp-plus-plus/crypto/dalek-ff-group" }
+ciphersuite             = { path = "../../../../../fcmp-research/fcmp-plus-plus/crypto/ciphersuite", features = ["ed25519", "helioselene"] }
+ec-divisors             = { path = "../../../../../fcmp-research/fcmp-plus-plus/crypto/divisors", features = ["ed25519"] }
+multiexp                = { path = "../../../../../fcmp-research/fcmp-plus-plus/crypto/multiexp" }
+generalized-bulletproofs = { path = "../../../../../fcmp-research/fcmp-plus-plus/crypto/generalized-bulletproofs" }
+monero-generators       = { path = "../../../../../fcmp-research/fcmp-plus-plus/networks/monero/generators" }
 
 [build-dependencies]
 cbindgen = "0.26"
+
+[patch.crates-io]
+# Required by the fcmp-plus-plus workspace
+lazy_static = { git = "https://github.com/rust-lang-nursery/lazy-static.rs", rev = "5735630d46572f1e5377c8f2ba0f79d18f53b10c" }
+crypto-bigint = { git = "https://github.com/kayabaNerve/crypto-bigint", branch = "c-repr" }
 
 [profile.release]
 lto = true

@@ -49,6 +49,11 @@ target_link_libraries(wattx_privacy
         bitcoin_common
         leveldb
         ${SODIUM_LIBRARIES}
+    PRIVATE
+        # Ported Monero Bulletproofs+ (ed25519 range proofs). PRIVATE so only its
+        # clean bpplus_api.h (include/) is visible here — the internal Monero headers
+        # stay isolated and cannot collide with Bitcoin Core's span.h/crypto headers.
+        wattx_bpplus
 )
 
 # Add Boost include directory for headers used transitively (e.g. eth_client/FixedHash.h)
@@ -147,3 +152,8 @@ if(WATTX_FCMP_ENABLED)
 
     target_compile_options(test_fcmp PRIVATE ${SODIUM_CFLAGS_OTHER})
 endif()
+
+# NOTE: the ported Monero Bulletproofs+ (libwattx_bpplus) lives in the TOP-LEVEL
+# bpplus/ directory, NOT here — it must stay outside src/ so it does not inherit
+# src/'s global include_directories (its span.h / crypto headers collide with
+# Bitcoin Core's). See /bpplus/CMakeLists.txt.
