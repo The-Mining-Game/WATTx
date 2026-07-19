@@ -15,3 +15,6 @@ release-win64/
 *.tar.gz
 *.zip
 src/privacy/fcmp/rust/target/
+
+# Regtest runtime datadir used by auxpow tests (LevelDB/wallet churn)
+test/auxpow/wattx_regtest_data/
