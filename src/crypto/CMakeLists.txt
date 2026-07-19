@@ -37,10 +37,27 @@ add_library(bitcoin_crypto STATIC EXCLUDE_FROM_ALL
   ../support/cleanse.cpp
   # X25X multi-algorithm mining
   x25x/x25x.cpp
-  # sphlib for X11 algorithm
+  # sphlib for X11 algorithm (X25X native PoW; non-canonical, self-consistent)
   sphlib/x11.c
+  # Canonical Dash X11 for the X11 merged-mining parent path (dsph_* namespace).
+  # aes_helper.c is #included by echo.c/shavite.c, so it is NOT listed here.
+  x11dash/x11dash.c
+  x11dash/blake.c
+  x11dash/bmw.c
+  x11dash/groestl.c
+  x11dash/skein.c
+  x11dash/jh.c
+  x11dash/keccak.c
+  x11dash/luffa.c
+  x11dash/cubehash.c
+  x11dash/shavite.c
+  x11dash/simd.c
+  x11dash/echo.c
   # Equihash for ZCash-compatible mining
   equihash/equihash.cpp
+  equihash/equihash_canon.cpp
+  # Canonical Kaspa kHeavyHash for the kaspa merged-mining parent path
+  kheavyhash/kheavyhash.cpp
 )
 
 target_link_libraries(bitcoin_crypto
