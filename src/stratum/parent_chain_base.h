@@ -36,6 +36,7 @@ public:
 
     std::string GetName() const override { return m_config.name; }
     ParentChainAlgo GetAlgo() const override { return m_config.algo; }
+    const ParentChainConfig& GetConfig() const override { return m_config; }
     uint32_t GetChainId() const override { return m_config.chain_id; }
 
     std::string HttpPost(const std::string& path, const std::string& body) override {
@@ -125,6 +126,75 @@ public:
             return response.substr(body_start + 4);
         }
 
+        return response;
+    }
+
+    // Plain HTTP GET against the chain daemon/proxy (kaspa gRPC proxy speaks
+    // GET for templates). Same socket handling as HttpPost.
+    std::string HttpGet(const std::string& path) {
+        struct addrinfo hints{};
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+        std::string port_str = std::to_string(m_config.daemon_port);
+        struct addrinfo* res = nullptr;
+        if (getaddrinfo(m_config.daemon_host.c_str(), port_str.c_str(), &hints, &res) != 0 || !res) {
+            if (res) freeaddrinfo(res);
+            return "";
+        }
+        int sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+        if (sock < 0) {
+            freeaddrinfo(res);
+            return "";
+        }
+#ifdef WIN32
+        DWORD timeout_ms = 10000;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout_ms, sizeof(timeout_ms));
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeout_ms, sizeof(timeout_ms));
+#else
+        struct timeval tv;
+        tv.tv_sec = 10;
+        tv.tv_usec = 0;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+#endif
+        if (connect(sock, res->ai_addr, res->ai_addrlen) < 0) {
+            freeaddrinfo(res);
+#ifdef WIN32
+            closesocket(sock);
+#else
+            close(sock);
+#endif
+            return "";
+        }
+        freeaddrinfo(res);
+
+        std::ostringstream request;
+        request << "GET " << path << " HTTP/1.1\r\n";
+        request << "Host: " << m_config.daemon_host << ":" << m_config.daemon_port << "\r\n";
+        request << "Connection: close\r\n\r\n";
+        std::string req_str = request.str();
+        if (send(sock, req_str.c_str(), req_str.length(), 0) < 0) {
+#ifdef WIN32
+            closesocket(sock);
+#else
+            close(sock);
+#endif
+            return "";
+        }
+        std::string response;
+        char buffer[4096];
+        int bytes;
+        while ((bytes = recv(sock, buffer, sizeof(buffer) - 1, 0)) > 0) {
+            buffer[bytes] = '\0';
+            response += buffer;
+        }
+#ifdef WIN32
+        closesocket(sock);
+#else
+        close(sock);
+#endif
+        size_t body_start = response.find("\r\n\r\n");
+        if (body_start != std::string::npos) return response.substr(body_start + 4);
         return response;
     }
 

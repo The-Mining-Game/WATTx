@@ -8,8 +8,10 @@
 #include <stratum/parent_chain_bitcoin.h>
 #include <arith_uint256.h>
 
-// Forward declaration for X11 hash
-extern "C" void x11_hash(const void* input, size_t len, void* output);
+// Canonical Dash X11 (matches dashd/x11-hash-js) — the merged-mining parent
+// path must agree with the real Dash daemon, NOT src/crypto/sphlib/x11.c whose
+// sphlib is non-canonical (that one stays reserved for X25X's native PoW).
+#include <crypto/x11dash/x11dash.h>
 
 namespace merged_stratum {
 
@@ -23,7 +25,7 @@ public:
         std::vector<uint8_t> header_data = Serialize();
 
         uint256 hash;
-        x11_hash(header_data.data(), header_data.size(), hash.data());
+        x11_dash_hash(header_data.data(), header_data.size(), hash.data());
 
         return hash;
     }
@@ -42,7 +44,7 @@ public:
         const std::string& /* seed_hash */
     ) override {
         uint256 hash;
-        x11_hash(hashing_blob.data(), hashing_blob.size(), hash.data());
+        x11_dash_hash(hashing_blob.data(), hashing_blob.size(), hash.data());
         return hash;
     }
 

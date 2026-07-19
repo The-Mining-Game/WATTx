@@ -273,6 +273,13 @@ public:
         coinbase_data.reserve_offset = 0;
         coinbase_data.reserve_size = 32;
 
+        // Carry geth's EXACT boundary as the parent target (big-endian numeric,
+        // via FromHex). Deriving it from the integer difficulty above is only
+        // approximate and would make meets_parent fire on the wrong solutions;
+        // an exact target is what makes true dual-earning (one solution clears
+        // geth AND WATTx) correct.
+        coinbase_data.parent_target = target;
+
         LogPrintf("EthashChain: Got work at height %lu, seed: %s\n", height, m_seed_hash.substr(0, 16));
         return true;
     }

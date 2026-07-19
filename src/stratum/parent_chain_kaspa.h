@@ -7,135 +7,29 @@
 
 #include <stratum/parent_chain_base.h>
 #include <arith_uint256.h>
-#include <crypto/sha256.h>
-
-// kHeavyHash stub - TODO: implement actual kHeavyHash algorithm
-inline void kheavyhash(const void* input, size_t len, void* output) {
-    // Placeholder: use SHA256d until proper kHeavyHash is implemented
-    CSHA256 sha;
-    sha.Write(static_cast<const unsigned char*>(input), len);
-    unsigned char hash1[32];
-    sha.Finalize(hash1);
-    sha.Reset();
-    sha.Write(hash1, 32);
-    sha.Finalize(static_cast<unsigned char*>(output));
-}
+#include <crypto/kheavyhash/kheavyhash.h>
+#include <util/strencodings.h>
 
 namespace merged_stratum {
 
 /**
- * Kaspa block header
- * Kaspa uses a DAG-based BlockDAG structure, not a linear chain
- * This is simplified for merged mining purposes
- */
-class KaspaBlockHeader : public IParentBlockHeader {
-public:
-    uint16_t version{0};
-    std::vector<uint256> parentHashes;     // Multiple parents in DAG
-    uint256 hashMerkleRoot;
-    uint256 acceptedIdMerkleRoot;
-    uint256 utxoCommitment;
-    uint64_t timestamp{0};
-    uint32_t bits{0};
-    uint64_t nonce{0};                      // 64-bit nonce
-    uint256 daaScore;
-    uint64_t blueScore{0};
-    std::vector<uint8_t> blueWork;
-    std::vector<uint8_t> pruningPoint;
-
-    uint256 GetHash() const override {
-        // Kaspa uses blake2b for hashing
-        std::vector<uint8_t> data = Serialize();
-        return Hash(data);  // Simplified - should use blake2b
-    }
-
-    uint256 GetPoWHash() const override {
-        // Kaspa uses kHeavyHash
-        std::vector<uint8_t> prePoW = SerializePrePoW();
-
-        uint256 hash;
-        kheavyhash(prePoW.data(), prePoW.size(), hash.data());
-
-        return hash;
-    }
-
-    // Serialize the pre-PoW header (without nonce for mining)
-    std::vector<uint8_t> SerializePrePoW() const {
-        std::vector<uint8_t> data;
-        data.reserve(200);
-
-        // Version (2 bytes)
-        data.push_back(version & 0xFF);
-        data.push_back((version >> 8) & 0xFF);
-
-        // Parent count and hashes
-        uint64_t parent_count = parentHashes.size();
-        data.push_back(parent_count & 0xFF);
-        for (const auto& parent : parentHashes) {
-            data.insert(data.end(), parent.begin(), parent.end());
-        }
-
-        // Merkle roots
-        data.insert(data.end(), hashMerkleRoot.begin(), hashMerkleRoot.end());
-        data.insert(data.end(), acceptedIdMerkleRoot.begin(), acceptedIdMerkleRoot.end());
-        data.insert(data.end(), utxoCommitment.begin(), utxoCommitment.end());
-
-        // Timestamp (8 bytes)
-        for (int i = 0; i < 8; i++) {
-            data.push_back((timestamp >> (i * 8)) & 0xFF);
-        }
-
-        // Bits (4 bytes)
-        data.push_back(bits & 0xFF);
-        data.push_back((bits >> 8) & 0xFF);
-        data.push_back((bits >> 16) & 0xFF);
-        data.push_back((bits >> 24) & 0xFF);
-
-        return data;
-    }
-
-    std::vector<uint8_t> Serialize() const override {
-        std::vector<uint8_t> data = SerializePrePoW();
-
-        // Nonce (8 bytes)
-        for (int i = 0; i < 8; i++) {
-            data.push_back((nonce >> (i * 8)) & 0xFF);
-        }
-
-        // DAA score
-        data.insert(data.end(), daaScore.begin(), daaScore.end());
-
-        // Blue score (8 bytes)
-        for (int i = 0; i < 8; i++) {
-            data.push_back((blueScore >> (i * 8)) & 0xFF);
-        }
-
-        // Blue work and pruning point
-        data.push_back(blueWork.size() & 0xFF);
-        data.insert(data.end(), blueWork.begin(), blueWork.end());
-
-        data.push_back(pruningPoint.size() & 0xFF);
-        data.insert(data.end(), pruningPoint.begin(), pruningPoint.end());
-
-        return data;
-    }
-
-    uint32_t GetNonce() const override {
-        return static_cast<uint32_t>(nonce & 0xFFFFFFFF);
-    }
-
-    void SetNonce(uint32_t n) override {
-        nonce = n;
-    }
-
-    void SetNonce64(uint64_t n) {
-        nonce = n;
-    }
-};
-
-/**
- * Kaspa/kHeavyHash parent chain handler
- * Note: Kaspa uses a different RPC interface (gRPC/REST, not JSON-RPC)
+ * Kaspa / kHeavyHash parent chain handler — REAL merged mining via the kaspad
+ * gRPC proxy (tools/kaspa_grpc.js, HTTP front-end for protowire MessageStream).
+ *
+ * Design: kaspad itself builds the tagged coinbase — the WATTx merge-mining
+ * tag rides into GetBlockTemplate as extraData (hex-ASCII in the coinbase
+ * payload), so PrepareTaggedTemplate refetches per job once the tag is known.
+ * The proxy serves everything consensus needs: the keyed-blake2b BlockHash
+ * preimage (+ field offsets), the serialized coinbase (TransactionHash
+ * encoding) and its merkle branch, the pre-PoW hash, and the exact target.
+ * Submission is by templateId: the proxy patches the miner's nonce into its
+ * cached template and submits the real block over gRPC.
+ *
+ * Hashing blob (80 bytes, the kaspa miner form):
+ *   [0..32)  pre_pow_hash (BlockHash of header with nonce=0, ts=0)
+ *   [32..40) timestamp ms, LE
+ *   [40..72) zero padding
+ *   [72..80) nonce, LE (XMRig 4-byte nonces land in the low 4 bytes)
  */
 class KaspaChainHandler : public ParentChainHandlerBase {
 public:
@@ -150,143 +44,143 @@ public:
         uint64_t& difficulty,
         ParentCoinbaseData& coinbase_data
     ) override {
-        // Kaspa uses REST API for mining
-        // GET /info/getBlockTemplate
-        std::string response = HttpGet("/info/getBlockTemplate?payAddress=" + m_config.wallet_address);
-
+        std::string response = FetchTemplate("", coinbase_data);
         if (response.empty()) {
             LogPrintf("KaspaChain: Failed to get block template\n");
             return false;
         }
-
-        // Parse Kaspa-specific response format
-        std::string block_str = ParseJsonString(response, "block");
-        std::string header_str = ParseJsonString(block_str.empty() ? response : block_str, "header");
-
-        if (header_str.empty()) {
-            LogPrintf("KaspaChain: Invalid block template response\n");
-            return false;
-        }
-
-        // Parse header fields
-        m_current_header.version = 1;
-
-        std::string hash_merkle = ParseJsonString(header_str, "hashMerkleRoot");
-        if (!hash_merkle.empty()) {
-            m_current_header.hashMerkleRoot = uint256::FromHex(hash_merkle).value_or(uint256{});
-        }
-
-        std::string timestamp_str = ParseJsonString(header_str, "timestamp");
-        if (!timestamp_str.empty()) {
-            m_current_header.timestamp = std::stoull(timestamp_str);
-        }
-
-        std::string bits_str = ParseJsonString(header_str, "bits");
-        if (!bits_str.empty()) {
-            m_current_header.bits = std::stoul(bits_str);
-        }
-
-        // Build hashing blob
-        auto pre_pow = m_current_header.SerializePrePoW();
-        hashing_blob = HexStr(pre_pow);
-
+        hashing_blob = BuildBlobFromData(coinbase_data, 0);
         full_template = response;
         seed_hash = "";
-        height = 0;  // Kaspa doesn't have traditional height
-        difficulty = 1;  // TODO: parse from response
+        // daaScore is the closest thing to a height — the poller uses it for
+        // "parent advanced" detection, which is exactly what daaScore tracks.
+        height = m_last_daa_score;
+        difficulty = 1;
+        return true;
+    }
 
-        LogPrintf("KaspaChain: Got block template\n");
+    bool PrepareTaggedTemplate(
+        ParentCoinbaseData& coinbase_data,
+        const std::vector<uint8_t>& merge_mining_tag
+    ) override {
+        // extraData must be a protobuf `string` (UTF-8), so the raw 34-byte tag
+        // travels hex-encoded; kaspad embeds those 68 ASCII bytes verbatim in
+        // the coinbase payload. Consensus searches for the same ASCII form.
+        std::string response = FetchTemplate(HexStr(merge_mining_tag), coinbase_data);
+        if (response.empty()) {
+            LogPrintf("KaspaChain: tagged template fetch failed — job keeps untagged template\n");
+            return false;
+        }
         return true;
     }
 
     bool ParseBlockTemplate(
-        const std::string& template_blob,
-        ParentCoinbaseData& coinbase_data
+        const std::string& /*template_blob*/,
+        ParentCoinbaseData& /*coinbase_data*/
     ) override {
-        // Kaspa doesn't have traditional coinbase transactions
-        // It uses coinbase outputs in a different structure
-        return true;
+        return true;  // FetchTemplate parses everything already
     }
 
     std::string BuildHashingBlob(
-        const ParentCoinbaseData& /*coinbase_data*/,
-        const std::vector<uint8_t>& merge_mining_tag
+        const ParentCoinbaseData& coinbase_data,
+        const std::vector<uint8_t>& /*merge_mining_tag*/
     ) override {
-        // Commit the mined header to the synthetic coinbase carrying the WATTx
-        // merge-mining tag (CreateAuxPow rebuilds the identical coinbase). We hash
-        // the full serialization (nonce=0) so blob and parentHeaderRaw differ only
-        // in the nonce region the miner grinds — required since the kHeavyHash PoW
-        // check currently falls back to SHA256d over parentHeaderRaw.
-        CMutableTransaction cb = BuildAuxMergedCoinbase(merge_mining_tag, m_current_header.blueScore);
-        KaspaBlockHeader header = m_current_header;
-        header.hashMerkleRoot = CTransaction(cb).GetHash();
-        header.SetNonce(0);
-        return HexStr(header.Serialize());
+        // The tag is already inside the template coinbase (PrepareTaggedTemplate).
+        return BuildBlobFromData(coinbase_data, 0);
     }
 
     uint256 CalculatePoWHash(
         const std::vector<uint8_t>& hashing_blob,
-        const std::string& /* seed_hash */
+        const std::string& /*seed_hash*/
     ) override {
         uint256 hash;
-        kheavyhash(hashing_blob.data(), hashing_blob.size(), hash.data());
-        return hash;
+        if (hashing_blob.size() != 80) {
+            std::memset(hash.begin(), 0xFF, 32);  // fail closed
+            return hash;
+        }
+        uint64_t ts, nonce;
+        std::memcpy(&ts, hashing_blob.data() + 32, 8);
+        std::memcpy(&nonce, hashing_blob.data() + 72, 8);
+        kheavyhash::Pow(hashing_blob.data(), ts, nonce, hash.begin());
+        return hash;  // kaspa compares LE, same convention as UintToArith256
     }
 
     std::unique_ptr<IParentBlockHeader> BuildBlockHeader(
-        const ParentCoinbaseData& coinbase_data,
-        uint32_t nonce
+        const ParentCoinbaseData& /*coinbase_data*/,
+        uint32_t /*nonce*/
     ) override {
-        auto header = std::make_unique<KaspaBlockHeader>(m_current_header);
-        header->SetNonce(nonce);
-        return header;
+        return nullptr;  // kaspa submits by templateId, never by rebuilt header
     }
 
+    // block_blob = "templateId:nonce_decimal" (built by the ValidateShare
+    // KHEAVYHASH branch). The proxy patches its cached template and submits
+    // the real block to kaspad over gRPC.
     bool SubmitBlock(const std::string& block_blob) override {
-        // Kaspa uses POST /mining/submitBlock
-        std::string body = "{\"block\":\"" + block_blob + "\"}";
+        size_t colon = block_blob.find(':');
+        if (colon == std::string::npos) return false;
+        std::string body = "{\"templateId\":\"" + block_blob.substr(0, colon) +
+                           "\",\"nonce\":\"" + block_blob.substr(colon + 1) + "\"}";
         std::string response = HttpPost("/mining/submitBlock", body);
-        return response.find("\"error\"") == std::string::npos;
+        return response.find("\"accepted\":true") != std::string::npos;
     }
 
     CAuxPow CreateAuxPow(
-        const CBlockHeader& wattx_header,
+        const CBlockHeader& /*wattx_header*/,
         const ParentCoinbaseData& coinbase_data,
         uint32_t nonce,
-        const std::vector<uint8_t>& merge_mining_tag,
-        const std::string& /*extra_data*/ = ""
+        const std::vector<uint8_t>& /*merge_mining_tag*/,
+        const std::string& extra_data = ""
     ) override {
         CAuxPow proof;
-
-        // Rebuild the SAME synthetic coinbase committed by the mined header so its
-        // txid is the merkle root of both, and include the nonce in parentHeaderRaw
-        // so the (placeholder SHA256d) PoW check actually depends on the nonce.
-        CMutableTransaction cb = BuildAuxMergedCoinbase(merge_mining_tag, m_current_header.blueScore);
-        uint256 merkle_root = CTransaction(cb).GetHash();
-
-        KaspaBlockHeader parent_header = m_current_header;
-        parent_header.hashMerkleRoot = merkle_root;
-        parent_header.SetNonce(nonce);
-
-        // parentBlock: merkle_root for Check(), timestamp for time validation
-        proof.parentBlock.timestamp   = parent_header.timestamp;
-        proof.parentBlock.merkle_root = merkle_root;
-
-        proof.parentAlgoId    = static_cast<uint8_t>(AuxPowAlgo::KHEAVYHASH);
-        proof.parentHeaderRaw = parent_header.Serialize();  // includes nonce
-
-        proof.coinbaseTxMut = cb;
-        proof.coinbaseBranch.vHash.clear();
-        proof.coinbaseBranch.nIndex = 0;
+        proof.parentAlgoId = static_cast<uint8_t>(AuxPowAlgo::KHEAVYHASH);
         proof.nChainId = m_config.chain_id;
 
+        // Patch the winning nonce into the preimage. extra_data carries the
+        // submitted nonce bytes verbatim (LE, up to 8); fall back to the u32.
+        std::vector<uint8_t> preimage = coinbase_data.kaspa_preimage;
+        kheavyhash::HeaderPreimageInfo info;
+        if (!preimage.empty() &&
+            kheavyhash::ParseHeaderPreimage(preimage.data(), preimage.size(), info)) {
+            std::vector<uint8_t> nb = ParseHex(extra_data);
+            if (nb.empty()) {
+                nb = {static_cast<uint8_t>(nonce & 0xFF),
+                      static_cast<uint8_t>((nonce >> 8) & 0xFF),
+                      static_cast<uint8_t>((nonce >> 16) & 0xFF),
+                      static_cast<uint8_t>((nonce >> 24) & 0xFF)};
+            }
+            std::memset(preimage.data() + info.nonce_off, 0, 8);
+            std::memcpy(preimage.data() + info.nonce_off, nb.data(),
+                        std::min<size_t>(nb.size(), 8));
+            std::memcpy(proof.parentBlock.merkle_root.begin(),
+                        preimage.data() + info.merkle_root_off, 32);
+        }
+
+        // parentHeaderRaw = [u32 pre_len][preimage][u32 cb_len][coinbase][u8 n][32B x n]
+        std::vector<uint8_t>& raw = proof.parentHeaderRaw;
+        auto put_u32 = [&raw](uint32_t v) {
+            raw.push_back(v & 0xFF); raw.push_back((v >> 8) & 0xFF);
+            raw.push_back((v >> 16) & 0xFF); raw.push_back((v >> 24) & 0xFF);
+        };
+        put_u32(static_cast<uint32_t>(preimage.size()));
+        raw.insert(raw.end(), preimage.begin(), preimage.end());
+        put_u32(static_cast<uint32_t>(coinbase_data.coinbase_tx.size()));
+        raw.insert(raw.end(), coinbase_data.coinbase_tx.begin(), coinbase_data.coinbase_tx.end());
+        raw.push_back(static_cast<uint8_t>(coinbase_data.merkle_branch.size()));
+        for (const auto& h : coinbase_data.merkle_branch) {
+            raw.insert(raw.end(), h.begin(), h.end());
+        }
+
+        // kaspa timestamps are MILLISECONDS; parentBlock.timestamp only feeds the
+        // parent-vs-aux time-window sanity check (seconds) — the PoW itself uses
+        // the ms value inside the preimage.
+        proof.parentBlock.timestamp = coinbase_data.kaspa_timestamp / 1000;
+        proof.coinbaseBranch.vHash = coinbase_data.merkle_branch;
+        proof.coinbaseBranch.nIndex = 0;
         return proof;
     }
 
     uint256 DifficultyToTarget(uint64_t difficulty) override {
         if (difficulty == 0) difficulty = 1;
-
-        // Kaspa uses different difficulty encoding
         uint256 max_target;
         std::memset(max_target.data(), 0xff, 32);
         arith_uint256 target = UintToArith256(max_target) / difficulty;
@@ -294,75 +188,82 @@ public:
     }
 
 private:
-    std::string HttpGet(const std::string& path) {
-        // Simple HTTP GET (Kaspa uses REST, not JSON-RPC)
-        int sock = socket(AF_INET, SOCK_STREAM, 0);
-        if (sock < 0) return "";
+    uint64_t m_last_daa_score{0};
 
-#ifdef WIN32
-        DWORD timeout_ms = 10000;
-        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout_ms, sizeof(timeout_ms));
-#else
-        struct timeval tv;
-        tv.tv_sec = 10;
-        tv.tv_usec = 0;
-        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-#endif
+    // Fetch a template from the proxy (optionally tagged) and snapshot every
+    // field the job/consensus path needs into coinbase_data. Returns the raw
+    // response, empty on failure.
+    std::string FetchTemplate(const std::string& extra_data_hex,
+                              ParentCoinbaseData& cb) {
+        std::string path = "/info/getBlockTemplate?payAddress=" + m_config.wallet_address;
+        if (!extra_data_hex.empty()) path += "&extraData=" + extra_data_hex;
+        std::string response = HttpGet(path);
+        if (response.empty()) return "";
 
-        struct sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(m_config.daemon_port);
-
-        struct hostent* he = gethostbyname(m_config.daemon_host.c_str());
-        if (!he) {
-#ifdef WIN32
-            closesocket(sock);
-#else
-            close(sock);
-#endif
-            return "";
-        }
-        std::memcpy(&addr.sin_addr, he->h_addr, he->h_length);
-
-        if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-#ifdef WIN32
-            closesocket(sock);
-#else
-            close(sock);
-#endif
+        std::string template_id = ParseJsonString(response, "templateId");
+        std::string preimage_hex = ParseJsonString(response, "headerPreimage");
+        std::string prepow_hex = ParseJsonString(response, "prePowHash");
+        std::string coinbase_hex = ParseJsonString(response, "coinbaseSer");
+        std::string target_hex = ParseJsonString(response, "target");
+        std::string ts_str = ParseJsonString(response, "timestampMs");
+        std::string daa_str = ParseJsonString(response, "daaScore");
+        if (template_id.empty() || preimage_hex.empty() || prepow_hex.empty() ||
+            coinbase_hex.empty() || target_hex.empty() || ts_str.empty()) {
+            LogPrintf("KaspaChain: template response missing fields\n");
             return "";
         }
 
-        std::ostringstream request;
-        request << "GET " << path << " HTTP/1.1\r\n";
-        request << "Host: " << m_config.daemon_host << "\r\n";
-        request << "Connection: close\r\n\r\n";
+        cb.kaspa_template_id = template_id;
+        cb.kaspa_preimage = ParseHex(preimage_hex);
+        cb.coinbase_tx = ParseHex(coinbase_hex);
+        cb.kaspa_timestamp = strtoull(ts_str.c_str(), nullptr, 10);
+        if (!daa_str.empty()) m_last_daa_score = strtoull(daa_str.c_str(), nullptr, 10);
+        cb.parent_height = m_last_daa_score;
 
-        std::string req_str = request.str();
-        send(sock, req_str.c_str(), req_str.length(), 0);
+        // prePowHash / merkle branch are raw kaspa byte order — memcpy, never
+        // uint256::FromHex (which stores display-reversed).
+        std::vector<uint8_t> prepow = ParseHex(prepow_hex);
+        if (prepow.size() != 32) return "";
+        std::memcpy(cb.kaspa_prepow.begin(), prepow.data(), 32);
 
-        std::string response;
-        char buffer[4096];
-        int bytes;
-        while ((bytes = recv(sock, buffer, sizeof(buffer) - 1, 0)) > 0) {
-            buffer[bytes] = '\0';
-            response += buffer;
+        cb.merkle_branch.clear();
+        std::string branch_str = ParseJsonString(response, "merkleBranch");
+        size_t start = 0;
+        while (start < branch_str.size()) {
+            size_t comma = branch_str.find(',', start);
+            std::string one = branch_str.substr(start, comma == std::string::npos
+                                                       ? std::string::npos : comma - start);
+            std::vector<uint8_t> hb = ParseHex(one);
+            if (hb.size() == 32) {
+                uint256 h;
+                std::memcpy(h.begin(), hb.data(), 32);
+                cb.merkle_branch.push_back(h);
+            }
+            if (comma == std::string::npos) break;
+            start = comma + 1;
         }
 
-#ifdef WIN32
-        closesocket(sock);
-#else
-        close(sock);
-#endif
+        // Exact template target (numeric compare via UintToArith256).
+        cb.parent_target = uint256::FromHex(target_hex).value_or(uint256{});
 
-        size_t body_start = response.find("\r\n\r\n");
-        if (body_start != std::string::npos) {
-            return response.substr(body_start + 4);
+        // Sanity: preimage must parse and its merkle-root/ts fields must agree.
+        kheavyhash::HeaderPreimageInfo info;
+        if (!kheavyhash::ParseHeaderPreimage(cb.kaspa_preimage.data(),
+                                             cb.kaspa_preimage.size(), info)) {
+            LogPrintf("KaspaChain: proxy preimage failed structural parse\n");
+            return "";
         }
         return response;
     }
 
-    KaspaBlockHeader m_current_header;
+    std::string BuildBlobFromData(const ParentCoinbaseData& cb, uint64_t nonce) const {
+        std::vector<uint8_t> blob(80, 0);
+        std::memcpy(blob.data(), cb.kaspa_prepow.begin(), 32);
+        uint64_t ts = cb.kaspa_timestamp;
+        std::memcpy(blob.data() + 32, &ts, 8);
+        std::memcpy(blob.data() + 72, &nonce, 8);
+        return HexStr(blob);
+    }
 };
 
 }  // namespace merged_stratum

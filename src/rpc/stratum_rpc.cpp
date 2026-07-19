@@ -203,6 +203,10 @@ static RPCHelpMan startmultimergedstratum()
                             {"password", RPCArg::Type::STR, RPCArg::Default{""},   "RPC password"},
                             {"address",  RPCArg::Type::STR, RPCArg::Default{""},   "Pool wallet address on parent chain"},
                             {"chain_id", RPCArg::Type::NUM, RPCArg::Default{0},    "Chain ID for replay protection"},
+                            {"share_difficulty", RPCArg::Type::NUM, RPCArg::Default{0}, "Per-chain share difficulty override (0 = pool-global)"},
+                            {"share_nbits", RPCArg::Type::NUM, RPCArg::Default{0}, "Per-chain share target as nBits compact, overrides share_difficulty (0 = pool-global)"},
+                            {"equihash_n", RPCArg::Type::NUM, RPCArg::Default{0}, "Equihash N parameter override (with equihash_k; e.g. 144,5 mainnet BitcoinZ, 48,5 regtest)"},
+                            {"equihash_k", RPCArg::Type::NUM, RPCArg::Default{0}, "Equihash K parameter override (with equihash_n)"},
                         }
                     },
                 }
@@ -261,6 +265,18 @@ static RPCHelpMan startmultimergedstratum()
                 pc.daemon_password = c.exists("password") ? c["password"].get_str()        : "";
                 pc.wallet_address  = c.exists("address")  ? c["address"].get_str()         : "";
                 pc.chain_id        = c.exists("chain_id") ? c["chain_id"].getInt<int>()    : (int)i + 1;
+                if (c.exists("share_difficulty")) {
+                    pc.share_difficulty = static_cast<uint64_t>(c["share_difficulty"].getInt<int64_t>());
+                }
+                if (c.exists("share_nbits")) {
+                    pc.share_nbits = static_cast<uint32_t>(c["share_nbits"].getInt<int64_t>());
+                }
+                if (c.exists("equihash_n")) {
+                    pc.equihash_n = static_cast<uint32_t>(c["equihash_n"].getInt<int64_t>());
+                }
+                if (c.exists("equihash_k")) {
+                    pc.equihash_k = static_cast<uint32_t>(c["equihash_k"].getInt<int64_t>());
+                }
 
                 std::string algoStr = c["algo"].get_str();
                 auto it = algoMap.find(algoStr);

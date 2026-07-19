@@ -16,6 +16,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <map>
 #include <unordered_map>
 #include <vector>
 
@@ -186,6 +187,7 @@ enum class StratumProtocol {
     XMRIG,      // login / submit / getjob  (Monero-style, all algos default)
     BTC,        // mining.subscribe / mining.authorize / mining.submit
     ETHASH,     // eth_submitLogin / eth_getWork / eth_submitWork
+    ZCASH,      // NiceHash equihash: subscribe(nonce1)/set_target/notify/submit(nonce2,soln)
 };
 
 struct MultiMergedClient {
@@ -335,14 +337,34 @@ private:
     void HandleEthSubmitLogin(int client_id, const std::string& id, const std::vector<std::string>& params);
     void HandleEthGetWork(int client_id, const std::string& id);
     void HandleEthSubmitWork(int client_id, const std::string& id, const std::vector<std::string>& params);
+    // Zcash (NiceHash equihash) protocol — shares mining.subscribe/authorize/submit
+    // method names with BTC, routed by algo==EQUIHASH.
+    void HandleZcashSubscribe(int client_id, const std::string& id, const std::vector<std::string>& params);
+    void HandleZcashAuthorize(int client_id, const std::string& id, const std::vector<std::string>& params);
+    void HandleZcashSubmit(int client_id, const std::string& id, const std::vector<std::string>& params);
+    void SendZcashTarget(int client_id, const std::string& chain_name);
+    void SendZcashNotify(int client_id, const MultiAlgoJob& job, bool clean_jobs);
     // Shared helpers
     void SendMiningNotify(int client_id, const MultiAlgoJob& job, bool clean_jobs = false);
     void SendSetDifficulty(int client_id, double diff);
     std::string BuildBtcNotifyParams(const MultiAlgoJob& job, bool clean_jobs) const;
     static std::string MakeExtranonce1(int client_id);
+    // Algo of the port a client connected to (set at accept). Returns a
+    // sentinel-safe value if the client is gone.
+    ParentChainAlgo ClientAlgo(int client_id);
 
     // Job management
     void CreateJob(ParentChainAlgo algo);
+
+    // Per-chain share gate resolution: a parent chain's nonzero
+    // share_nbits/share_difficulty override the pool-global config values.
+    uint32_t EffectiveShareNbits(const std::string& chain_name) const;
+    uint64_t EffectiveShareDifficulty(const std::string& chain_name) const;
+    uint256 EffectiveShareTarget(const std::string& chain_name);
+    double EffectiveShareDiffNumber(const std::string& chain_name) const;
+    // Share target advertised in XMRig-protocol job pushes for the job's algo
+    // (falls back to the parent block target if the algo has no primary chain).
+    uint256 XmrigJobTarget(const MultiAlgoJob& job);
     // Build the payout-split WATTx coinbase: divides the block reward among the
     // currently-scored miners by reward_share (value-conserving). Returns the
     // template's default coinbase if no miners are scored yet.
@@ -379,6 +401,9 @@ private:
     std::atomic<bool> m_running{false};
     std::atomic<int64_t> m_started_at{0};
     std::unordered_map<ParentChainAlgo, int> m_listen_sockets;
+    // Actual bound port per algo, in enum order. m_listen_sockets iterates in
+    // arbitrary (hash) order, so ports must never be derived from its position.
+    std::map<ParentChainAlgo, uint16_t> m_algo_ports;
 
     // Threads
     std::vector<std::thread> m_accept_threads;

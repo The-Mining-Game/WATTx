@@ -4,8 +4,10 @@
 
 #include <stratum/multi_merged_stratum.h>
 #include <stratum/parent_chain_base.h>  // BuildAuxMergedCoinbase / BuildBitcoinHeader
+#include <stratum/parent_chain_equihash.h>  // Equihash share verify + coinbase bytes
 #include <arith_uint256.h>
 #include <auxpow/auxpow.h>
+#include <ethash/keccak.h>       // DAG-free ethash share verify (matches CAuxPow::Check)
 #include <addresstype.h>          // GetScriptForDestination, IsValidDestination
 #include <key_io.h>               // DecodeDestination
 #include <hash.h>
@@ -205,6 +207,7 @@ bool MultiMergedStratumServer::Start(const MultiMergedConfig& config, interfaces
         }
 
         m_listen_sockets[algo] = sock;
+        m_algo_ports[algo] = port;
         LogPrintf("MultiMergedStratum: Listening on port %d for %s\n",
                   port, ParentChainFactory::AlgoToString(algo));
 
@@ -271,6 +274,7 @@ void MultiMergedStratumServer::Stop() {
         }
     }
     m_listen_sockets.clear();
+    m_algo_ports.clear();
 
     // Disconnect clients
     {
@@ -329,12 +333,8 @@ size_t MultiMergedStratumServer::GetClientCount(ParentChainAlgo algo) const {
 }
 
 uint16_t MultiMergedStratumServer::GetPort(ParentChainAlgo algo) const {
-    int index = 0;
-    for (const auto& [a, sock] : m_listen_sockets) {
-        if (a == algo) return m_config.base_port + index;
-        index++;
-    }
-    return 0;
+    auto it = m_algo_ports.find(algo);
+    return it != m_algo_ports.end() ? it->second : 0;
 }
 
 MultiMergedStratumServer::Dashboard MultiMergedStratumServer::GetDashboard() const {
@@ -354,11 +354,10 @@ MultiMergedStratumServer::Dashboard MultiMergedStratumServer::GetDashboard() con
         {ParentChainAlgo::KHEAVYHASH, "kheavyhash"},
     };
 
-    int port_index = 0;
-    for (const auto& [algo, sock] : m_listen_sockets) {
+    for (const auto& [algo, port] : m_algo_ports) {
         AlgoStats as;
         as.algo = algoNames.count(algo) ? algoNames.at(algo) : "unknown";
-        as.port = m_config.base_port + port_index++;
+        as.port = port;
 
         // Find primary chain for this algo
         auto pri = m_algo_primary_chain.find(algo);
@@ -628,16 +627,28 @@ void MultiMergedStratumServer::HandleMessage(int client_id, const std::string& m
     } else if (method == "keepalived") {
         SendResult(client_id, id, "{\"status\":\"KEEPALIVED\"}");
 
-    // ── Bitcoin stratum protocol ───────────────────────────────────────────────
+    // ── Bitcoin / Zcash stratum protocol ───────────────────────────────────────
+    // mining.subscribe/authorize/submit method names are shared; the NiceHash
+    // equihash (Zcash) variant differs in wire format, so route by the algo of
+    // the port this client connected to.
     } else if (method == "mining.subscribe") {
         std::vector<std::string> params = ParseJsonArray(message, "params");
-        HandleSubscribe(client_id, id, params);
+        if (ClientAlgo(client_id) == ParentChainAlgo::EQUIHASH)
+            HandleZcashSubscribe(client_id, id, params);
+        else
+            HandleSubscribe(client_id, id, params);
     } else if (method == "mining.authorize") {
         std::vector<std::string> params = ParseJsonArray(message, "params");
-        HandleAuthorize(client_id, id, params);
+        if (ClientAlgo(client_id) == ParentChainAlgo::EQUIHASH)
+            HandleZcashAuthorize(client_id, id, params);
+        else
+            HandleAuthorize(client_id, id, params);
     } else if (method == "mining.submit") {
         std::vector<std::string> params = ParseJsonArray(message, "params");
-        HandleBtcSubmit(client_id, id, params);
+        if (ClientAlgo(client_id) == ParentChainAlgo::EQUIHASH)
+            HandleZcashSubmit(client_id, id, params);
+        else
+            HandleBtcSubmit(client_id, id, params);
     } else if (method == "mining.extranonce.subscribe") {
         // Acknowledge but we don't dynamically change extranonces
         SendResult(client_id, id, "true");
@@ -664,6 +675,13 @@ std::string MultiMergedStratumServer::MakeExtranonce1(int client_id) {
     char buf[9];
     snprintf(buf, sizeof(buf), "%08x", (uint32_t)client_id);
     return std::string(buf);
+}
+
+ParentChainAlgo MultiMergedStratumServer::ClientAlgo(int client_id) {
+    std::lock_guard<std::mutex> lock(m_clients_mutex);
+    auto it = m_clients.find(client_id);
+    if (it != m_clients.end() && it->second) return it->second->algo;
+    return ParentChainAlgo::SHA256D;  // harmless default for a vanished client
 }
 
 // Decompose the 80-byte hashing_blob (hex) into Bitcoin stratum mining.notify params.
@@ -840,14 +858,12 @@ void MultiMergedStratumServer::HandleAuthorize(int client_id, const std::string&
     }
     if (!job.job_id.empty()) {
         // Advertise the REAL pool share difficulty so standard miners submit
-        // shares that actually pass the ValidateShare gate (share_nbits is the
-        // regtest testing knob; production uses share_difficulty).
+        // shares that actually pass the ValidateShare gate — per-chain when the
+        // parent config overrides the pool-global setting.
         double diff = static_cast<double>(m_config.share_difficulty);
-        if (m_config.share_nbits != 0) {
-            arith_uint256 st, d1;
-            st.SetCompact(m_config.share_nbits);
-            d1.SetCompact(0x1d00ffff);
-            if (st != 0) diff = d1.getdouble() / st.getdouble();
+        auto adv_it = m_algo_primary_chain.find(algo);
+        if (adv_it != m_algo_primary_chain.end()) {
+            diff = EffectiveShareDiffNumber(adv_it->second);
         }
         SendSetDifficulty(client_id, diff);
         SendMiningNotify(client_id, job, true);
@@ -913,6 +929,15 @@ void MultiMergedStratumServer::HandleBtcSubmit(int client_id, const std::string&
     uint32_t ntime = static_cast<uint32_t>(strtoul(ntime_hex.c_str(), nullptr, 16));
     uint32_t nonce = static_cast<uint32_t>(strtoul(nonce_hex.c_str(), nullptr, 16));
 
+    // Bound ntime rolling to the standard pool window: no earlier than the
+    // job's template time, no more than 600s ahead of it. Unbounded ntime
+    // let a miner date parent blocks arbitrarily far into past/future.
+    uint32_t job_time = static_cast<uint32_t>(job.coinbase_data.parent_time);
+    if (ntime < job_time || ntime > job_time + 600) {
+        SendError(client_id, id, 23, "ntime out of range");
+        return;
+    }
+
     // Rebuild the miner's coinbase and header, hash server-side. Same dual path
     // as BuildBtcNotifyParams: real pool-paying coinbase when built, else synthetic.
     std::vector<uint8_t> en = ParseHex(extranonce1 + extranonce2);
@@ -946,6 +971,210 @@ void MultiMergedStratumServer::HandleBtcSubmit(int client_id, const std::string&
     std::string proto_extra = HexStr(en) + ":" + ntime_hex;
 
     bool valid = ValidateShare(client_id, job_id, nonce_le, result_hex, proto_extra);
+    if (valid) {
+        std::ostringstream oss;
+        oss << "{\"id\":" << id << ",\"result\":true,\"error\":null}\n";
+        SendToClient(client_id, oss.str());
+    } else {
+        SendError(client_id, id, 23, "Low difficulty share");
+    }
+}
+
+// ── Zcash (NiceHash equihash) stratum protocol ──────────────────────────────────
+// Wire format (nheqminer): the miner grinds the 32-byte header nonce, split into
+// a server-assigned prefix (extranonce1/nonce1) + a miner-chosen suffix (nonce2).
+//   subscribe  -> result:[session_id, nonce1_hex]
+//   set_target -> params:[target_be_64hex]
+//   notify     -> params:[job_id, version, prevhash, merkleroot, reserved, time, bits, clean]
+//                 (each field is the raw serialized-order hex sliced from the 140B
+//                  header blob; nheqminer concatenates them + nonce to rebuild it)
+//   submit     -> params:[worker, job_id, time, nonce2, solution(compactsize+bytes)]
+static constexpr size_t ZCASH_NONCE1_BYTES = 4;  // nonce2 = 28 bytes of grind space
+
+void MultiMergedStratumServer::HandleZcashSubscribe(int client_id, const std::string& id,
+                                                    const std::vector<std::string>& /*params*/) {
+    std::string session_id, nonce1;
+    {
+        std::lock_guard<std::mutex> lock(m_clients_mutex);
+        auto it = m_clients.find(client_id);
+        if (it == m_clients.end() || !it->second) return;
+        it->second->protocol   = StratumProtocol::ZCASH;
+        it->second->subscribed = true;
+        it->second->extranonce1 = MakeExtranonce1(client_id);  // 4 bytes = 8 hex
+        session_id = it->second->session_id;
+        nonce1     = it->second->extranonce1;
+    }
+    // result: [session_id, nonce1]. nheqminer reads result[1] as nonce1 and
+    // grinds the remaining 32 - len(nonce1) bytes as nonce2.
+    std::ostringstream oss;
+    oss << "{\"id\":" << id << ",\"result\":[\"" << session_id << "\",\""
+        << nonce1 << "\"],\"error\":null}\n";
+    SendToClient(client_id, oss.str());
+}
+
+void MultiMergedStratumServer::HandleZcashAuthorize(int client_id, const std::string& id,
+                                                    const std::vector<std::string>& params) {
+    // Login string identical to the other protocols: PARENT+WTX.worker
+    std::string login = params.size() >= 1 ? params[0] : "";
+    std::string parent_address, wtx_address, worker;
+    size_t plus_pos = login.find('+');
+    size_t dot_pos  = login.find('.');
+    if (plus_pos != std::string::npos) {
+        parent_address = login.substr(0, plus_pos);
+        if (dot_pos != std::string::npos && dot_pos > plus_pos) {
+            wtx_address = login.substr(plus_pos + 1, dot_pos - plus_pos - 1);
+            worker      = login.substr(dot_pos + 1);
+        } else {
+            wtx_address = login.substr(plus_pos + 1);
+        }
+    } else if (dot_pos != std::string::npos) {
+        parent_address = login.substr(0, dot_pos);
+        worker         = login.substr(dot_pos + 1);
+    } else {
+        parent_address = login;
+    }
+    if (wtx_address.empty()) wtx_address = m_config.wattx_wallet_address;
+
+    ParentChainAlgo algo;
+    std::string chain_name;
+    MultiAlgoJob job;
+    {
+        std::lock_guard<std::mutex> lock(m_clients_mutex);
+        auto it = m_clients.find(client_id);
+        if (it == m_clients.end() || !it->second) return;
+        it->second->wtx_address = wtx_address;
+        it->second->worker_name = worker.empty() ? "default" : worker;
+        it->second->authorized  = true;
+        it->second->protocol    = StratumProtocol::ZCASH;
+        algo = it->second->algo;
+        auto primary_it = m_algo_primary_chain.find(algo);
+        if (primary_it != m_algo_primary_chain.end()) {
+            chain_name = primary_it->second;
+            it->second->chain_addresses[chain_name] = parent_address;
+        }
+    }
+
+    LogPrintf("MultiMergedStratum: Zcash authorize client %d (%s, worker: %s)\n",
+              client_id, ParentChainFactory::AlgoToString(algo), worker);
+
+    std::ostringstream ack;
+    ack << "{\"id\":" << id << ",\"result\":true,\"error\":null}\n";
+    SendToClient(client_id, ack.str());
+
+    {
+        std::lock_guard<std::mutex> lock(m_jobs_mutex);
+        auto jit = m_current_jobs.find(algo);
+        if (jit != m_current_jobs.end()) job = jit->second;
+    }
+    SendZcashTarget(client_id, chain_name);
+    if (!job.job_id.empty()) SendZcashNotify(client_id, job, true);
+}
+
+void MultiMergedStratumServer::SendZcashTarget(int client_id, const std::string& chain_name) {
+    // Full 256-bit share target, big-endian display hex (nheqminer parses it as
+    // uint256S and gates hash <= target — same numeric convention as our gate).
+    uint256 target = chain_name.empty() ? uint256()
+                                        : EffectiveShareTarget(chain_name);
+    std::ostringstream oss;
+    oss << "{\"id\":null,\"method\":\"mining.set_target\",\"params\":[\""
+        << target.GetHex() << "\"]}\n";
+    SendToClient(client_id, oss.str());
+}
+
+void MultiMergedStratumServer::SendZcashNotify(int client_id, const MultiAlgoJob& job,
+                                               bool clean_jobs) {
+    // Slice the 140-byte serialized header (280 hex) into stratum fields, sent
+    // in serialized (little-endian) byte order — nheqminer concatenates them
+    // verbatim, so no byte-swapping (unlike the Bitcoin notify).
+    const std::string& b = job.hashing_blob;
+    if (b.size() < 216) return;  // need through bits; nonce region [216:280] unused
+    std::string version    = b.substr(0, 8);
+    std::string prevhash   = b.substr(8, 64);
+    std::string merkleroot = b.substr(72, 64);
+    std::string reserved   = b.substr(136, 64);
+    std::string ntime      = b.substr(200, 8);
+    std::string nbits      = b.substr(208, 8);
+
+    std::ostringstream oss;
+    oss << "{\"id\":null,\"method\":\"mining.notify\",\"params\":["
+        << "\"" << job.job_id << "\","
+        << "\"" << version    << "\","
+        << "\"" << prevhash   << "\","
+        << "\"" << merkleroot << "\","
+        << "\"" << reserved   << "\","
+        << "\"" << ntime      << "\","
+        << "\"" << nbits      << "\","
+        << (clean_jobs ? "true" : "false")
+        << "]}\n";
+    SendToClient(client_id, oss.str());
+}
+
+void MultiMergedStratumServer::HandleZcashSubmit(int client_id, const std::string& id,
+                                                 const std::vector<std::string>& params) {
+    // params: [worker, job_id, time, nonce2, solution]
+    if (params.size() < 5) {
+        SendError(client_id, id, 20, "Invalid params");
+        return;
+    }
+    const std::string& job_id   = params[1];
+    const std::string& ntime    = params[2];
+    const std::string& nonce2   = params[3];
+    const std::string& sol_hex  = params[4];
+
+    std::string nonce1;
+    {
+        std::lock_guard<std::mutex> lock(m_clients_mutex);
+        auto it = m_clients.find(client_id);
+        if (it == m_clients.end() || !it->second) return;
+        nonce1 = it->second->extranonce1;
+    }
+
+    // Full 32-byte nonce = nonce1 ++ nonce2 (both serialized-order hex).
+    std::string nonce_hex = nonce1 + nonce2;
+    if (nonce_hex.size() != 64) {
+        SendError(client_id, id, 20, "Bad nonce size");
+        return;
+    }
+
+    // The submitted solution carries a CompactSize length prefix (nheqminer
+    // serializes nonce ++ vector<solution>). Strip it to the raw solution the
+    // share gate expects; tolerate a prefix-less submission too.
+    std::vector<uint8_t> sf = ParseHex(sol_hex);
+    std::vector<uint8_t> sol;
+    if (!sf.empty()) {
+        size_t clen = sf[0], off = 1;
+        if (sf[0] == 0xFD && sf.size() >= 3) { clen = sf[1] | (size_t(sf[2]) << 8); off = 3; }
+        sol = (off + clen == sf.size()) ? std::vector<uint8_t>(sf.begin() + off, sf.end())
+                                        : sf;
+    }
+    if (sol.empty()) {
+        SendError(client_id, id, 20, "Bad solution");
+        return;
+    }
+
+    // Guard against ntime rolling: equihash miners grind the nonce, not ntime,
+    // so the submitted time must equal the job's header time (the gate validates
+    // against the job blob's baked-in time).
+    MultiAlgoJob job;
+    bool have = false;
+    {
+        std::lock_guard<std::mutex> lock(m_jobs_mutex);
+        auto it = m_jobs.find(job_id);
+        if (it != m_jobs.end()) { job = it->second; have = true; }
+    }
+    if (have && job.hashing_blob.size() >= 208) {
+        std::string job_time = job.hashing_blob.substr(200, 8);
+        if (ToLower(ntime) != ToLower(job_time)) {
+            SendError(client_id, id, 23, "ntime mismatch");
+            return;
+        }
+    }
+
+    // The equihash ValidateShare branch recomputes the PoW from the job blob +
+    // this nonce + solution and ignores `result`, but the early size check needs
+    // 32 bytes — pass a zero placeholder it will overwrite.
+    bool valid = ValidateShare(client_id, job_id, nonce_hex,
+                               std::string(64, '0'), HexStr(sol));
     if (valid) {
         std::ostringstream oss;
         oss << "{\"id\":" << id << ",\"result\":true,\"error\":null}\n";
@@ -1043,7 +1272,7 @@ void MultiMergedStratumServer::HandleEthGetWork(int client_id, const std::string
         << "\"" << job.hashing_blob << "\","
         << "\"" << (job.seed_hash.empty() ? "0x" + std::string(64,'0') : job.seed_hash) << "\","
         << "\"0x" << target_hex << "\","
-        << "\"0x" << std::hex << job.parent_height << std::dec
+        << "\"0x" << std::hex << job.parent_height << std::dec << "\""
         << "],\"error\":null}\n";
     SendToClient(client_id, oss.str());
 }
@@ -1151,7 +1380,10 @@ void MultiMergedStratumServer::HandleLogin(int client_id, const std::string& id,
     oss << "\"job\":{";
     oss << "\"blob\":\"" << job.hashing_blob << "\",";
     oss << "\"job_id\":\"" << job.job_id << "\",";
-    oss << "\"target\":\"" << job.parent_target.GetHex().substr(0, 16) << "\",";
+    // Advertise the pool share target (per-chain aware), not the parent block
+    // target: miners submit at share difficulty; ValidateShare still checks
+    // the parent target server-side for actual block finds.
+    oss << "\"target\":\"" << XmrigJobTarget(job).GetHex().substr(0, 16) << "\",";
     oss << "\"height\":" << job.parent_height;
     if (!job.seed_hash.empty()) {
         oss << ",\"seed_hash\":\"" << job.seed_hash << "\"";
@@ -1174,7 +1406,61 @@ void MultiMergedStratumServer::HandleSubmit(int client_id, const std::string& id
     std::string nonce = params[1];
     std::string result = params[2];
 
-    bool valid = ValidateShare(client_id, job_id, nonce, result);
+    // Never trust the submitted result hash: rebuild the job's hashing blob
+    // with the miner's nonce and compute the PoW server-side (HandleBtcSubmit
+    // already does this). A faked low result would otherwise inflate share
+    // accounting and reward_share. Algos whose submits carry data the server
+    // can't cheaply recompute (ethash mix, equihash solution) keep the old path.
+    MultiAlgoJob job;
+    bool have_job = false;
+    {
+        std::lock_guard<std::mutex> lock(m_jobs_mutex);
+        auto it = m_jobs.find(job_id);
+        if (it != m_jobs.end()) { job = it->second; have_job = true; }
+    }
+    if (have_job && (job.algo == ParentChainAlgo::RANDOMX ||
+                     job.algo == ParentChainAlgo::SHA256D ||
+                     job.algo == ParentChainAlgo::SCRYPT  ||
+                     job.algo == ParentChainAlgo::X11)) {
+        auto primary_it = m_algo_primary_chain.find(job.algo);
+        auto handler_it = primary_it != m_algo_primary_chain.end()
+            ? m_parent_handlers.find(primary_it->second) : m_parent_handlers.end();
+        std::vector<uint8_t> blob = ParseHex(job.hashing_blob);
+        std::vector<uint8_t> nonce_bytes = ParseHex(nonce);
+        size_t nonce_off = SIZE_MAX;
+        if (job.algo == ParentChainAlgo::RANDOMX) {
+            // Monero blob: varint(major) varint(minor) varint(timestamp) 32B prev_id, nonce
+            size_t pos = 0;
+            for (int i = 0; i < 3 && pos < blob.size(); i++) {
+                while (pos < blob.size()) { uint8_t b = blob[pos++]; if (!(b & 0x80)) break; }
+            }
+            pos += 32;
+            if (pos + 4 <= blob.size()) nonce_off = pos;
+        } else if (blob.size() >= 80) {
+            nonce_off = 76;  // bitcoin-style 80-byte header
+        }
+        if (handler_it != m_parent_handlers.end() &&
+            nonce_bytes.size() >= 4 && nonce_off != SIZE_MAX) {
+            std::memcpy(&blob[nonce_off], nonce_bytes.data(), 4);
+            uint256 pow = handler_it->second->CalculatePoWHash(blob, job.seed_hash);
+            std::string computed = HexStr(std::span<const unsigned char>(pow.begin(), 32));
+            if (ToLower(result) != computed) {
+                LogPrintf("MultiMergedStratum: Client %d submitted result != server PoW "
+                          "(claimed %s… computed %s…)\n",
+                          client_id, result.substr(0, 16), computed.substr(0, 16));
+            }
+            result = computed;
+        } else {
+            SendError(client_id, id, -1, "Malformed submit");
+            return;
+        }
+    }
+
+    // 4th param: Equihash miners append their solution hex ([job_id, nonce,
+    // result, solution]); rides in proto_extra. Other algos never send one.
+    std::string extra = params.size() >= 4 ? params[3] : "";
+
+    bool valid = ValidateShare(client_id, job_id, nonce, result, extra);
 
     if (valid) {
         SendResult(client_id, id, "{\"status\":\"OK\"}");
@@ -1276,6 +1562,59 @@ CTransactionRef MultiMergedStratumServer::BuildPayoutCoinbase(
     return MakeTransactionRef(std::move(cb));
 }
 
+uint32_t MultiMergedStratumServer::EffectiveShareNbits(const std::string& chain_name) const {
+    auto it = m_parent_handlers.find(chain_name);
+    if (it != m_parent_handlers.end() && it->second->GetConfig().share_nbits != 0) {
+        return it->second->GetConfig().share_nbits;
+    }
+    return m_config.share_nbits;
+}
+
+uint64_t MultiMergedStratumServer::EffectiveShareDifficulty(const std::string& chain_name) const {
+    auto it = m_parent_handlers.find(chain_name);
+    if (it != m_parent_handlers.end() && it->second->GetConfig().share_difficulty != 0) {
+        return it->second->GetConfig().share_difficulty;
+    }
+    return m_config.share_difficulty;
+}
+
+uint256 MultiMergedStratumServer::EffectiveShareTarget(const std::string& chain_name) {
+    const uint32_t nbits = EffectiveShareNbits(chain_name);
+    if (nbits != 0) {
+        arith_uint256 st;
+        st.SetCompact(nbits);
+        return ArithToUint256(st);
+    }
+    auto it = m_parent_handlers.find(chain_name);
+    if (it != m_parent_handlers.end()) {
+        return it->second->DifficultyToTarget(EffectiveShareDifficulty(chain_name));
+    }
+    arith_uint256 d1;
+    d1.SetCompact(0x1d00ffff);
+    return ArithToUint256(d1);
+}
+
+// Numeric difficulty for miner-facing advertisement (mining.set_difficulty):
+// derived from the effective nbits when set, else the effective difficulty.
+double MultiMergedStratumServer::EffectiveShareDiffNumber(const std::string& chain_name) const {
+    const uint32_t nbits = EffectiveShareNbits(chain_name);
+    if (nbits != 0) {
+        arith_uint256 st, d1;
+        st.SetCompact(nbits);
+        d1.SetCompact(0x1d00ffff);
+        if (st != 0) return d1.getdouble() / st.getdouble();
+    }
+    return static_cast<double>(EffectiveShareDifficulty(chain_name));
+}
+
+uint256 MultiMergedStratumServer::XmrigJobTarget(const MultiAlgoJob& job) {
+    auto it = m_algo_primary_chain.find(job.algo);
+    if (it != m_algo_primary_chain.end()) {
+        return EffectiveShareTarget(it->second);
+    }
+    return job.parent_target;
+}
+
 void MultiMergedStratumServer::CreateJob(ParentChainAlgo algo) {
     // Find primary chain for this algorithm
     auto primary_it = m_algo_primary_chain.find(algo);
@@ -1327,6 +1666,14 @@ void MultiMergedStratumServer::CreateJob(ParentChainAlgo algo) {
             uint256 wattx_hash = job.wattx_template->getAuxPowBlockHash(job.payout_coinbase);
             job.aux_merkle_root = auxpow::CalcAuxChainMerkleRoot(wattx_hash, handler->GetChainId());
             job.merge_mining_tag = auxpow::BuildMergeMiningTag(job.aux_merkle_root, 0);
+
+            // Chains whose daemon commits the tag itself (kaspa extraData) fetch
+            // a fresh tagged template now that the tag is known; the tagged
+            // template carries its own target/timestamp, so re-snapshot it.
+            if (handler->PrepareTaggedTemplate(job.coinbase_data, job.merge_mining_tag) &&
+                !job.coinbase_data.parent_target.IsNull()) {
+                job.parent_target = job.coinbase_data.parent_target;
+            }
 
             // Rebuild hashing blob with MM tag injected
             job.hashing_blob = handler->BuildHashingBlob(job.coinbase_data, job.merge_mining_tag);
@@ -1411,24 +1758,103 @@ bool MultiMergedStratumServer::ValidateShare(int client_id, const std::string& j
         }
     }
 
-    // Parse submitted hash
-    std::vector<uint8_t> result_bytes = ParseHex(result);
+    // Parse submitted hash. Ethash miners send the mix as "0x…"; ParseHex stops
+    // at the 'x' and yields nothing, so strip a leading 0x first (harmless for the
+    // BTC/XMRig paths, whose result is bare hex).
+    std::string result_hex = result;
+    if (result_hex.size() >= 2 && result_hex[0] == '0' &&
+        (result_hex[1] == 'x' || result_hex[1] == 'X')) result_hex = result_hex.substr(2);
+    std::vector<uint8_t> result_bytes = ParseHex(result_hex);
     if (result_bytes.size() != 32) return false;
+
+    // Ethash: HandleEthSubmitWork passes the MIX hash as `result`, not the PoW
+    // output. Compute the DAG-free ethash final hash — keccak256(keccak512(
+    // header_hash||nonce_LE) || mix) — exactly as CAuxPow::Check does, and gate
+    // on THAT. Otherwise the share gate compares the (essentially random) mix
+    // against the target while consensus checks the real final hash → the two
+    // disagree and no ethash share could ever land a WTX block. Mix validity
+    // itself is guaranteed by the parent ETC/ETH network.
+    if (job.algo == ParentChainAlgo::ETHASH) {
+        std::string hh = job.hashing_blob;
+        if (hh.size() >= 2 && hh[0] == '0' && (hh[1] == 'x' || hh[1] == 'X')) hh = hh.substr(2);
+        std::vector<uint8_t> header_hash = ParseHex(hh);
+        std::string nh = nonce;
+        if (nh.size() >= 2 && nh[0] == '0' && (nh[1] == 'x' || nh[1] == 'X')) nh = nh.substr(2);
+        std::vector<uint8_t> nonce_bytes = ParseHex(nh);
+        if (header_hash.size() != 32 || nonce_bytes.size() < 1) return false;
+
+        // Pack the nonce byte-for-byte the way CreateAuxPow writes parentHeaderRaw
+        // (memcpy of the first ≤8 ParseHex(nonce) bytes, rest zero) and CAuxPow::Check
+        // reads it — matching Check EXACTLY is what makes this gate predict Check's
+        // verdict, so use the submitted nonce bytes verbatim (no endianness swap).
+        uint8_t seed_input[40] = {0};
+        std::memcpy(seed_input, header_hash.data(), 32);
+        std::memcpy(seed_input + 32, nonce_bytes.data(),
+                    std::min<size_t>(nonce_bytes.size(), 8));
+        ethash_hash512 seed = ethash_keccak512(seed_input, 40);
+
+        uint8_t final_input[96];
+        std::memcpy(final_input, seed.bytes, 64);
+        std::memcpy(final_input + 64, result_bytes.data(), 32);  // mix
+        ethash_hash256 final_hash = ethash_keccak256(final_input, 96);
+        // Store big-endian so UintToArith256 gives geth's numeric value — must
+        // match CAuxPow::GetParentBlockPoWHash (auxpow.cpp) exactly, so a share
+        // that clears geth's target also clears WATTx's (dual-earning).
+        for (int i = 0; i < 32; i++) result_bytes[i] = final_hash.bytes[31 - i];
+    }
+
+    // Equihash: never trust the submitted result. Rebuild the mined header from
+    // the job blob + the miner's 32-byte nonce, canonically verify the solution
+    // (proto_extra), and compute the PoW hash = SHA256d(header || CompactSize ||
+    // solution) — byte-identical to CAuxPow::GetParentBlockPoWHash AND to the
+    // parent chain's block hash, so the gate predicts both verdicts.
+    if (job.algo == ParentChainAlgo::EQUIHASH) {
+        std::vector<uint8_t> blob = ParseHex(job.hashing_blob);
+        std::vector<uint8_t> nb   = ParseHex(nonce);
+        std::vector<uint8_t> sol  = ParseHex(proto_extra);
+        if (blob.size() != 140 || nb.empty() || sol.empty()) return false;
+        std::memcpy(&blob[108], nb.data(), std::min<size_t>(nb.size(), 32));
+
+        auto* eq = static_cast<EquihashChainHandler*>(handler.get());
+        if (!eq->VerifyEquihashSolution(blob, sol)) {
+            LogPrintf("MultiMergedStratum: Client %d equihash solution invalid\n", client_id);
+            return false;
+        }
+
+        std::vector<uint8_t> pre = blob;
+        if (sol.size() < 0xFD) {
+            pre.push_back(static_cast<uint8_t>(sol.size()));
+        } else {
+            pre.push_back(0xFD);
+            pre.push_back(sol.size() & 0xFF);
+            pre.push_back((sol.size() >> 8) & 0xFF);
+        }
+        pre.insert(pre.end(), sol.begin(), sol.end());
+        uint256 pow = Hash(pre);
+        result_bytes.assign(pow.begin(), pow.end());
+    }
+
+    // Kaspa: never trust the submitted result. Blob is the 80-byte kaspa miner
+    // form [prePowHash|ts|zeros|nonce]; patch the submitted nonce bytes (LE) at
+    // offset 72 and recompute the real kHeavyHash — identical to what
+    // CAuxPow::GetParentBlockPoWHash computes from the AuxPoW preimage, so the
+    // gate predicts both the WTX and the kaspad verdicts.
+    if (job.algo == ParentChainAlgo::KHEAVYHASH) {
+        std::vector<uint8_t> blob = ParseHex(job.hashing_blob);
+        std::vector<uint8_t> nb = ParseHex(nonce);
+        if (blob.size() != 80 || nb.empty()) return false;
+        std::memcpy(&blob[72], nb.data(), std::min<size_t>(nb.size(), 8));
+        uint256 pow = handler->CalculatePoWHash(blob, "");
+        result_bytes.assign(pow.begin(), pow.end());
+    }
 
     uint256 submitted_hash;
     std::memcpy(submitted_hash.data(), result_bytes.data(), 32);
     arith_uint256 hash_arith = UintToArith256(submitted_hash);
 
-    // Check share difficulty. An explicit share_nbits (testing/regtest knob)
-    // overrides the diff-1 floor of DifficultyToTarget so an easy target is usable.
-    uint256 share_target;
-    if (m_config.share_nbits != 0) {
-        arith_uint256 st;
-        st.SetCompact(m_config.share_nbits);
-        share_target = ArithToUint256(st);
-    } else {
-        share_target = handler->DifficultyToTarget(m_config.share_difficulty);
-    }
+    // Check share difficulty. An explicit share_nbits overrides the diff-1
+    // floor of DifficultyToTarget; per-chain config overrides pool-global.
+    uint256 share_target = EffectiveShareTarget(chain_name);
     if (hash_arith > UintToArith256(share_target)) {
         std::lock_guard<std::mutex> lock(m_clients_mutex);
         auto it = m_clients.find(client_id);
@@ -1497,7 +1923,7 @@ bool MultiMergedStratumServer::ValidateShare(int client_id, const std::string& j
             // Record toward WATTx score unless over the 50% cap on this chain
             // (the core of the decentralization rule).
             if (!miner_capped && !wtx_address.empty()) {
-                RecordMinerShare(wtx_address, chain_name, m_config.share_difficulty);
+                RecordMinerShare(wtx_address, chain_name, EffectiveShareDifficulty(chain_name));
             }
             if (meets_wtx) {
                 it->second->wtx_blocks_found++;
@@ -1558,8 +1984,51 @@ bool MultiMergedStratumServer::ValidateShare(int client_id, const std::string& j
             if (mix_hex.size() >= 2 && mix_hex.substr(0,2) == "0x")
                 mix_hex = mix_hex.substr(2);
             submit_blob = nonce_hex + mix_hex;
+        } else if (algo == ParentChainAlgo::EQUIHASH) {
+            // Zcash-style block: 140B header (nonce filled) + CompactSize(sol) +
+            // solution + CompactSize(tx_count) + coinbase + raw txs. The header
+            // is the job blob — already committed to the tagged coinbase.
+            std::vector<uint8_t> blob = ParseHex(job.hashing_blob);
+            std::vector<uint8_t> nb   = ParseHex(nonce);
+            std::vector<uint8_t> sol  = ParseHex(proto_extra);
+            if (blob.size() == 140 && !nb.empty() && !sol.empty()) {
+                std::memcpy(&blob[108], nb.data(), std::min<size_t>(nb.size(), 32));
+                std::vector<uint8_t> block = blob;
+                if (sol.size() < 0xFD) {
+                    block.push_back(static_cast<uint8_t>(sol.size()));
+                } else {
+                    block.push_back(0xFD);
+                    block.push_back(sol.size() & 0xFF);
+                    block.push_back((sol.size() >> 8) & 0xFF);
+                }
+                block.insert(block.end(), sol.begin(), sol.end());
+
+                size_t tx_count = 1 + job.coinbase_data.raw_transactions.size();
+                block.push_back(static_cast<uint8_t>(tx_count));  // pool blocks are small
+
+                auto* eq = static_cast<EquihashChainHandler*>(handler.get());
+                std::vector<uint8_t> cb =
+                    eq->AuxCoinbaseBytes(job.coinbase_data, job.merge_mining_tag);
+                block.insert(block.end(), cb.begin(), cb.end());
+                for (const auto& tx : job.coinbase_data.raw_transactions) {
+                    block.insert(block.end(), tx.begin(), tx.end());
+                }
+                submit_blob = HexStr(block);
+            }
+        } else if (algo == ParentChainAlgo::KHEAVYHASH) {
+            // Kaspa: submit by templateId — the gRPC proxy patches the nonce
+            // into its cached template and submits the real block to kaspad.
+            // 64-bit nonce = the submitted nonce bytes read LE (XMRig 4-byte
+            // nonces land in the low bytes, matching the blob patch above).
+            if (!job.coinbase_data.kaspa_template_id.empty()) {
+                std::vector<uint8_t> nb = ParseHex(nonce);
+                uint64_t n64 = 0;
+                for (size_t i = 0; i < std::min<size_t>(nb.size(), 8); i++)
+                    n64 |= uint64_t(nb[i]) << (8 * i);
+                submit_blob = job.coinbase_data.kaspa_template_id + ":" + std::to_string(n64);
+            }
         } else {
-            // Bitcoin-style (SHA256D, SCRYPT, X11, EQUIHASH, KHEAVYHASH):
+            // Bitcoin-style (SHA256D, SCRYPT, X11):
             // Full block = 80B header + CompactSize(tx_count) + coinbase + raw_txs
 
             // Build modified coinbase: merge-mining tag, plus the miner's
@@ -1639,6 +2108,10 @@ bool MultiMergedStratumServer::ValidateShare(int client_id, const std::string& j
         std::string extra_data;
         if (handler->GetAlgo() == ParentChainAlgo::ETHASH) {
             extra_data = nonce + ":" + result;  // nonce=8-byte hex, result=mix_hash
+        } else if (handler->GetAlgo() == ParentChainAlgo::EQUIHASH) {
+            extra_data = nonce + ":" + proto_extra;  // 32-byte nonce hex : solution hex
+        } else if (handler->GetAlgo() == ParentChainAlgo::KHEAVYHASH) {
+            extra_data = nonce;  // submitted nonce bytes verbatim (LE, ≤8 bytes)
         } else if (!proto_extra.empty()) {
             extra_data = proto_extra;
         }
@@ -1714,6 +2187,19 @@ void MultiMergedStratumServer::SendJob(int client_id, const MultiAlgoJob& job,
         return;
     }
 
+    if (proto == StratumProtocol::ZCASH) {
+        // Re-send the target each job: a parent block change can shift the
+        // effective share target, and nheqminer applies the latest set_target.
+        std::string chain_name;
+        {
+            auto primary_it = m_algo_primary_chain.find(job.algo);
+            if (primary_it != m_algo_primary_chain.end()) chain_name = primary_it->second;
+        }
+        SendZcashTarget(client_id, chain_name);
+        SendZcashNotify(client_id, job, false);
+        return;
+    }
+
     if (proto == StratumProtocol::ETHASH) {
         std::string target_hex = job.parent_target.GetHex();
         std::ostringstream oss;
@@ -1732,7 +2218,7 @@ void MultiMergedStratumServer::SendJob(int client_id, const MultiAlgoJob& job,
     oss << "{\"jsonrpc\":\"2.0\",\"method\":\"job\",\"params\":{";
     oss << "\"blob\":\"" << job.hashing_blob << "\",";
     oss << "\"job_id\":\"" << job.job_id << "\",";
-    oss << "\"target\":\"" << job.parent_target.GetHex().substr(0, 16) << "\",";
+    oss << "\"target\":\"" << XmrigJobTarget(job).GetHex().substr(0, 16) << "\",";
     oss << "\"height\":" << job.parent_height;
     if (!job.seed_hash.empty()) {
         oss << ",\"seed_hash\":\"" << job.seed_hash << "\"";
@@ -1820,7 +2306,7 @@ void MultiMergedStratumServer::UpdateCoinHashrates() {
         // Calculate pool hashrate from recent shares
         uint64_t time_window = 600;  // 10 minute window
         uint64_t recent_shares = m_total_shares[name].load();
-        stats.pool_hashrate = (recent_shares * m_config.share_difficulty * 0x100000000ULL) / time_window;
+        stats.pool_hashrate = (recent_shares * EffectiveShareDifficulty(name) * 0x100000000ULL) / time_window;
         stats.pool_shares = recent_shares;
 
         // Calculate pool's % of network hashrate
@@ -1858,7 +2344,7 @@ void MultiMergedStratumServer::UpdateMinerHashrates() {
             if (stats_it == m_coin_stats.end()) continue;
 
             // Estimate miner's hashrate: (shares * share_diff * 2^32) / time
-            uint64_t miner_hashrate = (shares * m_config.share_difficulty * 0x100000000ULL) / time_window;
+            uint64_t miner_hashrate = (shares * EffectiveShareDifficulty(coin_name) * 0x100000000ULL) / time_window;
             stats_it->second.miner_hashrates[client->wtx_address] += miner_hashrate;
         }
     }

@@ -377,13 +377,21 @@ public:
         const std::string& seed_hash
     ) override {
         uint256 hash;
-        auto& miner = node::GetRandomXMiner();
 
-        // Initialize RandomX with seed if needed
-        if (!seed_hash.empty() && miner.IsInitialized()) {
-            // TODO: handle seed changes
+        // Hash with the PARENT chain's RandomX seed via the dedicated aux
+        // context — the same keying CAuxPow::Check verifies against.
+        if (!seed_hash.empty()) {
+            std::vector<uint8_t> seed = ParseHex(seed_hash);
+            if (seed.size() == 32) {
+                auto& aux = node::GetRandomXAuxMiner();
+                if (aux.ReinitializeIfNeeded(seed.data(), seed.size())) {
+                    aux.CalculateHash(hashing_blob.data(), hashing_blob.size(), hash.data());
+                    return hash;
+                }
+            }
         }
 
+        auto& miner = node::GetRandomXMiner();
         if (miner.IsInitialized()) {
             miner.CalculateHash(hashing_blob.data(), hashing_blob.size(), hash.data());
         } else {

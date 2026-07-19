@@ -42,6 +42,17 @@ struct ParentChainConfig {
     std::string wallet_address;    // Pool's address on parent chain
     uint32_t chain_id;             // Unique ID to prevent cross-chain replay
     bool enabled{true};
+
+    // Per-chain share gate overrides. The pool-global share_difficulty/share_nbits
+    // are one-size-fits-all, which can't serve a sha256d ASIC and a CPU RandomX
+    // miner at once — a nonzero value here overrides the global for this chain.
+    uint64_t share_difficulty{0};  // 0 = use pool-global share_difficulty
+    uint32_t share_nbits{0};       // 0 = use pool-global share_nbits
+
+    // Equihash parameter override (0,0 = handler default: Zcash 200,9;
+    // BitcoinZ preset 144,5). Regtest BitcoinZ needs 48,5.
+    uint32_t equihash_n{0};
+    uint32_t equihash_k{0};
 };
 
 /**
@@ -82,6 +93,9 @@ struct ParentCoinbaseData {
     uint32_t parent_bits{0};
     uint64_t parent_height{0};
     bool     header_snapshot{false};
+    // Zcash-family (Equihash) headers carry a 4th 32-byte field between the
+    // merkle root and time (sprout/sapling commitment root).
+    uint256  parent_reserved;
 
     // Monero (RandomX) header snapshot, frozen at template time so the mined blob
     // and the AuxPoW proof agree even though monerod bumps the template timestamp
@@ -93,6 +107,16 @@ struct ParentCoinbaseData {
     uint256  mono_prev_id;
     uint256  mono_seed;
     uint64_t mono_tx_count{1};  // total txs incl. miner tx (hashing blob tail varint)
+
+    // Kaspa (kHeavyHash): snapshot of the proxy template this job mines.
+    // kaspa_preimage is the keyed-blake2b "BlockHash" preimage (real timestamp,
+    // nonce zeroed); coinbase_tx holds the serialized kaspa coinbase
+    // (TransactionHash encoding) and merkle_branch its MerkleBranchHash path —
+    // both in raw kaspa byte order (NOT uint256 display order).
+    std::string kaspa_template_id;
+    std::vector<uint8_t> kaspa_preimage;
+    uint256  kaspa_prepow;          // pre-PoW hash (nonce=0, ts=0), raw byte order
+    uint64_t kaspa_timestamp{0};    // header timestamp, MILLISECONDS
 
     bool IsValid() const { return !coinbase_tx.empty() || header_snapshot; }
 };
@@ -130,6 +154,10 @@ public:
     virtual std::string GetName() const = 0;
     virtual ParentChainAlgo GetAlgo() const = 0;
     virtual uint32_t GetChainId() const = 0;
+    // Virtual: ParentChainHandlerBase declares its own m_config that shadows
+    // the one below — a non-virtual accessor here would return the shadowed,
+    // never-populated interface copy.
+    virtual const ParentChainConfig& GetConfig() const { return m_config; }
 
     // Block template operations
     virtual bool GetBlockTemplate(
@@ -152,6 +180,15 @@ public:
         const ParentCoinbaseData& coinbase_data,
         const std::vector<uint8_t>& merge_mining_tag
     ) = 0;
+
+    // Chains whose daemon builds the tagged coinbase itself (kaspa: the MM tag
+    // rides in via GetBlockTemplate extraData) refresh the template HERE, once
+    // the per-job tag is known, mutating coinbase_data with the tagged template.
+    // Default: nothing to do. Called by CreateJob before BuildHashingBlob.
+    virtual bool PrepareTaggedTemplate(
+        ParentCoinbaseData& /*coinbase_data*/,
+        const std::vector<uint8_t>& /*merge_mining_tag*/
+    ) { return true; }
 
     // Calculate PoW hash for a blob
     virtual uint256 CalculatePoWHash(

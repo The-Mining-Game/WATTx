@@ -30,11 +30,20 @@ std::unique_ptr<IParentChainHandler> ParentChainFactory::Create(const ParentChai
         case ParentChainAlgo::ETHASH:
             return std::make_unique<EthashChainHandler>(config);
 
-        case ParentChainAlgo::EQUIHASH:
+        case ParentChainAlgo::EQUIHASH: {
+            std::unique_ptr<EquihashChainHandler> h;
             if (config.name == "horizen" || config.name == "zen") {
-                return std::make_unique<HorizenChainHandler>(config);
+                h = std::make_unique<HorizenChainHandler>(config);
+            } else if (config.name == "bitcoinz" || config.name == "btcz") {
+                h = std::make_unique<BitcoinZChainHandler>(config);
+            } else {
+                h = std::make_unique<EquihashChainHandler>(config);
             }
-            return std::make_unique<EquihashChainHandler>(config);
+            if (config.equihash_n && config.equihash_k) {
+                h->SetEquihashParams(config.equihash_n, config.equihash_k);
+            }
+            return h;
+        }
 
         case ParentChainAlgo::X11:
             return std::make_unique<DashChainHandler>(config);
@@ -82,7 +91,8 @@ ParentChainAlgo ParentChainFactory::StringToAlgo(const std::string& name) {
     } else if (name == "ethash" || name == "etc" || name == "ethereum_classic" ||
                name == "alt" || name == "altcoinchain" || name == "octa" || name == "octaspace") {
         return ParentChainAlgo::ETHASH;
-    } else if (name == "equihash" || name == "zcash" || name == "horizen") {
+    } else if (name == "equihash" || name == "zcash" || name == "horizen" ||
+               name == "bitcoinz" || name == "btcz") {
         return ParentChainAlgo::EQUIHASH;
     } else if (name == "x11" || name == "dash") {
         return ParentChainAlgo::X11;
