@@ -50,6 +50,12 @@ uint64_t CBlockHeaderAndShortTxIDs::GetShortID(const Wtxid& wtxid) const {
 ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& cmpctblock, const std::vector<CTransactionRef>& extra_txn) {
     if (cmpctblock.header.IsNull() || (cmpctblock.shorttxids.empty() && cmpctblock.prefilledtxn.empty()))
         return READ_STATUS_INVALID;
+    // A compact block carries only the header + tx short-ids; the merged-mining
+    // AuxPoW proof is not part of it, so a reconstructed block would fail
+    // CheckBlock with "auxpow-missing". Fall back to a full-block download,
+    // which serializes the AuxPoW proof (see CBlock serialization).
+    if (cmpctblock.header.nVersion & AUXPOW_VERSION_FLAG)
+        return READ_STATUS_FAILED;
     if (cmpctblock.shorttxids.size() + cmpctblock.prefilledtxn.size() > dgpMaxBlockWeight / MIN_SERIALIZABLE_TRANSACTION_WEIGHT)
         return READ_STATUS_INVALID;
 

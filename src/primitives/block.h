@@ -10,11 +10,9 @@
 #include <serialize.h>
 #include <uint256.h>
 #include <util/time.h>
+#include <auxpow/auxpow_proof.h>
 
 #include <memory>
-
-// Forward declaration for AuxPoW
-class CAuxPow;
 
 /** Nodes collect new transactions into a block, hash them into a hash tree,
  * and scan through nonce values to make the block's hash satisfy proof-of-work
@@ -167,6 +165,19 @@ public:
     SERIALIZE_METHODS(CBlock, obj)
     {
         READWRITE(AsBase<CBlockHeader>(obj), obj.vtx);
+        // Merged-mined blocks carry their AuxPoW proof after the transactions so
+        // that peers (via the `block` message) and disk reads reconstruct the
+        // parent-chain proof and can verify it in CheckBlock. The block hash is
+        // computed from CBlockHeader alone, so this does NOT change block
+        // identity. `headers` messages serialize CBlockHeader (never CBlock), so
+        // they stay bare and defer to full-block validation. `auxpow` is mutable,
+        // so this compiles on the const serialize path.
+        if (obj.HasAuxPowFlag()) {
+            if (!obj.auxpow) {
+                obj.auxpow = std::make_shared<CAuxPow>();
+            }
+            READWRITE(*obj.auxpow);
+        }
     }
 
     void SetNull()

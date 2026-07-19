@@ -16,9 +16,121 @@
 // Multi-algo PoW hash functions
 #include <eth_client/utils/libscrypt/libscrypt.h>
 #include <crypto/sphlib/x11.h>
-#include <crypto/equihash/equihash.h>
+#include <crypto/x11dash/x11dash.h>  // canonical Dash X11 for the x11 parent path
+#include <crypto/equihash/equihash_canon.h>  // canonical Zcash/BitcoinZ validator
+#include <crypto/kheavyhash/kheavyhash.h>    // canonical Kaspa kHeavyHash + hashing
 #include <ethash/ethash.h>
 #include <ethash/keccak.h>
+
+namespace {
+
+// Fail-closed sentinel for PoW-hash error paths: an all-FF hash can never meet
+// a target, whereas a default uint256 (all zeros) would meet EVERY target.
+uint256 MaxHash() {
+    uint256 h;
+    std::memset(h.begin(), 0xFF, 32);
+    return h;
+}
+
+// EQUIHASH parentHeaderRaw layout (see EquihashChainHandler::CreateAuxPow):
+//   [0..4)    Equihash n (LE32)
+//   [4..8)    Equihash k (LE32)
+//   [8..148)  140-byte Zcash-style header (version, prev, merkleroot,
+//             reserved, time, bits, 32-byte nonce)
+//   [148..)   CompactSize(sol_len) + solution
+//   [rest]    raw serialized parent coinbase transaction
+// header..solution is contiguous and equals the parent chain's block-hash
+// preimage; the coinbase rides as opaque bytes because zcash-family (v4
+// sapling) transactions cannot be represented as a CTransaction.
+struct EquihashRawParts {
+    uint32_t n{0}, k{0};
+    const uint8_t* header{nullptr};       // 140 bytes
+    const uint8_t* solution{nullptr};
+    size_t solution_len{0};
+    size_t pow_len{0};                    // header..end-of-solution (hash preimage)
+    const uint8_t* coinbase{nullptr};
+    size_t coinbase_len{0};
+};
+
+bool ParseEquihashRaw(const std::vector<uint8_t>& raw, EquihashRawParts& out) {
+    if (raw.size() < 8 + 140 + 1) return false;
+    const uint8_t* d = raw.data();
+    out.n = d[0] | (uint32_t(d[1]) << 8) | (uint32_t(d[2]) << 16) | (uint32_t(d[3]) << 24);
+    out.k = d[4] | (uint32_t(d[5]) << 8) | (uint32_t(d[6]) << 16) | (uint32_t(d[7]) << 24);
+    // Parameter sanity: bounds keep 1<<k and the length formula well-defined.
+    if (out.k < 1 || out.k > 12 || out.n < 24 || out.n > 256 ||
+        out.n % 8 != 0 || out.n % (out.k + 1) != 0) return false;
+    out.header = d + 8;
+
+    size_t pos = 148;
+    uint64_t sol_len = d[pos];
+    pos += 1;
+    if (sol_len == 0xFD) {
+        if (raw.size() < pos + 2) return false;
+        sol_len = d[pos] | (uint64_t(d[pos + 1]) << 8);
+        pos += 2;
+    } else if (sol_len > 0xFC) {
+        return false;  // solutions never need 4/8-byte CompactSize
+    }
+    const size_t expected = (size_t(1) << out.k) * (out.n / (out.k + 1) + 1) / 8;
+    if (sol_len != expected) return false;
+    if (raw.size() < pos + sol_len) return false;
+
+    out.solution = d + pos;
+    out.solution_len = sol_len;
+    out.pow_len = (pos + sol_len) - 8;
+    out.coinbase = d + pos + sol_len;
+    out.coinbase_len = raw.size() - (pos + sol_len);
+    return true;
+}
+
+// KHEAVYHASH parentHeaderRaw layout (see KaspaChainHandler::CreateAuxPow):
+//   [u32 LE preimage_len][preimage]  keyed-blake2b "BlockHash" preimage with the
+//                                    REAL nonce + timestamp (kaspa hashes a
+//                                    structured serialization, not a fixed header)
+//   [u32 LE coinbase_len][coinbase]  serialized kaspa coinbase (TransactionHash
+//                                    encoding; the WATTx MM tag rides in the
+//                                    payload as hex-ASCII via kaspad extraData)
+//   [u8 branch_count][32B x count]   MerkleBranchHash siblings for leaf 0
+struct KaspaRawParts {
+    const uint8_t* preimage{nullptr};
+    size_t preimage_len{0};
+    const uint8_t* coinbase{nullptr};
+    size_t coinbase_len{0};
+    std::vector<std::vector<uint8_t>> branch;
+    kheavyhash::HeaderPreimageInfo info;  // offsets inside preimage
+};
+
+bool ParseKaspaRaw(const std::vector<uint8_t>& raw, KaspaRawParts& out) {
+    const uint8_t* d = raw.data();
+    size_t len = raw.size();
+    auto get_u32 = [d](size_t pos) {
+        return uint32_t(d[pos]) | (uint32_t(d[pos + 1]) << 8) |
+               (uint32_t(d[pos + 2]) << 16) | (uint32_t(d[pos + 3]) << 24);
+    };
+    if (len < 4) return false;
+    uint32_t pre_len = get_u32(0);
+    if (pre_len < 172 || pre_len > 65536 || len < 4 + size_t(pre_len) + 4) return false;
+    out.preimage = d + 4;
+    out.preimage_len = pre_len;
+    size_t pos = 4 + pre_len;
+    uint32_t cb_len = get_u32(pos);
+    pos += 4;
+    if (cb_len == 0 || cb_len > 1 << 20 || len < pos + cb_len + 1) return false;
+    out.coinbase = d + pos;
+    out.coinbase_len = cb_len;
+    pos += cb_len;
+    uint8_t branch_count = d[pos++];
+    if (len != pos + size_t(branch_count) * 32) return false;
+    out.branch.clear();
+    for (uint8_t i = 0; i < branch_count; i++) {
+        out.branch.emplace_back(d + pos, d + pos + 32);
+        pos += 32;
+    }
+    return kheavyhash::ParseHeaderPreimage(out.preimage, out.preimage_len, out.info);
+}
+
+}  // namespace
 
 // ============================================================================
 // CMoneroBlockHeader
@@ -102,7 +214,11 @@ uint256 CMoneroBlockHeader::GetPoWHash() const {
         } else {
             LogPrintf("AuxPoW: Failed to init aux RandomX with seed %s\n",
                       seed_hash.GetHex().substr(0, 16));
-            return uint256();
+            // Fail closed: all-FF never meets a target; a default (zero)
+            // uint256 here would grant a free block on any RandomX init error.
+            uint256 fail;
+            std::memset(fail.begin(), 0xFF, 32);
+            return fail;
         }
     } else {
         auto& miner = node::GetRandomXMiner();
@@ -178,6 +294,87 @@ bool CAuxPow::Check(const uint256& hashAuxBlock, int expectedChainId) const {
             LogPrintf("AuxPoW(monero): coinbase tree proof failed (got %s want %s)\n",
                       calcRoot.GetHex().substr(0, 16),
                       parentBlock.merkle_root.GetHex().substr(0, 16));
+            return false;
+        }
+        return true;
+    }
+
+    // Equihash (Zcash-family) proofs carry the parent coinbase as opaque raw
+    // bytes in parentHeaderRaw (v4 sapling txs can't deserialize into a
+    // CTransaction), so verify commitment + solution here instead of via the
+    // generic coinbaseTxMut path.
+    if (GetParentAlgo() == AuxPowAlgo::EQUIHASH && !parentHeaderRaw.empty()) {
+        EquihashRawParts p;
+        if (!ParseEquihashRaw(parentHeaderRaw, p) || p.coinbase_len == 0) {
+            LogPrintf("AuxPoW(equihash): malformed parentHeaderRaw\n");
+            return false;
+        }
+        // (a) The Equihash solution must be canonically valid for the mined
+        //     140-byte header — this is what binds the proof to real parent-
+        //     chain work rather than a bare SHA256d grind.
+        if (!equihash_canon::Verify(p.n, p.k, p.header, 140,
+                                    p.solution, p.solution_len)) {
+            LogPrintf("AuxPoW(equihash): invalid solution (n=%u k=%u)\n", p.n, p.k);
+            return false;
+        }
+        // (b) The exact 34-byte merge-mining tag for THIS aux block must appear
+        //     verbatim in the coinbase bytes.
+        uint256 expectedRoot = auxpow::CalcAuxChainMerkleRoot(hashAuxBlock, nChainId);
+        std::vector<uint8_t> tag = auxpow::BuildMergeMiningTag(expectedRoot, 0);
+        auto it = std::search(p.coinbase, p.coinbase + p.coinbase_len,
+                              tag.begin(), tag.end());
+        if (it == p.coinbase + p.coinbase_len) {
+            LogPrintf("AuxPoW(equihash): merge-mining tag not found in coinbase\n");
+            return false;
+        }
+        // (c) The mined header must commit to that coinbase: txid (SHA256d of
+        //     the raw serialization — the same rule for zcash-family as for
+        //     bitcoin) folded through coinbaseBranch must equal the header's
+        //     merkle root, which must also be what parentBlock records.
+        uint256 txid = Hash(Span{p.coinbase, p.coinbase_len});
+        uint256 root = coinbaseBranch.GetRoot(txid);
+        uint256 header_mr;
+        std::memcpy(header_mr.begin(), p.header + 36, 32);
+        if (root != header_mr || parentBlock.merkle_root != header_mr) {
+            LogPrintf("AuxPoW(equihash): coinbase merkle proof failed\n");
+            return false;
+        }
+        return true;
+    }
+
+    // Kaspa (kHeavyHash) proofs carry the header-hash preimage + serialized
+    // coinbase as opaque raw bytes (kaspa txs can't be a CTransaction, and the
+    // header is a structured serialization). The MM tag was embedded by kaspad
+    // itself via GetBlockTemplate extraData — a protobuf string — so it appears
+    // in the coinbase payload as the tag's 68-char hex-ASCII form.
+    if (GetParentAlgo() == AuxPowAlgo::KHEAVYHASH && !parentHeaderRaw.empty()) {
+        KaspaRawParts p;
+        if (!ParseKaspaRaw(parentHeaderRaw, p)) {
+            LogPrintf("AuxPoW(kaspa): malformed parentHeaderRaw\n");
+            return false;
+        }
+        // (a) The hex-ASCII merge-mining tag for THIS aux block must appear
+        //     verbatim in the coinbase bytes.
+        uint256 expectedRoot = auxpow::CalcAuxChainMerkleRoot(hashAuxBlock, nChainId);
+        std::vector<uint8_t> tag = auxpow::BuildMergeMiningTag(expectedRoot, 0);
+        std::string tag_ascii = HexStr(tag);
+        auto it = std::search(p.coinbase, p.coinbase + p.coinbase_len,
+                              tag_ascii.begin(), tag_ascii.end());
+        if (it == p.coinbase + p.coinbase_len) {
+            LogPrintf("AuxPoW(kaspa): merge-mining tag not found in coinbase\n");
+            return false;
+        }
+        // (b) The mined header must commit to that coinbase: TransactionHash
+        //     (keyed blake2b) folded through the MerkleBranchHash path must
+        //     equal the header preimage's merkle root — the same tree kaspad
+        //     verifies — which must also be what parentBlock records.
+        uint8_t txh[32], root_calc[32];
+        kheavyhash::TransactionHash(p.coinbase, p.coinbase_len, txh);
+        kheavyhash::MerkleFold(txh, p.branch, coinbaseBranch.nIndex, root_calc);
+        if (std::memcmp(root_calc, p.preimage + p.info.merkle_root_off, 32) != 0 ||
+            std::memcmp(parentBlock.merkle_root.begin(),
+                        p.preimage + p.info.merkle_root_off, 32) != 0) {
+            LogPrintf("AuxPoW(kaspa): coinbase merkle proof failed\n");
             return false;
         }
         return true;
@@ -270,22 +467,32 @@ uint256 CAuxPow::GetParentBlockPoWHash() const {
         }
 
         case AuxPowAlgo::X11: {
-            // X11 chained hash of 80-byte header
+            // Canonical Dash X11 (matches dashd) — consensus must agree with the
+            // real parent chain, not the non-canonical sphlib/x11.c used by X25X.
             uint256 hash;
-            x11_hash(data, len, hash.begin());
+            x11_dash_hash(data, len, hash.begin());
             return hash;
         }
 
-        case AuxPowAlgo::KHEAVYHASH:
-            // kHeavyHash placeholder — TODO replace with real kHeavyHash when available
-            // Until then SHA256d gives deterministic, verifiable results for regtest
-            return Hash(Span{data, len});
+        case AuxPowAlgo::KHEAVYHASH: {
+            // Real kaspa kHeavyHash over the carried BlockHash preimage: zero
+            // the nonce/timestamp fields for the pre-PoW hash, then cSHAKE256 →
+            // heavy matrix → cSHAKE256 with the REAL values. Kaspa compares the
+            // result little-endian — the same convention as UintToArith256 —
+            // so a hash clearing kaspad's target also clears WATTx's here.
+            KaspaRawParts p;
+            if (!ParseKaspaRaw(parentHeaderRaw, p)) return MaxHash();
+            std::vector<uint8_t> preimage(p.preimage, p.preimage + p.preimage_len);
+            uint256 pow;
+            if (!kheavyhash::PowFromPreimage(preimage, pow.begin())) return MaxHash();
+            return pow;
+        }
 
         case AuxPowAlgo::ETHASH: {
             // parentHeaderRaw = 32B header_hash + 8B nonce_LE + 32B mix_hash = 72 bytes
             // Compute ethash final_hash = keccak256(keccak512(header_hash+nonce) + mix_hash)
             // This is DAG-free; full mix_hash validity is guaranteed by the ETC network.
-            if (len < 72) return uint256();
+            if (len < 72) return MaxHash();  // fail closed: zero would pass any target
 
             ethash_hash256 header_hash;
             std::memcpy(header_hash.bytes, data, 32);
@@ -305,16 +512,26 @@ uint256 CAuxPow::GetParentBlockPoWHash() const {
             std::memcpy(final_input + 64, data + 40, 32);
             ethash_hash256 final_hash = ethash_keccak256(final_input, 96);
 
+            // Ethash compares the final hash as a BIG-ENDIAN 256-bit number
+            // (Ethereum/geth convention), whereas CheckProofOfWork below reads
+            // the uint256 little-endian via UintToArith256. Store the bytes
+            // reversed so the numeric value equals geth's — this is what lets a
+            // single solution that clears geth's target ALSO clear the (easier)
+            // WATTx target, i.e. true dual-earning merged mining. (sha256d/scrypt/
+            // x11/randomx are natively little-endian like WATTx and are unchanged.)
             uint256 result;
-            std::memcpy(result.begin(), final_hash.bytes, 32);
+            for (int i = 0; i < 32; i++) result.begin()[i] = final_hash.bytes[31 - i];
             return result;
         }
 
-        case AuxPowAlgo::EQUIHASH:
-            // parentHeaderRaw = 140-byte Equihash header (without solution)
-            // Difficulty is checked against SHA256d of the header bytes only
-            if (len < 140) return Hash(Span{data, len});
-            return Hash(Span{data, 140});
+        case AuxPowAlgo::EQUIHASH: {
+            // SHA256d over header + CompactSize(sol) + solution — byte-identical
+            // to the parent chain's block hash preimage, so a hash clearing the
+            // parent target is the real parent block hash (dual-earning).
+            EquihashRawParts p;
+            if (!ParseEquihashRaw(parentHeaderRaw, p)) return MaxHash();
+            return Hash(Span{data + 8, p.pow_len});
+        }
 
         default:
             return parentBlock.GetPoWHash();

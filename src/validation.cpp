@@ -6340,7 +6340,27 @@ std::vector<unsigned char> ChainstateManager::GenerateCoinbaseCommitment(CBlock&
 bool HasValidProofOfWork(const std::vector<CBlockHeader>& headers, const Consensus::Params& consensusParams)
 {
     return std::all_of(headers.cbegin(), headers.cend(),
-            [&](const auto& header) { return header.IsProofOfStake() ? true : CheckProofOfWorkRandomX(header, header.nBits, consensusParams);});
+            [&](const auto& header) {
+                if (header.IsProofOfStake()) return true;
+                // Merged-mined (AuxPoW) blocks carry their proof of work in the
+                // AuxPoW structure of the parent chain, which is NOT part of the
+                // bare CBlockHeader relayed in `headers` messages. There is no
+                // parent proof to hash here, so a stateless RandomX check would
+                // wrongly reject every merged-mined header (of every algo) and
+                // discourage the peer — which is why merged blocks never
+                // propagated. Accept the header when its target is well-formed
+                // and defer real PoW to CheckBlock/CheckAuxProofOfWork once the
+                // full block arrives. Mirrors CheckHeaderPoWAtHeight()'s AuxPoW
+                // branch; anti-DoS is still enforced by minimum-chain-work and
+                // full-block validation.
+                if (header.nVersion & AUXPOW_VERSION_FLAG) {
+                    arith_uint256 target;
+                    bool fNegative, fOverflow;
+                    target.SetCompact(header.nBits, &fNegative, &fOverflow);
+                    return !(fNegative || fOverflow || target == 0);
+                }
+                return CheckProofOfWorkRandomX(header, header.nBits, consensusParams);
+            });
 }
 
 bool IsBlockMutated(const CBlock& block, bool check_witness_root)
