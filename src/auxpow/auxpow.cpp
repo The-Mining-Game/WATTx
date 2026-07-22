@@ -21,6 +21,7 @@
 #include <crypto/kheavyhash/kheavyhash.h>    // canonical Kaspa kHeavyHash + hashing
 #include <ethash/ethash.h>
 #include <ethash/keccak.h>
+#include <auxpow/ethash_seal.h>
 
 namespace {
 
@@ -261,6 +262,12 @@ uint256 CMerkleBranch::GetRoot(const uint256& leaf) const {
 // CAuxPow
 // ============================================================================
 
+// Defined below GetParentBlockPoWHash; used by both Check() and that function.
+static bool ParseEthashV2(const std::vector<uint8_t>& raw,
+                          std::array<uint8_t, 32>& sealHash,
+                          uint8_t nonce8[8], uint8_t mix32[32],
+                          std::vector<uint8_t>& extraOut);
+
 bool CAuxPow::Check(const uint256& hashAuxBlock, int expectedChainId) const {
     // 1. Verify chain ID matches
     if (nChainId != expectedChainId) {
@@ -380,6 +387,32 @@ bool CAuxPow::Check(const uint256& hashAuxBlock, int expectedChainId) const {
         return true;
     }
 
+    // Ethash (Altcoinchain/ETC): TRUSTLESS full-header path. The parent block's
+    // OWN extraData carries the WATTx aux commitment (the ALT hybrid engine
+    // writes it in Prepare), and the ethash PoW — checked in CheckAuxProofOfWork
+    // via GetParentBlockPoWHash — is computed over the seal hash recomputed from
+    // this same full header. So a valid PoW proves work on a header that commits
+    // to THIS aux block; the pool can no longer assert an unbound synthetic
+    // coinbase (the old forgeable path). The 72-byte legacy format fails
+    // ParseEthashV2 and is rejected here.
+    if (GetParentAlgo() == AuxPowAlgo::ETHASH) {
+        std::array<uint8_t, 32> sealHash;
+        uint8_t nonce_b[8], mix_b[32];
+        std::vector<uint8_t> extra;
+        if (!ParseEthashV2(parentHeaderRaw, sealHash, nonce_b, mix_b, extra)) {
+            LogPrintf("AuxPoW(ethash): malformed full-header proof\n");
+            return false;
+        }
+        // extraData must equal the aux-chain merkle root committing to THIS block.
+        uint256 expectedRoot = auxpow::CalcAuxChainMerkleRoot(hashAuxBlock, nChainId);
+        if (extra.size() != 32 ||
+            std::memcmp(extra.data(), expectedRoot.begin(), 32) != 0) {
+            LogPrintf("AuxPoW(ethash): parent extraData does not commit to aux block\n");
+            return false;
+        }
+        return true;
+    }
+
     // SECURITY: bind the proof-of-work to the commitment for the 80-byte-header
     // parent chains (sha256d/scrypt/x11). GetParentBlockPoWHash() hashes the raw
     // 80-byte header, so its merkle-root field (bytes 36..68) MUST equal the
@@ -470,6 +503,50 @@ bool CAuxPow::Check(const uint256& hashAuxBlock, int expectedChainId) const {
     return true;
 }
 
+// Parse the trustless full-header ethash AuxPoW format and recompute geth's
+// seal hash. Layout:
+//   [u8 marker=0x02][u8 hasBaseFee]
+//   {13 or 14 fields, each [u16 LE len][bytes]} in SealHash order:
+//     parentHash, uncleHash, coinbase, root, txHash, receiptHash, bloom,
+//     difficulty, number, gasLimit, gasUsed, time, extra, [baseFee if hasBaseFee]
+//   [8B nonce (ethash/LE order)][32B mix]
+// Returns false on any malformed input. Fills sealHash, nonce8, mix32, extra.
+static bool ParseEthashV2(const std::vector<uint8_t>& raw,
+                          std::array<uint8_t, 32>& sealHash,
+                          uint8_t nonce8[8], uint8_t mix32[32],
+                          std::vector<uint8_t>& extraOut) {
+    size_t p = 0;
+    auto need = [&](size_t n) { return p + n <= raw.size(); };
+    if (!need(2) || raw[p] != 0x02) return false;
+    p += 1;
+    const uint8_t hasBaseFee = raw[p++];
+    ethseal::EthHeaderFields h;
+    std::vector<uint8_t>* fields[14] = {
+        &h.parentHash, &h.uncleHash, &h.coinbase, &h.root, &h.txHash, &h.receiptHash, &h.bloom,
+        &h.difficulty, &h.number, &h.gasLimit, &h.gasUsed, &h.time, &h.extra, &h.baseFee};
+    const int nfields = hasBaseFee ? 14 : 13;
+    for (int i = 0; i < nfields; ++i) {
+        if (!need(2)) return false;
+        const uint16_t flen = static_cast<uint16_t>(raw[p] | (raw[p + 1] << 8));
+        p += 2;
+        if (!need(flen)) return false;
+        fields[i]->assign(raw.begin() + p, raw.begin() + p + flen);
+        p += flen;
+    }
+    h.hasBaseFee = hasBaseFee != 0;
+    if (h.parentHash.size() != 32 || h.uncleHash.size() != 32 || h.coinbase.size() != 20 ||
+        h.root.size() != 32 || h.txHash.size() != 32 || h.receiptHash.size() != 32 ||
+        h.bloom.size() != 256)
+        return false;
+    if (!need(8 + 32)) return false;
+    std::memcpy(nonce8, raw.data() + p, 8);
+    p += 8;
+    std::memcpy(mix32, raw.data() + p, 32);
+    sealHash = ethseal::SealHash(h);
+    extraOut = std::move(h.extra);
+    return true;
+}
+
 uint256 CAuxPow::GetParentBlockPoWHash() const {
     // If no raw bytes or algo is RANDOMX, fall back to Monero blob via parentBlock
     if (parentHeaderRaw.empty() || parentAlgoId == static_cast<uint8_t>(AuxPowAlgo::RANDOMX)) {
@@ -516,27 +593,27 @@ uint256 CAuxPow::GetParentBlockPoWHash() const {
         }
 
         case AuxPowAlgo::ETHASH: {
-            // parentHeaderRaw = 32B header_hash + 8B nonce_LE + 32B mix_hash = 72 bytes
-            // Compute ethash final_hash = keccak256(keccak512(header_hash+nonce) + mix_hash)
-            // This is DAG-free; full mix_hash validity is guaranteed by the ETC network.
-            if (len < 72) return MaxHash();  // fail closed: zero would pass any target
+            // Trustless full-header format: recompute geth's seal hash from the
+            // carried header (RLP of 14 fields, per ethash_seal.h) so the PoW is
+            // over the SAME header whose extraData Check() binds to the WATTx
+            // commitment. header_hash is no longer trusted from the wire.
+            std::array<uint8_t, 32> sealHash;
+            uint8_t nonce_b[8], mix_b[32];
+            std::vector<uint8_t> extra;
+            if (!ParseEthashV2(parentHeaderRaw, sealHash, nonce_b, mix_b, extra)) {
+                return MaxHash();  // fail closed: zero would pass any target
+            }
 
-            ethash_hash256 header_hash;
-            std::memcpy(header_hash.bytes, data, 32);
-
-            uint64_t nonce = 0;
-            std::memcpy(&nonce, data + 32, 8);
-
-            // seed = keccak512(header_hash_bytes + nonce_LE)
+            // seed = keccak512(seal_hash + nonce_LE)
             uint8_t seed_input[40];
-            std::memcpy(seed_input,      header_hash.bytes, 32);
-            std::memcpy(seed_input + 32, &nonce, 8);
+            std::memcpy(seed_input,      sealHash.data(), 32);
+            std::memcpy(seed_input + 32, nonce_b, 8);
             ethash_hash512 seed = ethash_keccak512(seed_input, 40);
 
             // final = keccak256(seed + mix_hash)
             uint8_t final_input[96];
             std::memcpy(final_input,      seed.bytes, 64);
-            std::memcpy(final_input + 64, data + 40, 32);
+            std::memcpy(final_input + 64, mix_b, 32);
             ethash_hash256 final_hash = ethash_keccak256(final_input, 96);
 
             // Ethash compares the final hash as a BIG-ENDIAN 256-bit number
