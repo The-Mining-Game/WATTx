@@ -603,7 +603,11 @@ void MultiMergedStratumServer::ParentPollerThread(const std::string& chain_name)
             }
         }
 
-        std::this_thread::sleep_for(std::chrono::seconds(5));
+        // Poll once per second: fast parent chains (ethash/kHeavyHash) seal
+        // blocks every few seconds, and the poller only creates a merged job
+        // when the parent height changes — a 5s interval silently skipped any
+        // height mined between polls, so those solutions had no job to land on.
+        std::this_thread::sleep_for(std::chrono::seconds(1));
     }
 }
 
@@ -2101,6 +2105,15 @@ bool MultiMergedStratumServer::ValidateShare(int client_id, const std::string& j
 
     // Submit to WATTx if meets target
     if (meets_wtx && job.wattx_template) {
+        // Use the job's frozen WATTx template + payout coinbase: the merge-mining
+        // commitment (tag) and the aux block hash were computed together in
+        // CreateJob and must stay consistent for CAuxPow::Check. (A submit-time
+        // refresh to the current tip would raise the WATTx:parent ratio when
+        // parent blocks outrun WATTx connects, but only if the commitment is
+        // rebuilt in lockstep — left for a proper fix.)
+        auto wtpl = job.wattx_template;
+        auto payout_cb = job.payout_coinbase;
+
         // Build algo-specific extra_data for CreateAuxPow:
         //   Ethash: "nonce64_hex:mix_hash_hex" — nonce is 8 bytes, result holds mix_hash
         //   Bitcoin stratum: "extranonce8_hex:ntime8_hex" passed in via proto_extra
@@ -2118,24 +2131,25 @@ bool MultiMergedStratumServer::ValidateShare(int client_id, const std::string& j
 
         // Create AuxPoW proof with the correct algorithm-specific parent header raw bytes
         CAuxPow auxpow = handler->CreateAuxPow(
-            job.wattx_template->getBlockHeader(),
+            wtpl->getBlockHeader(),
             job.coinbase_data,
             nonce_val,
             job.merge_mining_tag,
             extra_data
         );
 
-        // Verify proof against the SAME canonical block hash the commitment was
-        // built over in CreateJob (over the payout-split coinbase), and submit that
-        // exact coinbase so the block the network validates pays the miners.
-        uint256 wattx_hash = job.wattx_template->getAuxPowBlockHash(job.payout_coinbase);
+        // Verify proof against the canonical block hash over the payout-split
+        // coinbase (the job's frozen template — the commitment/tag were built
+        // together in CreateJob), and submit that exact coinbase so the block
+        // the network validates pays the miners.
+        uint256 wattx_hash = wtpl->getAuxPowBlockHash(payout_cb);
         if (auxpow.Check(wattx_hash, handler->GetChainId())) {
             auto auxpow_ptr = std::make_shared<CAuxPow>(auxpow);
-            auto header = job.wattx_template->getBlockHeader();
-            CTransactionRef submit_cb = job.payout_coinbase
-                ? job.payout_coinbase : job.wattx_template->getCoinbaseTx();
+            auto header = wtpl->getBlockHeader();
+            CTransactionRef submit_cb = payout_cb
+                ? payout_cb : wtpl->getCoinbaseTx();
 
-            bool success = job.wattx_template->submitAuxPowSolution(
+            bool success = wtpl->submitAuxPowSolution(
                 header.nVersion | CAuxPowBlockHeader::AUXPOW_VERSION_FLAG,
                 header.nTime,
                 0,
