@@ -6,6 +6,7 @@
 #define WATTX_STRATUM_PARENT_CHAIN_ETHASH_H
 
 #include <stratum/parent_chain_base.h>
+#include <auxpow/ethash_seal.h>
 #include <arith_uint256.h>
 #include <hash.h>
 #include <uint256.h>
@@ -447,6 +448,89 @@ public:
         arith_uint256 target = max_val / difficulty;
 
         return ArithToUint256(target);
+    }
+
+    // Fetch the FULL sealing header from geth (eth_getSealingHeader — the header
+    // whose seal hash eth_getWork returns; unlike "pending" it has miner/stateRoot
+    // populated) and fill coinbase_data.eth_* so CreateAuxPow can build the
+    // trustless V2 proof. Returns false if unavailable/malformed (fail closed).
+    bool FetchSealingHeader(ParentCoinbaseData& cb) {
+        std::string resp = JsonRpcCall("eth_getSealingHeader", "[]");
+        if (resp.empty() || resp.find("\"result\"") == std::string::npos) return false;
+        auto dec = [&](const char* key) -> std::vector<uint8_t> {
+            std::string v = ParseJsonString(resp, key);
+            if (v.size() >= 2 && v[0] == '0' && v[1] == 'x') v = v.substr(2);
+            if (v.size() % 2) v = "0" + v;  // pad odd-length quantities
+            return ParseHex(v);
+        };
+        cb.eth_parentHash  = dec("parentHash");
+        cb.eth_uncleHash   = dec("sha3Uncles");
+        cb.eth_coinbase    = dec("miner");
+        cb.eth_root        = dec("stateRoot");
+        cb.eth_txHash      = dec("transactionsRoot");
+        cb.eth_receiptHash = dec("receiptsRoot");
+        cb.eth_bloom       = dec("logsBloom");
+        cb.eth_difficulty  = dec("difficulty");
+        cb.eth_number      = dec("number");
+        cb.eth_gasLimit    = dec("gasLimit");
+        cb.eth_gasUsed     = dec("gasUsed");
+        cb.eth_time        = dec("timestamp");
+        cb.eth_extra       = dec("extraData");
+        cb.eth_baseFee     = dec("baseFeePerGas");
+        cb.eth_hasBaseFee  = !cb.eth_baseFee.empty();
+        if (cb.eth_parentHash.size() != 32 || cb.eth_uncleHash.size() != 32 ||
+            cb.eth_coinbase.size() != 20 || cb.eth_root.size() != 32 ||
+            cb.eth_txHash.size() != 32 || cb.eth_receiptHash.size() != 32 ||
+            cb.eth_bloom.size() != 256) {
+            cb.eth_header_valid = false;
+            return false;
+        }
+        cb.eth_header_valid = true;
+
+        // Compute the seal hash of THIS exact header locally so the miner grinds
+        // the same header the AuxPoW proof is built from (eth_getWork could race
+        // a geth rebuild). Consensus recomputes it identically (ethash_seal.h).
+        ethseal::EthHeaderFields h;
+        h.parentHash = cb.eth_parentHash; h.uncleHash = cb.eth_uncleHash;
+        h.coinbase = cb.eth_coinbase;     h.root = cb.eth_root;
+        h.txHash = cb.eth_txHash;         h.receiptHash = cb.eth_receiptHash;
+        h.bloom = cb.eth_bloom;           h.extra = cb.eth_extra;
+        h.difficulty = cb.eth_difficulty; h.number = cb.eth_number;
+        h.gasLimit = cb.eth_gasLimit;     h.gasUsed = cb.eth_gasUsed;
+        h.time = cb.eth_time;             h.baseFee = cb.eth_baseFee;
+        h.hasBaseFee = cb.eth_hasBaseFee;
+        auto seal = ethseal::SealHash(h);
+        static const char* hexd = "0123456789abcdef";
+        std::string sh = "0x";
+        for (uint8_t b : seal) { sh += hexd[b >> 4]; sh += hexd[b & 0xf]; }
+        m_header_hash = sh;
+        return true;
+    }
+
+    // Trustless commit-then-mine: tell geth to embed THIS job's aux commitment
+    // (aux_root, from the merge-mining tag) in the block it seals, then snapshot
+    // the committed sealing header. The commitment lands in the next template
+    // geth builds; a background committed-header cache (TODO) will remove the
+    // per-job latency. Called by CreateJob before BuildHashingBlob.
+    bool PrepareTaggedTemplate(
+        ParentCoinbaseData& coinbase_data,
+        const std::vector<uint8_t>& merge_mining_tag
+    ) override {
+        if (merge_mining_tag.size() >= 34) {
+            // tag = [0x03][depth][32B aux_root]
+            std::vector<uint8_t> aux_root(merge_mining_tag.begin() + 2,
+                                          merge_mining_tag.begin() + 34);
+            static const char* hexd = "0123456789abcdef";
+            std::string root_hex = "0x";
+            for (uint8_t b : aux_root) { root_hex += hexd[b >> 4]; root_hex += hexd[b & 0xf]; }
+            JsonRpcCall("mm_setCommitment", "[\"" + root_hex + "\"]");
+        }
+        // Snapshot the current sealing header (may still carry the previous
+        // commitment until geth rebuilds; CreateAuxPow/Check fail-close if the
+        // extraData doesn't match this job's aux block, so a not-yet-committed
+        // header simply won't land a WATTx block — no unbound proof is produced).
+        FetchSealingHeader(coinbase_data);
+        return true;
     }
 
 private:
