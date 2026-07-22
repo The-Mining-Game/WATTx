@@ -10,6 +10,7 @@
 #include <hash.h>
 #include <uint256.h>
 
+#include <algorithm>
 #include <array>
 
 namespace merged_stratum {
@@ -355,6 +356,13 @@ public:
         return response.find("true") != std::string::npos;
     }
 
+    // Serialize one V2 field: [u16 LE length][bytes].
+    static void PutField(std::vector<uint8_t>& out, const std::vector<uint8_t>& f) {
+        out.push_back(static_cast<uint8_t>(f.size() & 0xff));
+        out.push_back(static_cast<uint8_t>((f.size() >> 8) & 0xff));
+        out.insert(out.end(), f.begin(), f.end());
+    }
+
     CAuxPow CreateAuxPow(
         const CBlockHeader& wattx_header,
         const ParentCoinbaseData& coinbase_data,
@@ -363,62 +371,67 @@ public:
         const std::string& extra_data = ""   // "nonce64_hex:mix_hash_hex"
     ) override {
         CAuxPow proof;
-
-        // parentBlock timestamp for time validation
         proof.parentBlock.timestamp = GetTime();
+        proof.parentAlgoId = static_cast<uint8_t>(AuxPowAlgo::ETHASH);
+        proof.nChainId     = m_config.chain_id;
 
-        // Build parentHeaderRaw = 32B header_hash + 8B nonce_LE + 32B mix_hash = 72 bytes
-        // extra_data format: "nonce64_hex:mix_hash_hex" (passed by ValidateShare for Ethash)
+        // The submitted solution: nonce (8B) + mix (32B), from ValidateShare.
         std::string nonce64_hex, mix_hash_hex;
         size_t colon = extra_data.find(':');
         if (colon != std::string::npos) {
             nonce64_hex  = extra_data.substr(0, colon);
             mix_hash_hex = extra_data.substr(colon + 1);
         }
-
-        std::vector<uint8_t> raw(72, 0);
-
-        // header_hash (32 bytes) — strip "0x" prefix if present
-        std::string hh = m_header_hash;
-        if (hh.size() >= 2 && hh[0] == '0' && hh[1] == 'x') hh = hh.substr(2);
-        auto hh_bytes = ParseHex(hh);
-        if (hh_bytes.size() >= 32) std::memcpy(raw.data(), hh_bytes.data(), 32);
-
-        // nonce (8 bytes LE) — use extra_data nonce64 if available, else fall back to nonce param
+        auto strip0x = [](std::string s) {
+            if (s.size() >= 2 && s[0] == '0' && s[1] == 'x') return s.substr(2);
+            return s;
+        };
+        std::vector<uint8_t> nonce_bytes(8, 0), mix_bytes(32, 0);
         if (!nonce64_hex.empty()) {
-            std::string nh = nonce64_hex;
-            if (nh.size() >= 2 && nh[0] == '0' && nh[1] == 'x') nh = nh.substr(2);
-            auto nb = ParseHex(nh);
-            size_t copy_len = std::min(nb.size(), size_t(8));
-            std::memcpy(raw.data() + 32, nb.data(), copy_len);
-        } else {
-            std::memcpy(raw.data() + 32, &nonce, 4);
+            auto nb = ParseHex(strip0x(nonce64_hex));
+            // geth block nonce is big-endian; ethash hashes it little-endian, and
+            // the WATTx gate/consensus consume the nonce LE (matches eth_dualwatch).
+            std::reverse(nb.begin(), nb.end());
+            for (size_t i = 0; i < nb.size() && i < 8; ++i) nonce_bytes[i] = nb[i];
         }
-
-        // mix_hash (32 bytes)
         if (!mix_hash_hex.empty()) {
-            std::string mh = mix_hash_hex;
-            if (mh.size() >= 2 && mh[0] == '0' && mh[1] == 'x') mh = mh.substr(2);
-            auto mb = ParseHex(mh);
-            if (mb.size() >= 32) std::memcpy(raw.data() + 40, mb.data(), 32);
+            auto mb = ParseHex(strip0x(mix_hash_hex));
+            if (mb.size() >= 32) std::memcpy(mix_bytes.data(), mb.data(), 32);
         }
 
-        proof.parentAlgoId    = static_cast<uint8_t>(AuxPowAlgo::ETHASH);
-        proof.parentHeaderRaw = raw;
-
-        // Ethash has no coinbase in its PoW, but CAuxPow::Check() extracts the WATTx
-        // commitment from a coinbase (scriptSig/OP_RETURN) and verifies a coinbase
-        // merkle proof. Provide a synthetic coinbase carrying the merge-mining tag so
-        // the proof is structurally valid; empty branch => merkle_root == its txid.
-        // NOTE: this asserts the commitment pool-side — true trustless ETC merged
-        // mining requires the parent block itself to embed the WATTx aux hash.
-        CMutableTransaction cb = BuildAuxMergedCoinbase(merge_mining_tag, 0);
-        proof.coinbaseTxMut         = cb;
-        proof.parentBlock.merkle_root = CTransaction(cb).GetHash();
-        proof.coinbaseBranch.vHash.clear();
-        proof.coinbaseBranch.nIndex = 0;
-        proof.nChainId        = m_config.chain_id;
-
+        // TRUSTLESS full-header format (ParseEthashV2 in auxpow.cpp):
+        //   [0x02][hasBaseFee] {14|13 × [u16 LE len][bytes]} [8B nonce][32B mix]
+        // Built from the FULL geth header snapshot (coinbase_data.eth_*), so
+        // consensus recomputes the SAME seal hash the miner solved and verifies
+        // that header's extraData commits to this WATTx block. No synthetic
+        // coinbase — the ALT block itself carries the commitment.
+        if (coinbase_data.eth_header_valid) {
+            std::vector<uint8_t> raw;
+            raw.push_back(0x02);
+            raw.push_back(coinbase_data.eth_hasBaseFee ? 1 : 0);
+            PutField(raw, coinbase_data.eth_parentHash);
+            PutField(raw, coinbase_data.eth_uncleHash);
+            PutField(raw, coinbase_data.eth_coinbase);
+            PutField(raw, coinbase_data.eth_root);
+            PutField(raw, coinbase_data.eth_txHash);
+            PutField(raw, coinbase_data.eth_receiptHash);
+            PutField(raw, coinbase_data.eth_bloom);
+            PutField(raw, coinbase_data.eth_difficulty);
+            PutField(raw, coinbase_data.eth_number);
+            PutField(raw, coinbase_data.eth_gasLimit);
+            PutField(raw, coinbase_data.eth_gasUsed);
+            PutField(raw, coinbase_data.eth_time);
+            PutField(raw, coinbase_data.eth_extra);
+            if (coinbase_data.eth_hasBaseFee) PutField(raw, coinbase_data.eth_baseFee);
+            raw.insert(raw.end(), nonce_bytes.begin(), nonce_bytes.end());
+            raw.insert(raw.end(), mix_bytes.begin(), mix_bytes.end());
+            proof.parentHeaderRaw = raw;
+        } else {
+            // No full header snapshot → cannot build a trustless proof. Leave
+            // parentHeaderRaw empty; CAuxPow::Check rejects it (fail closed).
+            LogPrintf("EthashChain: CreateAuxPow without full-header snapshot — "
+                      "trustless proof unavailable\n");
+        }
         return proof;
     }
 

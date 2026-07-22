@@ -118,7 +118,18 @@ struct ParentCoinbaseData {
     uint256  kaspa_prepow;          // pre-PoW hash (nonce=0, ts=0), raw byte order
     uint64_t kaspa_timestamp{0};    // header timestamp, MILLISECONDS
 
-    bool IsValid() const { return !coinbase_tx.empty() || header_snapshot; }
+    // Ethash (trustless full-header AuxPoW): the FULL parent header geth is
+    // mining, fetched from eth_getBlockByNumber("pending"). CreateAuxPow builds
+    // the V2 proof (ParseEthashV2) from these so consensus can recompute the
+    // seal hash and verify the extraData commitment. Raw hex-decoded bytes;
+    // numeric fields are big-endian minimal-izable. eth_header_valid gates use.
+    std::vector<uint8_t> eth_parentHash, eth_uncleHash, eth_coinbase, eth_root,
+        eth_txHash, eth_receiptHash, eth_bloom, eth_extra,
+        eth_difficulty, eth_number, eth_gasLimit, eth_gasUsed, eth_time, eth_baseFee;
+    bool eth_hasBaseFee{false};
+    bool eth_header_valid{false};
+
+    bool IsValid() const { return !coinbase_tx.empty() || header_snapshot || eth_header_valid; }
 };
 
 /**
