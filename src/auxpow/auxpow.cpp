@@ -20,6 +20,8 @@
 #include <crypto/equihash/equihash_canon.h>  // canonical Zcash/BitcoinZ validator
 #include <crypto/kheavyhash/kheavyhash.h>    // canonical Kaspa kHeavyHash + hashing
 #include <ethash/ethash.h>
+#include <ethash/ethash.hpp>
+#include <ethash/global_context.hpp>
 #include <ethash/keccak.h>
 #include <auxpow/ethash_seal.h>
 
@@ -266,7 +268,8 @@ uint256 CMerkleBranch::GetRoot(const uint256& leaf) const {
 static bool ParseEthashV2(const std::vector<uint8_t>& raw,
                           std::array<uint8_t, 32>& sealHash,
                           uint8_t nonce8[8], uint8_t mix32[32],
-                          std::vector<uint8_t>& extraOut);
+                          std::vector<uint8_t>& extraOut,
+                          uint64_t& blockNumberOut);
 
 bool CAuxPow::Check(const uint256& hashAuxBlock, int expectedChainId) const {
     // 1. Verify chain ID matches
@@ -399,7 +402,8 @@ bool CAuxPow::Check(const uint256& hashAuxBlock, int expectedChainId) const {
         std::array<uint8_t, 32> sealHash;
         uint8_t nonce_b[8], mix_b[32];
         std::vector<uint8_t> extra;
-        if (!ParseEthashV2(parentHeaderRaw, sealHash, nonce_b, mix_b, extra)) {
+        uint64_t blockNumber = 0;
+        if (!ParseEthashV2(parentHeaderRaw, sealHash, nonce_b, mix_b, extra, blockNumber)) {
             LogPrintf("AuxPoW(ethash): malformed full-header proof\n");
             return false;
         }
@@ -514,7 +518,8 @@ bool CAuxPow::Check(const uint256& hashAuxBlock, int expectedChainId) const {
 static bool ParseEthashV2(const std::vector<uint8_t>& raw,
                           std::array<uint8_t, 32>& sealHash,
                           uint8_t nonce8[8], uint8_t mix32[32],
-                          std::vector<uint8_t>& extraOut) {
+                          std::vector<uint8_t>& extraOut,
+                          uint64_t& blockNumberOut) {
     size_t p = 0;
     auto need = [&](size_t n) { return p + n <= raw.size(); };
     if (!need(2) || raw[p] != 0x02) return false;
@@ -544,6 +549,9 @@ static bool ParseEthashV2(const std::vector<uint8_t>& raw,
     std::memcpy(mix32, raw.data() + p, 32);
     sealHash = ethseal::SealHash(h);
     extraOut = std::move(h.extra);
+    // Decode the block number (big-endian bytes → uint64) for the ethash epoch.
+    blockNumberOut = 0;
+    for (uint8_t b : h.number) blockNumberOut = (blockNumberOut << 8) | b;
     return true;
 }
 
@@ -600,21 +608,28 @@ uint256 CAuxPow::GetParentBlockPoWHash() const {
             std::array<uint8_t, 32> sealHash;
             uint8_t nonce_b[8], mix_b[32];
             std::vector<uint8_t> extra;
-            if (!ParseEthashV2(parentHeaderRaw, sealHash, nonce_b, mix_b, extra)) {
+            uint64_t blockNumber = 0;
+            if (!ParseEthashV2(parentHeaderRaw, sealHash, nonce_b, mix_b, extra, blockNumber)) {
                 return MaxHash();  // fail closed: zero would pass any target
             }
 
-            // seed = keccak512(seal_hash + nonce_LE)
-            uint8_t seed_input[40];
-            std::memcpy(seed_input,      sealHash.data(), 32);
-            std::memcpy(seed_input + 32, nonce_b, 8);
-            ethash_hash512 seed = ethash_keccak512(seed_input, 40);
-
-            // final = keccak256(seed + mix_hash)
-            uint8_t final_input[96];
-            std::memcpy(final_input,      seed.bytes, 64);
-            std::memcpy(final_input + 64, mix_b, 32);
-            ethash_hash256 final_hash = ethash_keccak256(final_input, 96);
+            // REAL ethash: recompute the mix from the DAG (light cache) and
+            // require the submitted mix to match. Without this, WATTx would trust
+            // the mix and an attacker could keccak-grind a fake mix to meet the
+            // (easy) aux target with no real ethash work — the commitment binds
+            // the block but the PoW must be genuine too. get_global_epoch_context
+            // caches the ~40 MB light cache per epoch; ethash::hash is ~ms.
+            uint64_t nonce_u64 = 0;
+            std::memcpy(&nonce_u64, nonce_b, 8);  // nonce carried little-endian
+            ethash::hash256 eh_seal;
+            std::memcpy(eh_seal.bytes, sealHash.data(), 32);
+            const int epoch = ethash::get_epoch_number(static_cast<int>(blockNumber));
+            ethash::result r = ethash::hash(ethash::get_global_epoch_context(epoch), eh_seal, nonce_u64);
+            if (std::memcmp(r.mix_hash.bytes, mix_b, 32) != 0) {
+                return MaxHash();  // fake / invalid mix — not a real ethash solution
+            }
+            ethash_hash256 final_hash;
+            std::memcpy(final_hash.bytes, r.final_hash.bytes, 32);
 
             // Ethash compares the final hash as a BIG-ENDIAN 256-bit number
             // (Ethereum/geth convention), whereas CheckProofOfWork below reads
