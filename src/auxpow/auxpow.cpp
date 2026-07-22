@@ -380,6 +380,33 @@ bool CAuxPow::Check(const uint256& hashAuxBlock, int expectedChainId) const {
         return true;
     }
 
+    // SECURITY: bind the proof-of-work to the commitment for the 80-byte-header
+    // parent chains (sha256d/scrypt/x11). GetParentBlockPoWHash() hashes the raw
+    // 80-byte header, so its merkle-root field (bytes 36..68) MUST equal the
+    // merkle root the coinbase proof folds to (parentBlock.merkle_root). Without
+    // this, a forger could grind any throwaway header to meet the (easy) aux
+    // target and attach an unrelated coinbase committing to their own aux block,
+    // minting WATTx blocks with no real parent-chain work. (equihash and kaspa
+    // enforce the equivalent in their branches above; monero binds via the PoW
+    // blob. ethash is NOT covered here — its synthetic-coinbase path is being
+    // replaced by a full-header design; until then it is testnet-only.)
+    {
+        const AuxPowAlgo a = GetParentAlgo();
+        if (a == AuxPowAlgo::SHA256D || a == AuxPowAlgo::SCRYPT || a == AuxPowAlgo::X11) {
+            if (parentHeaderRaw.size() < 80) {
+                LogPrintf("AuxPoW: 80-byte parent header required for algo %d\n", (int)a);
+                return false;
+            }
+            uint256 header_mr;
+            std::memcpy(header_mr.begin(), parentHeaderRaw.data() + 36, 32);
+            if (parentBlock.merkle_root != header_mr) {
+                LogPrintf("AuxPoW: parent-header merkle root != committed merkle root "
+                          "(unbound PoW) algo %d\n", (int)a);
+                return false;
+            }
+        }
+    }
+
     // 2-4. Verify the coinbase commits to THIS aux block.
     uint256 expectedRoot = auxpow::CalcAuxChainMerkleRoot(hashAuxBlock, nChainId);
     uint256 calculatedRoot = auxChainBranch.IsNull()
