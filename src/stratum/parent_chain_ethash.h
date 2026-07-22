@@ -13,6 +13,8 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <thread>
 
 namespace merged_stratum {
 
@@ -516,21 +518,28 @@ public:
         ParentCoinbaseData& coinbase_data,
         const std::vector<uint8_t>& merge_mining_tag
     ) override {
+        std::vector<uint8_t> aux_root;
         if (merge_mining_tag.size() >= 34) {
             // tag = [0x03][depth][32B aux_root]
-            std::vector<uint8_t> aux_root(merge_mining_tag.begin() + 2,
-                                          merge_mining_tag.begin() + 34);
+            aux_root.assign(merge_mining_tag.begin() + 2, merge_mining_tag.begin() + 34);
             static const char* hexd = "0123456789abcdef";
             std::string root_hex = "0x";
             for (uint8_t b : aux_root) { root_hex += hexd[b >> 4]; root_hex += hexd[b & 0xf]; }
             JsonRpcCall("mm_setCommitment", "[\"" + root_hex + "\"]");
         }
-        // Snapshot the current sealing header (may still carry the previous
-        // commitment until geth rebuilds; CreateAuxPow/Check fail-close if the
-        // extraData doesn't match this job's aux block, so a not-yet-committed
-        // header simply won't land a WATTx block — no unbound proof is produced).
-        FetchSealingHeader(coinbase_data);
-        return true;
+        // Poll until geth's sealing header actually carries THIS commitment — it
+        // only appears in the next template geth builds (recommit/new block), so
+        // the miner must not grind a header committing to a stale aux block.
+        // Bounded so a stuck geth can't hang job creation.
+        for (int i = 0; i < 60; ++i) {
+            if (FetchSealingHeader(coinbase_data)) {
+                if (aux_root.empty() || coinbase_data.eth_extra == aux_root) return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        LogPrintf("EthashChain: commitment did not appear in sealing header — job skipped\n");
+        coinbase_data.eth_header_valid = false;  // fail closed: no unbound proof
+        return false;
     }
 
 private:
