@@ -1648,35 +1648,79 @@ void MultiMergedStratumServer::CreateJob(ParentChainAlgo algo) {
 
     // Get WATTx template
     if (m_wattx_mining) {
-        job.wattx_template = m_wattx_mining->createNewBlock();
+        // Ethash uses trustless commit-then-mine ROUNDS: the WATTx aux block is
+        // fixed while the WATTx tip is unchanged, so the commitment stays stable
+        // and geth's sealing header can settle on it (rebuilding per parent-height
+        // job would thrash the commitment). Other algos build fresh per job.
+        const bool use_round = (algo == ParentChainAlgo::ETHASH);
+        auto tip = m_wattx_mining->getTip();
+        const uint256 tip_hash = tip ? tip->hash : uint256();
+
+        if (use_round && m_ethash_round.valid && m_ethash_round.wattx_template &&
+            m_ethash_round.wtx_tip == tip_hash) {
+            job.wattx_template   = m_ethash_round.wattx_template;
+            job.payout_coinbase  = m_ethash_round.payout_coinbase;
+            job.aux_merkle_root  = m_ethash_round.aux_merkle_root;
+            job.merge_mining_tag = m_ethash_round.merge_mining_tag;
+            job.wattx_height     = m_ethash_round.wattx_height;
+            job.wattx_bits       = m_ethash_round.wattx_bits;
+            job.wattx_target     = m_ethash_round.wattx_target;
+        } else {
+            job.wattx_template = m_wattx_mining->createNewBlock();
+            if (job.wattx_template) {
+                auto header = job.wattx_template->getBlockHeader();
+                job.wattx_height = tip ? tip->height + 1 : 0;
+                job.wattx_bits = header.nBits;
+
+                arith_uint256 target;
+                target.SetCompact(job.wattx_bits);
+                job.wattx_target = ArithToUint256(target);
+
+                // Create merge mining commitment. It must bind to the SAME block hash
+                // consensus will check post-assembly — with AUXPOW_VERSION_FLAG set,
+                // nNonce=0, and the merkle root finalized. The template header alone
+                // carries a zero merkle root, so ask the template for the canonical hash.
+                // Split the block reward among contributing miners by reward_share, and
+                // commit to THAT coinbase (frozen in the job) so the aux hash and the
+                // submitted block both reflect the payout.
+                job.payout_coinbase = BuildPayoutCoinbase(job.wattx_template);
+                uint256 wattx_hash = job.wattx_template->getAuxPowBlockHash(job.payout_coinbase);
+                job.aux_merkle_root = auxpow::CalcAuxChainMerkleRoot(wattx_hash, handler->GetChainId());
+                job.merge_mining_tag = auxpow::BuildMergeMiningTag(job.aux_merkle_root, 0);
+
+                if (use_round) {  // freeze this as the round for the current WATTx tip
+                    m_ethash_round.wtx_tip = tip_hash;
+                    m_ethash_round.wattx_template = job.wattx_template;
+                    m_ethash_round.payout_coinbase = job.payout_coinbase;
+                    m_ethash_round.aux_merkle_root = job.aux_merkle_root;
+                    m_ethash_round.merge_mining_tag = job.merge_mining_tag;
+                    m_ethash_round.wattx_height = job.wattx_height;
+                    m_ethash_round.wattx_bits = job.wattx_bits;
+                    m_ethash_round.wattx_target = job.wattx_target;
+                    m_ethash_round.valid = true;
+                }
+            }
+        }
+
         if (job.wattx_template) {
-            auto header = job.wattx_template->getBlockHeader();
-            auto tip = m_wattx_mining->getTip();
-            job.wattx_height = tip ? tip->height + 1 : 0;
-            job.wattx_bits = header.nBits;
-
-            arith_uint256 target;
-            target.SetCompact(job.wattx_bits);
-            job.wattx_target = ArithToUint256(target);
-
-            // Create merge mining commitment. It must bind to the SAME block hash
-            // consensus will check post-assembly — with AUXPOW_VERSION_FLAG set,
-            // nNonce=0, and the merkle root finalized. The template header alone
-            // carries a zero merkle root, so ask the template for the canonical hash.
-            // Split the block reward among contributing miners by reward_share, and
-            // commit to THAT coinbase (frozen in the job) so the aux hash and the
-            // submitted block both reflect the payout.
-            job.payout_coinbase = BuildPayoutCoinbase(job.wattx_template);
-            uint256 wattx_hash = job.wattx_template->getAuxPowBlockHash(job.payout_coinbase);
-            job.aux_merkle_root = auxpow::CalcAuxChainMerkleRoot(wattx_hash, handler->GetChainId());
-            job.merge_mining_tag = auxpow::BuildMergeMiningTag(job.aux_merkle_root, 0);
-
-            // Chains whose daemon commits the tag itself (kaspa extraData) fetch
-            // a fresh tagged template now that the tag is known; the tagged
-            // template carries its own target/timestamp, so re-snapshot it.
-            if (handler->PrepareTaggedTemplate(job.coinbase_data, job.merge_mining_tag) &&
-                !job.coinbase_data.parent_target.IsNull()) {
+            // Chains whose daemon commits the tag itself (kaspa extraData, ethash
+            // extraData) fetch/commit the tagged template now that the tag is known;
+            // the tagged template carries its own target/timestamp, so re-snapshot it.
+            bool tagged_ok = handler->PrepareTaggedTemplate(job.coinbase_data, job.merge_mining_tag);
+            if (tagged_ok && !job.coinbase_data.parent_target.IsNull()) {
                 job.parent_target = job.coinbase_data.parent_target;
+            }
+
+            // Ethash is trustless: the proof needs the full-header snapshot whose
+            // extraData commits to THIS aux block. If PrepareTaggedTemplate could not
+            // confirm geth's sealing header carries the commitment, the snapshot is
+            // invalid and any share on this job would build a malformed (un-landable)
+            // AuxPoW proof. Don't broadcast such a job — keep the miner on the last
+            // good one until geth settles, rather than wasting its (slow) hashrate.
+            if (algo == ParentChainAlgo::ETHASH && !job.coinbase_data.eth_header_valid) {
+                LogPrintf("MultiMergedStratum: ethash job not broadcast — sealing header "
+                          "commitment unconfirmed (parent height %lu)\n", job.parent_height);
+                return;
             }
 
             // Rebuild hashing blob with MM tag injected
@@ -1787,14 +1831,18 @@ bool MultiMergedStratumServer::ValidateShare(int client_id, const std::string& j
         std::vector<uint8_t> nonce_bytes = ParseHex(nh);
         if (header_hash.size() != 32 || nonce_bytes.size() < 1) return false;
 
-        // Pack the nonce byte-for-byte the way CreateAuxPow writes parentHeaderRaw
-        // (memcpy of the first ≤8 ParseHex(nonce) bytes, rest zero) and CAuxPow::Check
-        // reads it — matching Check EXACTLY is what makes this gate predict Check's
-        // verdict, so use the submitted nonce bytes verbatim (no endianness swap).
+        // Ethash hashes the nonce LITTLE-ENDIAN in the seed (geth: keccak512(
+        // header || LE8(nonce))). The submitted nonce is big-endian (geth's
+        // eth_submitWork / BlockNonce format), and CreateAuxPow reverses it BE->LE
+        // before storing it in parentHeaderRaw, so consensus GetParentBlockPoWHash
+        // feeds ethash::hash the LE nonce. To PREDICT that verdict, this gate must
+        // seed with the SAME LE nonce — reverse the submitted bytes here too.
+        std::vector<uint8_t> nonce_le(nonce_bytes.begin(), nonce_bytes.end());
+        std::reverse(nonce_le.begin(), nonce_le.end());
         uint8_t seed_input[40] = {0};
         std::memcpy(seed_input, header_hash.data(), 32);
-        std::memcpy(seed_input + 32, nonce_bytes.data(),
-                    std::min<size_t>(nonce_bytes.size(), 8));
+        std::memcpy(seed_input + 32, nonce_le.data(),
+                    std::min<size_t>(nonce_le.size(), 8));
         ethash_hash512 seed = ethash_keccak512(seed_input, 40);
 
         uint8_t final_input[96];
@@ -2617,14 +2665,21 @@ uint256 MultiMergedStratumServer::GetAdjustedWtxTarget(const uint256& base_targe
         return base_target;  // No adjustment needed
     }
 
-    // Multiply target by luck multiplier
-    // Higher luck = higher target = easier to find blocks
-    arith_uint256 target = UintToArith256(base_target);
+    // Scale by luck multiplier. luck_multiplier is in [0.5, 3.0].
+    //   luck >= 1.0 would raise the target above base_target, but the clamp below
+    //   caps it at base_target anyway — so just return base and skip the (unsafe)
+    //   multiply. This also avoids `target * luck_scaled` overflowing arith_uint256:
+    //   base_target is ~2^255 on regtest, and 2^255 * 5e5 > 2^256 wraps to garbage,
+    //   which silently produced an absurdly tiny target (WTX unfindable).
+    if (score.luck_multiplier >= 1.0) {
+        return base_target;
+    }
 
-    // Scale by luck multiplier (using fixed-point math to avoid precision loss)
-    // luck_multiplier is in range [0.5, 3.0]
+    // luck < 1.0: scale DOWN. Divide before multiplying so the intermediate stays
+    // below base_target (< 2^256) and never overflows.
+    arith_uint256 target = UintToArith256(base_target);
     uint64_t luck_scaled = static_cast<uint64_t>(score.luck_multiplier * 1000000.0);
-    target = (target * luck_scaled) / 1000000;
+    target = (target / 1000000) * luck_scaled;
 
     // The adjusted target may never be EASIER than the WATTx block's own target.
     // Consensus validates the AuxPoW parent PoW against the block's nBits (== base_target),

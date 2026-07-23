@@ -422,6 +422,25 @@ private:
     std::unordered_map<std::string, MultiAlgoJob> m_jobs;  // job_id -> job
     std::atomic<uint64_t> m_job_counter{0};
 
+    // Ethash trustless "round": the WATTx aux block (template + payout coinbase +
+    // commitment) stays FIXED while the WATTx tip is unchanged, so the aux_root
+    // the pool commits to geth (mm_setCommitment) is stable and geth's sealing
+    // header can settle on it (Namecoin-style rounds). Rebuilding it per
+    // parent-height job would thrash the commitment — geth's header would never
+    // carry the current job's aux_root and no proof would ever bind.
+    struct EthashRound {
+        uint256 wtx_tip;
+        std::shared_ptr<interfaces::BlockTemplate> wattx_template;
+        CTransactionRef payout_coinbase;
+        uint256 aux_merkle_root;
+        std::vector<uint8_t> merge_mining_tag;
+        uint64_t wattx_height{0};
+        uint32_t wattx_bits{0};
+        uint256 wattx_target;
+        bool valid{false};
+    };
+    EthashRound m_ethash_round;
+
     // Statistics
     std::unordered_map<std::string, std::atomic<uint64_t>> m_total_shares;
     std::unordered_map<std::string, std::atomic<uint64_t>> m_blocks_found;
