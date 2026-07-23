@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <auxpow/auxpow.h>
+#include <auxpow/ethash_seal.h>
 #include <consensus/auxpow_validation.h>
 #include <hash.h>
 #include <primitives/transaction.h>
@@ -11,8 +12,12 @@
 #include <test/util/setup_common.h>
 #include <uint256.h>
 
+#include <ethash/ethash.hpp>
+#include <ethash/global_context.hpp>
+
 #include <boost/test/unit_test.hpp>
 
+#include <array>
 #include <cstring>
 #include <vector>
 
@@ -1068,6 +1073,224 @@ BOOST_AUTO_TEST_CASE(auxpow_ethash_rejects_legacy_synthetic_proof)
     empty.parentAlgoId = static_cast<uint8_t>(AuxPowAlgo::ETHASH);
     empty.parentHeaderRaw.clear();
     BOOST_CHECK(!empty.Check(auxBlockHash, chainId));
+}
+
+// ---------------------------------------------------------------------------
+// Ethash trustless full-header path
+//
+// Two independent guarantees, enforced in two different places:
+//   Check()                  -- the parent header's extraData commits to THIS
+//                               aux block (binds the block)
+//   GetParentBlockPoWHash()  -- the submitted mix is reproduced from the DAG
+//                               (proves the work is genuine)
+// Both are needed: the commitment alone still allowed the keccak-grind /
+// fake-mix forgery that tools/eth_miner.js demonstrated, and a real mix alone
+// would let a miner point real ALT work at someone else's aux block.
+// ---------------------------------------------------------------------------
+
+// Build the ParseEthashV2 wire format, and fill `fields` with the same values
+// so a test can independently recompute geth's seal hash. Layout:
+//   [0x02][hasBaseFee][13 fields: u16 LE len + bytes][8B nonce LE][32B mix]
+static std::vector<uint8_t> BuildEthashV2Raw(ethseal::EthHeaderFields& fields,
+                                             const std::vector<uint8_t>& extra,
+                                             uint64_t blockNumber,
+                                             uint64_t nonce,
+                                             const uint8_t mix32[32])
+{
+    fields = ethseal::EthHeaderFields{};
+    fields.parentHash.assign(32, 0x11);
+    fields.uncleHash.assign(32, 0x22);
+    fields.coinbase.assign(20, 0x33);
+    fields.root.assign(32, 0x44);
+    fields.txHash.assign(32, 0x55);
+    fields.receiptHash.assign(32, 0x66);
+    fields.bloom.assign(256, 0x00);
+    fields.difficulty = {0x01};
+    // Block number as big-endian minimal bytes: ParseEthashV2 folds these back
+    // into a uint64 to pick the ethash epoch.
+    fields.number.clear();
+    for (int shift = 56; shift >= 0; shift -= 8) {
+        const uint8_t b = static_cast<uint8_t>((blockNumber >> shift) & 0xff);
+        if (!fields.number.empty() || b != 0) fields.number.push_back(b);
+    }
+    fields.gasLimit = {0x01, 0x00};
+    fields.gasUsed  = {0x00};
+    fields.time     = {0x01};
+    fields.extra    = extra;
+    fields.hasBaseFee = false;
+
+    std::vector<uint8_t> raw;
+    raw.push_back(0x02);  // V2 marker
+    raw.push_back(0x00);  // hasBaseFee = false
+    auto put = [&raw](const std::vector<uint8_t>& v) {
+        raw.push_back(static_cast<uint8_t>(v.size() & 0xff));
+        raw.push_back(static_cast<uint8_t>((v.size() >> 8) & 0xff));
+        raw.insert(raw.end(), v.begin(), v.end());
+    };
+    put(fields.parentHash); put(fields.uncleHash); put(fields.coinbase);
+    put(fields.root);       put(fields.txHash);    put(fields.receiptHash);
+    put(fields.bloom);      put(fields.difficulty); put(fields.number);
+    put(fields.gasLimit);   put(fields.gasUsed);   put(fields.time);
+    put(fields.extra);
+    for (int i = 0; i < 8; ++i) raw.push_back(static_cast<uint8_t>((nonce >> (8 * i)) & 0xff));
+    raw.insert(raw.end(), mix32, mix32 + 32);
+    return raw;
+}
+
+static uint256 AllOnesHash()
+{
+    uint256 h;
+    std::memset(h.begin(), 0xFF, 32);
+    return h;
+}
+
+BOOST_AUTO_TEST_CASE(auxpow_ethash_v2_commitment_binding)
+{
+    CBlockHeader header;
+    header.nVersion = 1;
+    header.hashMerkleRoot = uint256S("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789");
+    header.nTime = 1700000000;
+    header.nBits = 0x1f00ffff;
+    const uint256 auxBlockHash = header.GetHash();
+    const int chainId = CAuxPowBlockHeader::WATTX_CHAIN_ID;
+
+    const uint256 commitment = auxpow::CalcAuxChainMerkleRoot(auxBlockHash, chainId);
+    std::vector<uint8_t> goodExtra(commitment.begin(), commitment.begin() + 32);
+    uint8_t mix[32];
+    std::memset(mix, 0xAB, sizeof(mix));
+    ethseal::EthHeaderFields f;
+
+    // Honest: extraData carries the commitment to this aux block.
+    {
+        CAuxPow proof = BuildValidAuxPow(auxBlockHash, chainId);
+        proof.parentAlgoId = static_cast<uint8_t>(AuxPowAlgo::ETHASH);
+        proof.parentHeaderRaw = BuildEthashV2Raw(f, goodExtra, 1, 0x1122334455667788ULL, mix);
+        BOOST_CHECK(proof.Check(auxBlockHash, chainId));
+    }
+
+    // Forgery: real-looking header, but its extraData commits to a DIFFERENT
+    // aux block. This is a miner trying to point parent work at someone else's
+    // (or an unrelated) WATTx block.
+    {
+        std::vector<uint8_t> wrongExtra(32, 0x77);
+        CAuxPow proof = BuildValidAuxPow(auxBlockHash, chainId);
+        proof.parentAlgoId = static_cast<uint8_t>(AuxPowAlgo::ETHASH);
+        proof.parentHeaderRaw = BuildEthashV2Raw(f, wrongExtra, 1, 1, mix);
+        BOOST_CHECK_MESSAGE(!proof.Check(auxBlockHash, chainId),
+                            "ethash proof accepted with extraData not committing to this aux block");
+    }
+
+    // A short extraData must not be accepted via a partial compare.
+    {
+        std::vector<uint8_t> shortExtra(goodExtra.begin(), goodExtra.begin() + 31);
+        CAuxPow proof = BuildValidAuxPow(auxBlockHash, chainId);
+        proof.parentAlgoId = static_cast<uint8_t>(AuxPowAlgo::ETHASH);
+        proof.parentHeaderRaw = BuildEthashV2Raw(f, shortExtra, 1, 1, mix);
+        BOOST_CHECK(!proof.Check(auxBlockHash, chainId));
+    }
+
+    // Wrong version marker (0x01) must not parse as V2.
+    {
+        CAuxPow proof = BuildValidAuxPow(auxBlockHash, chainId);
+        proof.parentAlgoId = static_cast<uint8_t>(AuxPowAlgo::ETHASH);
+        proof.parentHeaderRaw = BuildEthashV2Raw(f, goodExtra, 1, 1, mix);
+        proof.parentHeaderRaw[0] = 0x01;
+        BOOST_CHECK(!proof.Check(auxBlockHash, chainId));
+    }
+
+    // Truncated body (nonce+mix chopped off) must fail closed.
+    {
+        CAuxPow proof = BuildValidAuxPow(auxBlockHash, chainId);
+        proof.parentAlgoId = static_cast<uint8_t>(AuxPowAlgo::ETHASH);
+        proof.parentHeaderRaw = BuildEthashV2Raw(f, goodExtra, 1, 1, mix);
+        proof.parentHeaderRaw.resize(proof.parentHeaderRaw.size() - 33);
+        BOOST_CHECK(!proof.Check(auxBlockHash, chainId));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(auxpow_ethash_powhash_rejects_fake_mix)
+{
+    // THE fake-mix forgery: a well-formed V2 proof whose extraData commits
+    // correctly (so Check() passes), but whose mix was never derived from the
+    // DAG. Without the mix recomputation an attacker only has to keccak-grind
+    // the final hash under the easy aux target -- no DAG, no real ALT work.
+    // GetParentBlockPoWHash() must fail closed to all-FF, which can never meet
+    // any target. (A zero hash here would meet EVERY target.)
+    const uint256 commitment = auxpow::CalcAuxChainMerkleRoot(
+        uint256S("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"),
+        CAuxPowBlockHeader::WATTX_CHAIN_ID);
+    std::vector<uint8_t> extra(commitment.begin(), commitment.begin() + 32);
+
+    ethseal::EthHeaderFields f;
+    uint8_t fakeMix[32];
+    std::memset(fakeMix, 0x11, sizeof(fakeMix));  // the eth_miner.js fake mix
+
+    CAuxPow proof;
+    proof.parentAlgoId = static_cast<uint8_t>(AuxPowAlgo::ETHASH);
+    proof.parentHeaderRaw = BuildEthashV2Raw(f, extra, 1, 0xdeadbeefULL, fakeMix);
+
+    BOOST_CHECK_MESSAGE(proof.GetParentBlockPoWHash() == AllOnesHash(),
+                        "fake ethash mix was not rejected -- keccak-grind forgery is reachable");
+
+    // Malformed input must fail closed the same way.
+    CAuxPow malformed;
+    malformed.parentAlgoId = static_cast<uint8_t>(AuxPowAlgo::ETHASH);
+    malformed.parentHeaderRaw.assign(72, 0x00);  // legacy synthetic format
+    BOOST_CHECK(malformed.GetParentBlockPoWHash() == AllOnesHash());
+}
+
+BOOST_AUTO_TEST_CASE(auxpow_ethash_powhash_accepts_genuine_dag_mix)
+{
+    // Positive counterpart: a mix genuinely derived from the ethash DAG must be
+    // accepted, and the returned hash must be geth's final hash byte-reversed
+    // (WATTx compares little-endian; ethash is big-endian -- that reversal is
+    // what lets one solution clear both targets for real dual-earning).
+    // Uses epoch 0 so the light cache is cheap to build in a unit test.
+    const uint256 commitment = auxpow::CalcAuxChainMerkleRoot(
+        uint256S("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"),
+        CAuxPowBlockHeader::WATTX_CHAIN_ID);
+    std::vector<uint8_t> extra(commitment.begin(), commitment.begin() + 32);
+
+    const uint64_t blockNumber = 1;      // epoch 0
+    const uint64_t nonce = 0x00000000000000ABULL;
+
+    // Build once with a placeholder mix purely to obtain the field set, then
+    // recompute the seal hash exactly as consensus does.
+    ethseal::EthHeaderFields f;
+    uint8_t placeholder[32];
+    std::memset(placeholder, 0, sizeof(placeholder));
+    (void)BuildEthashV2Raw(f, extra, blockNumber, nonce, placeholder);
+
+    const std::array<uint8_t, 32> sealHash = ethseal::SealHash(f);
+    ethash::hash256 ethSeal;
+    std::memcpy(ethSeal.bytes, sealHash.data(), 32);
+    const int epoch = ethash::get_epoch_number(static_cast<int>(blockNumber));
+    const ethash::result r =
+        ethash::hash(ethash::get_global_epoch_context(epoch), ethSeal, nonce);
+
+    // Re-encode carrying the genuine DAG-derived mix.
+    ethseal::EthHeaderFields f2;
+    CAuxPow proof;
+    proof.parentAlgoId = static_cast<uint8_t>(AuxPowAlgo::ETHASH);
+    proof.parentHeaderRaw = BuildEthashV2Raw(f2, extra, blockNumber, nonce, r.mix_hash.bytes);
+
+    uint256 expected;
+    for (int i = 0; i < 32; ++i) expected.begin()[i] = r.final_hash.bytes[31 - i];
+
+    const uint256 got = proof.GetParentBlockPoWHash();
+    BOOST_CHECK_MESSAGE(got != AllOnesHash(), "genuine DAG mix was rejected");
+    BOOST_CHECK_MESSAGE(got == expected, "ethash PoW hash != geth final hash byte-reversed");
+
+    // Flipping a single bit of the genuine mix must break it: proves the check
+    // is a real comparison against the recomputed mix, not a length/format test.
+    ethseal::EthHeaderFields f3;
+    uint8_t tampered[32];
+    std::memcpy(tampered, r.mix_hash.bytes, 32);
+    tampered[0] ^= 0x01;
+    CAuxPow tamperedProof;
+    tamperedProof.parentAlgoId = static_cast<uint8_t>(AuxPowAlgo::ETHASH);
+    tamperedProof.parentHeaderRaw = BuildEthashV2Raw(f3, extra, blockNumber, nonce, tampered);
+    BOOST_CHECK(tamperedProof.GetParentBlockPoWHash() == AllOnesHash());
 }
 
 BOOST_AUTO_TEST_SUITE_END()
