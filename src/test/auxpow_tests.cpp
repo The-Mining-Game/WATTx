@@ -909,4 +909,165 @@ BOOST_AUTO_TEST_CASE(build_merge_mining_tag_byte_layout)
     }
 }
 
+// ---------------------------------------------------------------------------
+// PoW <-> commitment binding (security regression tests)
+//
+// A merged block is only secure if the bytes actually hashed for proof-of-work
+// CONTAIN the commitment to the WATTx block. For the 80-byte-header parents
+// (sha256d/scrypt/x11) GetParentBlockPoWHash() hashes parentHeaderRaw, while
+// the coinbase proof folds to parentBlock.merkle_root -- a SEPARATE,
+// attacker-settable field. Without an explicit check tying the two together a
+// forger can grind any throwaway 80-byte header to meet the (easy) aux target,
+// staple on a coinbase committing to their own aux block, and mint WATTx blocks
+// with no real parent-chain work.
+//
+// These tests pin that check. Note they fail if the binding is removed but the
+// rest of Check() is left intact -- which is exactly the refactor hazard, since
+// every other test in this file leaves parentAlgoId at its 0/RANDOMX default
+// and never populates parentHeaderRaw, so none of them exercise this path.
+// ---------------------------------------------------------------------------
+
+// Build an 80-byte Bitcoin-style parent header whose merkle-root field
+// (bytes 36..68) is `mr`. Every other field is arbitrary: only the merkle-root
+// field participates in the binding check.
+static std::vector<uint8_t> BuildParentHeader80(const uint256& mr)
+{
+    std::vector<uint8_t> hdr(80, 0);
+    hdr[0] = 0x20;  // plausible version byte; not inspected by the binding
+    std::memcpy(hdr.data() + 36, mr.begin(), 32);
+    return hdr;
+}
+
+// The three algos that carry an 80-byte header and so must be bound.
+static const uint8_t GENERIC_80B_ALGOS[] = {
+    static_cast<uint8_t>(AuxPowAlgo::SHA256D),
+    static_cast<uint8_t>(AuxPowAlgo::SCRYPT),
+    static_cast<uint8_t>(AuxPowAlgo::X11),
+};
+
+BOOST_AUTO_TEST_CASE(auxpow_generic_algos_accept_bound_parent_header)
+{
+    CBlockHeader header;
+    header.nVersion = 1;
+    header.hashMerkleRoot = uint256S("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789");
+    header.nTime = 1700000000;
+    header.nBits = 0x1f00ffff;
+    const uint256 auxBlockHash = header.GetHash();
+    const int chainId = CAuxPowBlockHeader::WATTX_CHAIN_ID;
+
+    // Honest proof: the header that gets PoW'd carries the same merkle root the
+    // coinbase proof folds to. Must still validate -- the binding must not
+    // false-reject legitimate merged mining.
+    for (uint8_t algo : GENERIC_80B_ALGOS) {
+        CAuxPow proof = BuildValidAuxPow(auxBlockHash, chainId);
+        proof.parentAlgoId = algo;
+        proof.parentHeaderRaw = BuildParentHeader80(proof.parentBlock.merkle_root);
+        BOOST_CHECK_MESSAGE(proof.Check(auxBlockHash, chainId),
+                            "honest bound proof rejected for algo " << (int)algo);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(auxpow_generic_algos_reject_unbound_parent_header)
+{
+    CBlockHeader header;
+    header.nVersion = 1;
+    header.hashMerkleRoot = uint256S("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789");
+    header.nTime = 1700000000;
+    header.nBits = 0x1f00ffff;
+    const uint256 auxBlockHash = header.GetHash();
+    const int chainId = CAuxPowBlockHeader::WATTX_CHAIN_ID;
+
+    // THE FORGERY: the coinbase still commits correctly to our aux block (so
+    // every other check in Check() passes), but the header whose PoW would be
+    // verified commits to an unrelated merkle root. That header could be any
+    // cheap grind against the easy aux target. This MUST be rejected.
+    const uint256 unrelated = uint256S("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+    for (uint8_t algo : GENERIC_80B_ALGOS) {
+        CAuxPow proof = BuildValidAuxPow(auxBlockHash, chainId);
+        proof.parentAlgoId = algo;
+        proof.parentHeaderRaw = BuildParentHeader80(unrelated);
+
+        // Sanity: the forgery differs from the committed root only in the
+        // header, so without the binding the rest of Check() would pass.
+        BOOST_CHECK(proof.parentBlock.merkle_root != unrelated);
+        BOOST_CHECK_MESSAGE(!proof.Check(auxBlockHash, chainId),
+                            "UNBOUND PoW ACCEPTED for algo " << (int)algo
+                            << " -- parent-header/commitment binding is missing");
+    }
+}
+
+BOOST_AUTO_TEST_CASE(auxpow_generic_algos_require_full_80_byte_header)
+{
+    CBlockHeader header;
+    header.nVersion = 1;
+    header.hashMerkleRoot = uint256S("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789");
+    header.nTime = 1700000000;
+    header.nBits = 0x1f00ffff;
+    const uint256 auxBlockHash = header.GetHash();
+    const int chainId = CAuxPowBlockHeader::WATTX_CHAIN_ID;
+
+    // Fail closed: a missing or truncated header must not silently skip the
+    // binding (that would restore the forgery by simply omitting the bytes).
+    for (uint8_t algo : GENERIC_80B_ALGOS) {
+        CAuxPow empty = BuildValidAuxPow(auxBlockHash, chainId);
+        empty.parentAlgoId = algo;
+        empty.parentHeaderRaw.clear();
+        BOOST_CHECK_MESSAGE(!empty.Check(auxBlockHash, chainId),
+                            "empty parentHeaderRaw accepted for algo " << (int)algo);
+
+        CAuxPow truncated = BuildValidAuxPow(auxBlockHash, chainId);
+        truncated.parentAlgoId = algo;
+        truncated.parentHeaderRaw = BuildParentHeader80(truncated.parentBlock.merkle_root);
+        truncated.parentHeaderRaw.resize(79);  // one byte short of a full header
+        BOOST_CHECK_MESSAGE(!truncated.Check(auxBlockHash, chainId),
+                            "79-byte parentHeaderRaw accepted for algo " << (int)algo);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(auxpow_randomx_unaffected_by_generic_binding)
+{
+    CBlockHeader header;
+    header.nVersion = 1;
+    header.hashMerkleRoot = uint256S("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789");
+    header.nTime = 1700000000;
+    header.nBits = 0x1f00ffff;
+    const uint256 auxBlockHash = header.GetHash();
+    const int chainId = CAuxPowBlockHeader::WATTX_CHAIN_ID;
+
+    // The binding is algo-gated. RandomX binds via the PoW blob instead, and an
+    // empty parentHeaderRaw is legitimate there, so the 80-byte requirement must
+    // not leak into this path.
+    CAuxPow proof = BuildValidAuxPow(auxBlockHash, chainId);
+    proof.parentAlgoId = static_cast<uint8_t>(AuxPowAlgo::RANDOMX);
+    proof.parentHeaderRaw.clear();
+    BOOST_CHECK(proof.Check(auxBlockHash, chainId));
+}
+
+BOOST_AUTO_TEST_CASE(auxpow_ethash_rejects_legacy_synthetic_proof)
+{
+    CBlockHeader header;
+    header.nVersion = 1;
+    header.hashMerkleRoot = uint256S("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789");
+    header.nTime = 1700000000;
+    header.nBits = 0x1f00ffff;
+    const uint256 auxBlockHash = header.GetHash();
+    const int chainId = CAuxPowBlockHeader::WATTX_CHAIN_ID;
+
+    // The old ethash proof format was 32B header_hash + 8B nonce + 32B mix = 72
+    // bytes, with a synthetic coinbase decoupled from the PoW'd header. That is
+    // the format the fake-mix exploit used, so it must no longer parse. The V2
+    // full-header format is required (marker byte 0x02).
+    CAuxPow legacy = BuildValidAuxPow(auxBlockHash, chainId);
+    legacy.parentAlgoId = static_cast<uint8_t>(AuxPowAlgo::ETHASH);
+    legacy.parentHeaderRaw.assign(72, 0x00);
+    BOOST_CHECK_MESSAGE(!legacy.Check(auxBlockHash, chainId),
+                        "legacy 72-byte ethash proof accepted -- fake-mix forgery is reachable");
+
+    // An empty ethash proof must also fail closed rather than skip verification.
+    CAuxPow empty = BuildValidAuxPow(auxBlockHash, chainId);
+    empty.parentAlgoId = static_cast<uint8_t>(AuxPowAlgo::ETHASH);
+    empty.parentHeaderRaw.clear();
+    BOOST_CHECK(!empty.Check(auxBlockHash, chainId));
+}
+
 BOOST_AUTO_TEST_SUITE_END()
