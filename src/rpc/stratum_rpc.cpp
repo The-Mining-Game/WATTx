@@ -214,6 +214,9 @@ static RPCHelpMan startmultimergedstratum()
             {"wattx_wallet", RPCArg::Type::STR, RPCArg::Optional::NO, "Default WATTx address for block rewards"},
             {"share_difficulty", RPCArg::Type::NUM, RPCArg::Default{10000}, "Pool share difficulty (lower = easier shares; set low for regtest)"},
             {"share_nbits", RPCArg::Type::NUM, RPCArg::Default{0}, "Explicit share target as nBits compact (0 = derive from share_difficulty; testing knob, e.g. 522190847 = 0x1f0fffff for regtest)"},
+            {"excess_redirect_address", RPCArg::Type::STR, RPCArg::Default{""}, "WATTx address that receives the confiscated >cap excess reward (anti-domination). Empty = use wattx_wallet (the pool's own wallet)."},
+            {"wallet_nethash_cap_percent", RPCArg::Type::NUM, RPCArg::Default{50}, "Per-wallet per-chain nethash cap %% (contribution above this is diverted to the pool, not other miners)"},
+            {"ip_nethash_cap_percent", RPCArg::Type::NUM, RPCArg::Default{50}, "Per-source-IP aggregate per-chain nethash cap %% (anti-sybil; 0 disables). Raise it if legitimate independent miners share one public IP (NAT/farm/VPN)."},
         },
         RPCResult{
             RPCResult::Type::OBJ, "", "",
@@ -242,6 +245,15 @@ static RPCHelpMan startmultimergedstratum()
             }
             if (request.params.size() > 5 && !request.params[5].isNull()) {
                 config.share_nbits = static_cast<uint32_t>(request.params[5].getInt<int64_t>());
+            }
+            if (request.params.size() > 6 && !request.params[6].isNull()) {
+                config.excess_redirect_address = request.params[6].get_str();
+            }
+            if (request.params.size() > 7 && !request.params[7].isNull()) {
+                config.wallet_nethash_cap_percent = request.params[7].get_real();
+            }
+            if (request.params.size() > 8 && !request.params[8].isNull()) {
+                config.ip_nethash_cap_percent = request.params[8].get_real();
             }
 
             static const std::unordered_map<std::string, merged_stratum::ParentChainAlgo> algoMap{

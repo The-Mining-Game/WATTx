@@ -35,6 +35,7 @@ typedef int socklen_t;
 #define MSG_NOSIGNAL 0
 #endif
 #else
+#include <arpa/inet.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -496,6 +497,11 @@ void MultiMergedStratumServer::AcceptThread(ParentChainAlgo algo) {
             auto client = std::make_unique<MultiMergedClient>();
             client->socket_fd = client_fd;
             client->session_id = GenerateSessionId();
+            // Record the peer IP for the anti-sybil IP aggregate cap.
+            char ipbuf[INET_ADDRSTRLEN] = {0};
+            if (inet_ntop(AF_INET, &client_addr.sin_addr, ipbuf, sizeof(ipbuf))) {
+                client->ip_address = ipbuf;
+            }
             client->algo = algo;
             client->connect_time = GetTime();
             client->last_activity = GetTime();
@@ -1518,6 +1524,21 @@ CTransactionRef MultiMergedStratumServer::BuildPayoutCoinbase(
             recipients.emplace_back(GetScriptForDestination(dest), score.reward_share);
             total_share += score.reward_share;
         }
+        // The confiscated >cap excess is paid to the pool (NOT redistributed to
+        // the other miners — that is the whole point of the anti-domination rule).
+        // If the redirect address is missing/invalid the excess simply stays with
+        // the honest miners pro-rata (fail-open on payout: it can never mint, and
+        // never diverts funds to an unintended script).
+        if (m_pool_reward_share > 0.0 && !m_excess_redirect_address.empty()) {
+            CTxDestination pool_dest = DecodeDestination(m_excess_redirect_address);
+            if (IsValidDestination(pool_dest)) {
+                recipients.emplace_back(GetScriptForDestination(pool_dest), m_pool_reward_share);
+                total_share += m_pool_reward_share;
+            } else {
+                LogPrintf("MultiMergedStratum: excess-redirect address invalid (%s) — "
+                          "excess NOT diverted this block\n", m_excess_redirect_address);
+            }
+        }
     }
     // No scored miners yet (or none with a valid address): keep the default coinbase.
     if (recipients.empty() || total_share <= 0.0) return base_cb;
@@ -1972,10 +1993,15 @@ bool MultiMergedStratumServer::ValidateShare(int client_id, const std::string& j
             it->second->shares_accepted[chain_name]++;
             m_total_shares[chain_name]++;
 
-            // Record toward WATTx score unless over the 50% cap on this chain
-            // (the core of the decentralization rule).
-            if (!miner_capped && !wtx_address.empty()) {
-                RecordMinerShare(wtx_address, chain_name, EffectiveShareDifficulty(chain_name));
+            // Record the RAW contribution (wallet + source IP) toward WATTx
+            // scoring. The 50% cap is NOT applied here anymore: dropping shares
+            // above 50% would erase the very excess we must divert to the pool.
+            // ComputeRewardSplit applies the wallet + IP caps at scoring time and
+            // routes the confiscated excess to the pool. (miner_capped is still
+            // computed above for the log line only.)
+            if (!wtx_address.empty()) {
+                RecordMinerShare(wtx_address, chain_name, EffectiveShareDifficulty(chain_name),
+                                 it->second->ip_address);
             }
             if (meets_wtx) {
                 it->second->wtx_blocks_found++;
@@ -2390,12 +2416,16 @@ void MultiMergedStratumServer::UpdateMinerHashrates() {
     std::lock_guard<std::mutex> lock_clients(m_clients_mutex);
     std::lock_guard<std::mutex> lock_hashrate(m_hashrate_mutex);
 
-    // Clear old miner hashrates
+    // Clear old miner hashrates (wallet totals AND per-IP breakdown)
     for (auto& [coin_name, stats] : m_coin_stats) {
         stats.miner_hashrates.clear();
+        stats.ip_wallet_hashrates.clear();
     }
 
-    // Aggregate miner hashrates from client shares
+    // Aggregate miner hashrates from client shares. shares_accepted counts EVERY
+    // accepted share (including ones above the 50% cap), so this is the RAW
+    // contribution — the cap + excess-to-pool split is applied later in
+    // ComputeRewardSplit. Track by wallet and by source IP together.
     uint64_t time_window = 600;  // 10 minute window
 
     for (const auto& [client_id, client] : m_clients) {
@@ -2408,8 +2438,94 @@ void MultiMergedStratumServer::UpdateMinerHashrates() {
             // Estimate miner's hashrate: (shares * share_diff * 2^32) / time
             uint64_t miner_hashrate = (shares * EffectiveShareDifficulty(coin_name) * 0x100000000ULL) / time_window;
             stats_it->second.miner_hashrates[client->wtx_address] += miner_hashrate;
+            stats_it->second.ip_wallet_hashrates[client->ip_address][client->wtx_address] += miner_hashrate;
         }
     }
+}
+
+// Pure reward-split math (declared in the header; unit-tested in
+// merged_reward_tests.cpp). See the header comment for the model. Deterministic
+// and value-safe: identical inputs -> identical output, all shares finite and in
+// [0,1], sum(wallet_share)+pool_share == 1 whenever there is any contribution.
+RewardSplitResult ComputeRewardSplit(const std::vector<ChainRewardInput>& chains,
+                                     double wallet_cap_pct, double ip_cap_pct) {
+    RewardSplitResult out;
+    if (!(wallet_cap_pct > 0.0)) wallet_cap_pct = 100.0;  // non-positive cap => credit in full
+
+    double denom_raw = 0.0;                          // sum of ALL raw% (every wallet, every chain)
+    std::unordered_map<std::string, double> scored;  // wallet -> summed credited% across chains
+
+    for (const auto& chain : chains) {
+        // Denominator source: real nethash if known, else the pool's own hashrate
+        // (keeps payouts fair when a parent daemon can't report difficulty).
+        double net = chain.network_hashrate > 0 ? static_cast<double>(chain.network_hashrate)
+                   : (chain.pool_hashrate  > 0 ? static_cast<double>(chain.pool_hashrate) : 0.0);
+        if (net <= 0.0) continue;
+
+        // Per-wallet raw hashrate on this chain (summed over that wallet's IPs).
+        std::unordered_map<std::string, double> wallet_raw_hash;
+        for (const auto& [ip, wallets] : chain.ip_wallet_hashrates) {
+            for (const auto& [w, h] : wallets) wallet_raw_hash[w] += static_cast<double>(h);
+        }
+
+        // Per-wallet credited% after the PER-WALLET cap.
+        std::unordered_map<std::string, double> credited;
+        for (const auto& [w, h] : wallet_raw_hash) {
+            if (h <= 0.0) continue;
+            double raw_pct = (h / net) * 100.0;
+            denom_raw += raw_pct;
+            credited[w] = std::min(raw_pct, wallet_cap_pct);
+        }
+
+        // Attribute each wallet's credited% back to the IPs it mined from, in
+        // proportion to that wallet's hashrate on each IP. Handles the normal
+        // one-IP-per-wallet case exactly and multi-IP wallets pro-rata.
+        //   ip -> (wallet -> attributed credited%)
+        std::unordered_map<std::string, std::unordered_map<std::string, double>> attributed;
+        for (const auto& [ip, wallets] : chain.ip_wallet_hashrates) {
+            for (const auto& [w, h] : wallets) {
+                auto wit = wallet_raw_hash.find(w);
+                if (wit == wallet_raw_hash.end() || wit->second <= 0.0) continue;
+                attributed[ip][w] = credited[w] * (static_cast<double>(h) / wit->second);
+            }
+        }
+
+        // PER-IP aggregate cap (anti-sybil): if the wallets sharing one IP jointly
+        // exceed ip_cap on this chain, scale that IP's attributions down pro-rata.
+        // ip_cap <= 0 disables it; unknown IP ("") is never capped (can't attribute).
+        if (ip_cap_pct > 0.0) {
+            for (auto& [ip, wallets] : attributed) {
+                if (ip.empty()) continue;
+                double agg = 0.0;
+                for (const auto& [w, s] : wallets) agg += s;
+                if (agg > ip_cap_pct && agg > 0.0) {
+                    double factor = ip_cap_pct / agg;
+                    for (auto& [w, s] : wallets) s *= factor;
+                }
+            }
+        }
+
+        // Fold the (possibly IP-scaled) attributions back to per-wallet scores.
+        for (const auto& [ip, wallets] : attributed) {
+            for (const auto& [w, s] : wallets) scored[w] += s;
+        }
+    }
+
+    if (denom_raw <= 0.0) return out;  // no measurable contribution -> all zero
+
+    double sum_scored = 0.0;
+    for (const auto& [w, s] : scored) {
+        double share = s / denom_raw;
+        if (!std::isfinite(share) || share < 0.0) share = 0.0;
+        out.wallet_share[w] = share;
+        out.wallet_scored_pct[w] = s;
+        sum_scored += s;
+    }
+    double pool = (denom_raw - sum_scored) / denom_raw;  // confiscated excess fraction
+    if (!std::isfinite(pool) || pool < 0.0) pool = 0.0;
+    if (pool > 1.0) pool = 1.0;
+    out.pool_share = pool;
+    return out;
 }
 
 void MultiMergedStratumServer::RecalculateMinerScores() {
@@ -2484,34 +2600,66 @@ void MultiMergedStratumServer::RecalculateMinerScores() {
         m_miner_scores[miner_addr] = score;
     }
 
-    // Normalize to get reward shares (% of block reward each miner gets)
-    if (total_all_scores > 0.0) {
-        for (auto& [miner_addr, score] : m_miner_scores) {
-            score.reward_share = score.total_score / total_all_scores;
+    (void)total_all_scores;  // luck/HHI above still uses total_score; reward_share now comes from ComputeRewardSplit
 
-            LogPrintf("MultiMergedStratum: Miner %s - Score: %.4f, Reward%%: %.4f%%, Luck: %.2fx, Chains: %zu, HHI: %.3f\n",
-                      miner_addr.substr(0, 12) + "...",
-                      score.total_score,
-                      score.reward_share * 100.0,
-                      score.luck_multiplier,
-                      score.chains_mined,
-                      score.concentration_index);
-        }
+    // Reward shares: dividing by the RAW total contribution (not the capped
+    // total) is what routes >cap excess to the pool instead of inflating other
+    // miners' shares. ComputeRewardSplit applies the per-wallet AND per-IP
+    // (anti-sybil) caps and returns each wallet's fraction plus the pool's
+    // confiscated-excess fraction. Build its per-chain input from the raw
+    // wallet/IP hashrates recorded above.
+    std::vector<ChainRewardInput> split_input;
+    split_input.reserve(m_coin_stats.size());
+    for (const auto& [coin_name, stats] : m_coin_stats) {
+        ChainRewardInput ci;
+        ci.network_hashrate = stats.network_hashrate;
+        ci.pool_hashrate    = stats.pool_hashrate;
+        ci.ip_wallet_hashrates = stats.ip_wallet_hashrates;
+        split_input.push_back(std::move(ci));
+    }
+
+    RewardSplitResult split = ComputeRewardSplit(
+        split_input, m_config.wallet_nethash_cap_percent, m_config.ip_nethash_cap_percent);
+
+    for (auto& [miner_addr, score] : m_miner_scores) {
+        auto it = split.wallet_share.find(miner_addr);
+        score.reward_share = (it != split.wallet_share.end()) ? it->second : 0.0;
+    }
+    m_pool_reward_share = split.pool_share;
+    m_excess_redirect_address = m_config.excess_redirect_address.empty()
+        ? m_config.wattx_wallet_address : m_config.excess_redirect_address;
+
+    for (const auto& [miner_addr, score] : m_miner_scores) {
+        LogPrintf("MultiMergedStratum: Miner %s - Reward%%: %.4f%%, Luck: %.2fx, Chains: %zu, HHI: %.3f\n",
+                  miner_addr.substr(0, 12) + "...",
+                  score.reward_share * 100.0,
+                  score.luck_multiplier,
+                  score.chains_mined,
+                  score.concentration_index);
+    }
+    if (m_pool_reward_share > 0.0) {
+        LogPrintf("MultiMergedStratum: Pool (excess >cap) reward share: %.4f%% -> %s\n",
+                  m_pool_reward_share * 100.0,
+                  m_excess_redirect_address.empty() ? "(unset!)" : m_excess_redirect_address);
     }
 }
 
 void MultiMergedStratumServer::RecordMinerShare(const std::string& wtx_address,
                                                  const std::string& coin_name,
-                                                 uint64_t difficulty) {
-    // Called when a miner submits a valid share
-    // The share counts toward their hashrate on that chain
+                                                 uint64_t difficulty,
+                                                 const std::string& ip_address) {
+    // Called when a miner submits a valid share. The share counts toward their
+    // RAW (uncapped) hashrate on that chain — by wallet and by source IP. The
+    // authoritative per-period figures are rebuilt in UpdateMinerHashrates() from
+    // client shares_accepted; these immediate increments keep scoring responsive
+    // between rebuilds. Both maps stay consistent (raw) so ComputeRewardSplit sees
+    // the same picture from either path.
     std::lock_guard<std::mutex> lock(m_hashrate_mutex);
 
     auto stats_it = m_coin_stats.find(coin_name);
     if (stats_it != m_coin_stats.end()) {
-        // Increment their share-based hashrate contribution
-        // This gets converted to hashrate in UpdateMinerHashrates()
         stats_it->second.miner_hashrates[wtx_address] += difficulty;
+        stats_it->second.ip_wallet_hashrates[ip_address][wtx_address] += difficulty;
     }
 }
 

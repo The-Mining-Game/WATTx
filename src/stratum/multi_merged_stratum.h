@@ -66,8 +66,15 @@ struct CoinHashrateStats {
     uint64_t pool_hashrate{0};          // Our pool's hashrate on this coin
     uint64_t pool_shares{0};            // Total shares submitted
 
-    // Per-miner tracking: miner_address -> their hashrate on this coin
+    // Per-miner tracking: miner_address -> their RAW (uncapped) hashrate on this
+    // coin. Raw so the 50% cap + excess-to-pool split can be computed at scoring
+    // time; the per-share path no longer drops shares above 50%.
     std::unordered_map<std::string, uint64_t> miner_hashrates;
+
+    // Per-source-IP tracking: ip -> (wallet -> raw hashrate) on this coin. Used
+    // for the anti-sybil IP aggregate cap (one IP splitting >50% across several
+    // wallets to dodge the per-wallet cap). Empty ip ("") means unknown/untracked.
+    std::unordered_map<std::string, std::unordered_map<std::string, uint64_t>> ip_wallet_hashrates;
 
     // Calculated metrics
     double pool_nethash_percent{0.0};   // pool_hashrate / network_hashrate * 100
@@ -136,6 +143,18 @@ struct MultiMergedConfig {
     uint32_t share_nbits = 0;
     double pool_fee_percent = 0.1;   // 0.1% fee for WATTx Mining Game pools
 
+    // Decentralization / anti-cheat caps (see ComputeRewardSplit). A miner's
+    // reward is credited on at most `wallet_nethash_cap_percent` of any one
+    // chain's nethash; the confiscated excess is paid to `excess_redirect_address`
+    // (the pool) rather than redistributed to other miners. The IP aggregate cap
+    // catches a single source IP splitting >cap across several wallets to dodge
+    // the per-wallet cap. Both configurable; 0 disables that cap.
+    double wallet_nethash_cap_percent = 50.0;  // per-wallet per-chain cap
+    double ip_nethash_cap_percent     = 50.0;  // per-IP aggregate per-chain cap (0 = off)
+    // WTX address that receives the confiscated >cap excess. Empty => use
+    // wattx_wallet_address (the pool's own WTX wallet).
+    std::string excess_redirect_address;
+
     // Hashrate tracking settings
     int hashrate_update_interval = 60;   // Update network stats every N seconds
     bool normalize_cross_algo = true;    // Normalize shares across different algorithms
@@ -194,6 +213,7 @@ struct MultiMergedClient {
     int socket_fd{-1};
     std::string session_id;
     std::string worker_name;
+    std::string ip_address;   // peer IP (for the anti-sybil IP aggregate cap)
     ParentChainAlgo algo;
     StratumProtocol protocol{StratumProtocol::XMRIG};  // detected at subscribe/login time
 
@@ -232,6 +252,46 @@ struct MultiMergedClient {
  * Each algorithm has its own stratum port, allowing miners to connect
  * based on their hardware capabilities.
  */
+
+// ---------------------------------------------------------------------------
+// Reward split (pure, deterministic, unit-tested — see merged_reward_tests.cpp)
+// ---------------------------------------------------------------------------
+// One parent chain's raw contribution data for a reward computation.
+struct ChainRewardInput {
+    uint64_t network_hashrate{0};  // 0 => fall back to pool_hashrate for the denominator
+    uint64_t pool_hashrate{0};
+    // ip -> (wallet -> raw accumulated hashrate). ip "" means unknown/untracked.
+    std::unordered_map<std::string, std::unordered_map<std::string, uint64_t>> ip_wallet_hashrates;
+};
+
+struct RewardSplitResult {
+    std::unordered_map<std::string, double> wallet_share;       // wallet -> reward fraction [0,1]
+    double pool_share{0.0};                                     // confiscated-excess fraction [0,1]
+    std::unordered_map<std::string, double> wallet_scored_pct;  // wallet -> summed scored% (for luck/logging)
+    // Invariant on success: sum(wallet_share) + pool_share == 1.0 (within fp epsilon),
+    // and every value is finite and in [0,1]. Empty (all zero) when there is no
+    // measurable contribution.
+};
+
+// Compute each wallet's share of the WTX block reward and the pool's
+// confiscated-excess share, given per-chain raw contributions.
+//
+// Model (per the decentralization spec):
+//   * Denominator = the RAW total contribution (sum over every wallet & chain of
+//     wallet_raw%_on_chain). Dividing by RAW (not capped) is what sends excess to
+//     the pool instead of inflating other miners' shares.
+//   * Each wallet is credited min(raw%, wallet_cap) per chain (per-wallet cap).
+//   * If ip_cap > 0, wallets sharing one IP are jointly capped: per chain, if the
+//     IP's summed credited% exceeds ip_cap, each member is scaled down pro-rata
+//     (anti-sybil).
+//   * pool_share = 1 - sum(wallet_share) = the total confiscated excess fraction.
+//
+// wallet_cap_pct / ip_cap_pct are percentages (e.g. 50.0). ip_cap_pct <= 0
+// disables the IP cap. Deterministic: identical inputs always yield identical
+// output (required — the payout coinbase is frozen into the AuxPoW job).
+RewardSplitResult ComputeRewardSplit(const std::vector<ChainRewardInput>& chains,
+                                     double wallet_cap_pct, double ip_cap_pct);
+
 class MultiMergedStratumServer {
 public:
     MultiMergedStratumServer();
@@ -450,6 +510,11 @@ private:
     mutable std::mutex m_hashrate_mutex;
     std::unordered_map<std::string, CoinHashrateStats> m_coin_stats;  // coin_name -> stats
     std::unordered_map<std::string, MinerScore> m_miner_scores;       // wtx_address -> score
+    // Confiscated-excess share of the WTX block reward and where it is paid
+    // (the pool). Set by RecalculateMinerScores, read by BuildPayoutCoinbase;
+    // both hold m_hashrate_mutex.
+    double m_pool_reward_share{0.0};
+    std::string m_excess_redirect_address;
 
     // Hashrate update thread
     std::thread m_hashrate_thread;
@@ -459,7 +524,8 @@ private:
     void RecalculateMinerScores();
 
     // Record a share submission (updates miner's hashrate on that chain)
-    void RecordMinerShare(const std::string& wtx_address, const std::string& coin_name, uint64_t difficulty);
+    void RecordMinerShare(const std::string& wtx_address, const std::string& coin_name, uint64_t difficulty,
+                          const std::string& ip_address = "");
 
     // Get miner's score and reward share
     MinerScore GetMinerScore(const std::string& wtx_address) const;

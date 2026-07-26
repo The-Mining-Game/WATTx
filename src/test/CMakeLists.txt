@@ -10,6 +10,7 @@ add_executable(test_wattx
   allocator_tests.cpp
   amount_tests.cpp
   auxpow_tests.cpp
+  merged_reward_tests.cpp
   argsman_tests.cpp
   arith_uint256_tests.cpp
   banman_tests.cpp
