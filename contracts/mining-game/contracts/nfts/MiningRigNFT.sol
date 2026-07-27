@@ -35,8 +35,18 @@ contract MiningRigNFT is ERC721Enumerable, Ownable, ReentrancyGuard {
     // Token ID counter
     uint256 public nextTokenId = 1;
 
-    // Mint price (can be updated)
-    uint256 public mintPrice = 0.1 ether;
+    // Mint price, in the NATIVE UNIT OF THE DEPLOYMENT CHAIN (can be updated).
+    //
+    // Deliberately set by the constructor rather than an `ether` literal. This
+    // contract targets chains whose native currency does NOT share Ethereum's
+    // 18 decimals: the WATTx EVM reports msg.value in satoshis (8 decimals), so
+    // `0.1 ether` there is the literal 1e17 satoshis = 1,000,000,000 WTX and
+    // minting is impossible. The failure is silent -- it compiles, deploys, and
+    // only reverts with "Insufficient payment" at mint time -- so the price must
+    // be stated explicitly per chain instead of inherited from a unit keyword.
+    //   Ethereum/Polygon/Altcoinchain (18 dec): 0.1 ether  = 1e17
+    //   WATTx                         ( 8 dec): 0.1 WTX    = 1e7
+    uint256 public mintPrice;
 
     // Maximum supply (0 = unlimited)
     uint256 public maxSupply = 0;
@@ -60,7 +70,10 @@ contract MiningRigNFT is ERC721Enumerable, Ownable, ReentrancyGuard {
     event MintPriceUpdated(uint256 oldPrice, uint256 newPrice);
     event MaxSupplyUpdated(uint256 oldSupply, uint256 newSupply);
 
-    constructor() ERC721("WATTx Mining Rig", "WRIG") Ownable(msg.sender) {}
+    /// @param _mintPrice mint price in the deployment chain's native unit (see mintPrice)
+    constructor(uint256 _mintPrice) ERC721("WATTx Mining Rig", "WRIG") Ownable(msg.sender) {
+        mintPrice = _mintPrice;
+    }
 
     // ============================================================================
     // Modifiers
@@ -88,9 +101,15 @@ contract MiningRigNFT is ERC721Enumerable, Ownable, ReentrancyGuard {
         rigTraits[tokenId] = traits;
         _safeMint(msg.sender, tokenId);
 
-        // Refund excess payment
+        // Refund excess payment.
+        // call{value:} rather than transfer(): transfer forwards only a 2300-gas
+        // stipend, which reverts for any recipient with a non-trivial receive()
+        // -- smart-contract wallets, multisigs -- and is sensitive to future gas
+        // repricing. Refunding after _safeMint is fine for reentrancy: the mint
+        // is already complete and the function is nonReentrant.
         if (msg.value > mintPrice) {
-            payable(msg.sender).transfer(msg.value - mintPrice);
+            (bool ok, ) = payable(msg.sender).call{value: msg.value - mintPrice}("");
+            require(ok, "Refund failed");
         }
 
         emit RigMinted(tokenId, msg.sender, traits);
@@ -121,7 +140,8 @@ contract MiningRigNFT is ERC721Enumerable, Ownable, ReentrancyGuard {
         // Refund excess payment
         uint256 totalCost = mintPrice * count;
         if (msg.value > totalCost) {
-            payable(msg.sender).transfer(msg.value - totalCost);
+            (bool ok, ) = payable(msg.sender).call{value: msg.value - totalCost}("");
+            require(ok, "Refund failed");
         }
 
         return tokenIds;
@@ -304,7 +324,8 @@ contract MiningRigNFT is ERC721Enumerable, Ownable, ReentrancyGuard {
     function withdraw() external onlyOwner {
         uint256 balance = address(this).balance;
         require(balance > 0, "No balance");
-        payable(owner()).transfer(balance);
+        (bool ok, ) = payable(owner()).call{value: balance}("");
+        require(ok, "Withdraw failed");
     }
 
     // ============================================================================

@@ -18,7 +18,7 @@ describe("Mining Game System", function () {
 
     // Deploy MiningRigNFT
     const MiningRigNFT = await hre.ethers.getContractFactory("contracts/nfts/MiningRigNFT.sol:MiningRigNFT");
-    rigNFT = await MiningRigNFT.deploy();
+    rigNFT = await MiningRigNFT.deploy(MINT_PRICE); // native unit of the test chain (18 dec)
     await rigNFT.waitForDeployment();
 
     // Deploy GamePool

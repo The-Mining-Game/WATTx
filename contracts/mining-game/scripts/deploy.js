@@ -51,7 +51,7 @@ async function main() {
   } else {
     console.log("\nDeploying MiningRigNFT...");
     const MiningRigNFT = await hre.ethers.getContractFactory("nfts/MiningRigNFT");
-    const rigNFT = await MiningRigNFT.deploy();
+    const rigNFT = await MiningRigNFT.deploy(hre.ethers.parseEther("0.1")); // 18-decimal native chains
     await rigNFT.waitForDeployment();
     deployed.rigNFT = await rigNFT.getAddress();
     console.log("  MiningRigNFT deployed to:", deployed.rigNFT);

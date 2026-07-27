@@ -83,10 +83,12 @@ interface IMinerRigConfig {
     function getCoinAlgorithm(Coin coin) external pure returns (Algorithm);
 
     /// @notice Get coins for an algorithm
-    function getCoinsForAlgorithm(Algorithm algorithm) external pure returns (Coin[] memory);
+    /// @dev view, not pure: the mapping is configurable storage, not a constant table
+    function getCoinsForAlgorithm(Algorithm algorithm) external view returns (Coin[] memory);
 
     /// @notice Check if coin matches algorithm
-    function isCoinValidForAlgorithm(Coin coin, Algorithm algorithm) external pure returns (bool);
+    /// @dev view, not pure: reads the configurable coin->algorithm mapping
+    function isCoinValidForAlgorithm(Coin coin, Algorithm algorithm) external view returns (bool);
 
     // Events
     event RigConfigured(

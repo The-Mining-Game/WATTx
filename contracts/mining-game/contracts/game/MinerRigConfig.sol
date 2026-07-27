@@ -407,7 +407,7 @@ contract MinerRigConfig is IMinerRigConfig, Ownable, ReentrancyGuard {
 
         // If requireMatchingAlgorithm is true, check NFT's built-in algorithm
         if (requireMatchingAlgorithm) {
-            IMiningRigNFT.RigTraits memory traits = miningRigNFT.getRigTraits(rigId);
+            IMiningRigNFT.RigTraits memory traits = miningRigNFT.rigTraits(rigId);
             require(
                 traits.algorithm == uint8(algorithm),
                 "Algorithm must match rig"
