@@ -801,6 +801,30 @@ class CBlockHeader(object):
         return self.prevoutStake and (self.prevoutStake.hash != 0 or self.prevoutStake.n != 0xffffffff)
 
     def solve_stake(self, stakeModifier, prevouts):
+        """Search the prevouts for a stake kernel at this block's nTime.
+
+        Do not be tempted to widen this into a search over nTime as well. A real
+        staker gets a fresh attempt each timestamp granule, but a test building a
+        block on a just-mined parent has only one granule available, so moving
+        nTime can only produce a block the node rejects as a bad header:
+
+          nTime > pindexPrev->GetBlockTime()        validation.cpp, or "time-too-old"
+          nTime <= now + StakeTimestampMask()       FutureDrift, or "time-too-new"
+          nTime & StakeTimestampMask() == 0         CheckCoinStakeTimestamp,
+                                                    or "timestamp-invalid"
+
+        On regtest the mask is 15 for every height (nPoSDifficultyFixHeight is 1),
+        the parent was mined moments ago, and the drift allowance is 15 seconds --
+        so the only legal value is the next multiple of 16, which is what the
+        caller already passed in. Stepping forward lands outside the drift window;
+        stepping back lands on or before the parent.
+
+        One pass is enough because the kernel is easy on regtest: the comparison
+        wraps, giving an effective target of ((0x7fffff * nValue) mod 2**24) << 232,
+        which for a matured regtest coinbase is a large fraction of 2**256. If a
+        particular nValue ever makes this unlucky, retry after real time has
+        advanced a granule rather than reaching for a different timestamp here.
+        """
         target = uint256_from_compact(self.nBits)
         for prevout, nValue, txBlockTime in prevouts:
             data = b""
@@ -811,6 +835,7 @@ class CBlockHeader(object):
             posHash = uint256_from_str(hash256(data))
             if posHash <= (target*nValue) & (2**256 - 1):
                 self.prevoutStake = prevout
+                self.rehash()
                 return True
         return False
 

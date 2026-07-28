@@ -102,19 +102,19 @@ class QtumBlockIndexCleanupTest(BitcoinTestFramework):
         for n in self.nodes:
             n.setmocktime(mocktime)
         
-        generatesynchronized(self.node, COINBASE_MATURITY, "qSrM9K6FMhZ29Vkp8Rdk8Jp66bbfpjFETq", self.nodes, mocktime)
+        generatesynchronized(self.node, COINBASE_MATURITY, WATTX_REGTEST_BURN_ADDRESS, self.nodes, mocktime)
         self.disconnect_nodes(0, 1)
         self.connect_nodes(0, 1)
 
-        generatesynchronized(self.node, COINBASE_MATURITY, "qSrM9K6FMhZ29Vkp8Rdk8Jp66bbfpjFETq", self.nodes, mocktime)
+        generatesynchronized(self.node, COINBASE_MATURITY, WATTX_REGTEST_BURN_ADDRESS, self.nodes, mocktime)
         self.disconnect_nodes(0, 1)
         self.connect_nodes(0, 1)
 
-        generatesynchronized(self.node, COINBASE_MATURITY, "qSrM9K6FMhZ29Vkp8Rdk8Jp66bbfpjFETq", self.nodes, mocktime)
+        generatesynchronized(self.node, COINBASE_MATURITY, WATTX_REGTEST_BURN_ADDRESS, self.nodes, mocktime)
         self.disconnect_nodes(0, 1)
         self.connect_nodes(0, 1)
 
-        generatesynchronized(self.node, COINBASE_MATURITY, "qSrM9K6FMhZ29Vkp8Rdk8Jp66bbfpjFETq", self.nodes, mocktime)
+        generatesynchronized(self.node, COINBASE_MATURITY, WATTX_REGTEST_BURN_ADDRESS, self.nodes, mocktime)
         self.disconnect_nodes(0, 1)
         self.connect_nodes(0, 1)
 

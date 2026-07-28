@@ -286,7 +286,7 @@ class QtumHeaderSpamTest(BitcoinTestFramework):
         privkey = byte_to_base58(hash256(struct.pack('<I', 0)), 239)        
         self.node.importprivkey(privkey)
         self.node.setmocktime(int(time.time() - 1000*24*60*60))
-        generatesynchronized(self.node, 1000 + COINBASE_MATURITY, "qSrM9K6FMhZ29Vkp8Rdk8Jp66bbfpjFETq", self.nodes)
+        generatesynchronized(self.node, 1000 + COINBASE_MATURITY, WATTX_REGTEST_BURN_ADDRESS, self.nodes)
         self.staking_prevouts = collect_prevouts(self.node)
         generatesynchronized(self.node, COINBASE_MATURITY, None, self.nodes)
         self.sync_blocks()

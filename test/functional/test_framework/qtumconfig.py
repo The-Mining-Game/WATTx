@@ -14,6 +14,34 @@ WATTX_BLOCKTIME_DOWNSCALE_FACTOR = 4     # regtest
 WATTX_SUBSIDY_HALVING_INTERVAL = WATTX_BLOCKTIME_DOWNSCALE_FACTOR * 50  # 200
 WATTX_MAX_HALVINGS = 7                   # reward is forced to zero after this
 
+# A PoS block is measured against the PoS limit, not the PoW limit. GetLimit()
+# in src/pow.cpp returns FixedRBTPosLimit once nPoSDifficultyFixHeight is
+# reached, and regtest sets that height to 1, so every PoS block uses it. Carry
+# the wrong nBits and ContextualCheckBlockHeader rejects the block as
+# "bad-diffbits".
+#
+# On regtest the two limits happen to coincide -- powLimit, posLimit and
+# FixedRBTPosLimit are all 7fff...ff -- so this equals what create_block()
+# already fills in. Setting it explicitly keeps the test honest about which
+# limit governs, and keeps it correct if the values ever diverge again (they
+# did: regtest carried testnet's much tighter 0000000000003fff...  until the
+# staking tests turned out to be unable to build a single block).
+WATTX_POS_LIMIT_NBITS = 0x207fffff   # GetCompact(FixedRBTPosLimit) on regtest
+
+# The timestamp granularity a PoS block must be aligned to, and the distance it
+# may sit in the future. Both come from Consensus::StakeTimestampMask(), which
+# returns 15 for every height at or above nPoSDifficultyFixHeight -- and regtest
+# sets that height to 1. So 15 applies everywhere here and nRBTStakeTimestampMask
+# (3) never gets a look in.
+#
+# This is NOT the same number as TIMESTAMP_MASK below. That one is 3 under
+# ENABLE_REDUCED_BLOCK_TIME and predates the PoS difficulty fix; aligning a PoS
+# block to a multiple of 4 leaves three out of every four failing
+# CheckCoinStakeTimestamp with "timestamp-invalid" -- rejected as a bad header, so
+# the node never asks for the block and the test times out waiting for a getdata
+# rather than reporting the real reason.
+WATTX_POS_TIMESTAMP_MASK = 15
+
 
 def wattx_block_subsidy(height):
     """Mirror of GetBlockSubsidy() for regtest, in satoshis.

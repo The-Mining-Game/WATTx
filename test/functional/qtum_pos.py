@@ -10,7 +10,7 @@ from test_framework.p2p import *
 from test_framework.blocktools import *
 from test_framework.address import *
 from test_framework.key import ECKey
-from test_framework.qtumconfig import TIMESTAMP_MASK
+from test_framework.qtumconfig import TIMESTAMP_MASK, WATTX_POS_LIMIT_NBITS, WATTX_POS_TIMESTAMP_MASK, wattx_block_subsidy
 import io
 import struct
 
@@ -363,10 +363,18 @@ class QtumPOSTest(BitcoinTestFramework):
 
 
 
-    def create_unsigned_pos_block(self, staking_prevouts, nTime=None, outNValue=10002, signStakeTx=True, bestBlockHash=None, coinStakePrevout=None):
+    def create_unsigned_pos_block(self, staking_prevouts, nTime=None, outNValue=None, signStakeTx=True, bestBlockHash=None, coinStakePrevout=None, granule_attempts=6):
+        # A caller that pins nTime is testing that exact timestamp, so never move
+        # it. Otherwise the timestamp is ours to choose, and we may have to wait:
+        # see the granule note at the solve_stake call below.
+        pinned_nTime = nTime is not None
         if not nTime:
-            current_time = int(time.time()) + TIMESTAMP_MASK
-            nTime = current_time & (0xffffffff - TIMESTAMP_MASK)
+            # Round UP to the next aligned granule, deliberately: the parent was
+            # mined moments ago and a PoS block's timestamp must be strictly after
+            # it, so aligning down would land on or before the parent. Rounding up
+            # stays inside FutureDrift, which allows exactly this much.
+            current_time = int(time.time()) + WATTX_POS_TIMESTAMP_MASK
+            nTime = current_time & (0xffffffff - WATTX_POS_TIMESTAMP_MASK)
 
         if not bestBlockHash:
             bestBlockHash = self.node.getbestblockhash()
@@ -383,9 +391,40 @@ class QtumPOSTest(BitcoinTestFramework):
         coinbase.vout[0].nValue = 0
         coinbase.vout[0].scriptPubKey = b""
         coinbase.rehash()
-        block = create_block(int(bestBlockHash, 16), coinbase, nTime)
-        block.hashPrevBlock = int(bestBlockHash, 16)
-        if not block.solve_stake(parent_block_stake_modifier, staking_prevouts):
+
+        # Wait for a timestamp granule that yields a kernel.
+        #
+        # Only one timestamp is legal at a time (see solve_stake), and it is a
+        # 16-second granule, so every case that runs inside the same granule
+        # searches at the SAME nTime. At a fixed nTime the prevouts that can
+        # produce a kernel are a fixed subset -- for a 5 WTX prevout the odds are
+        # ((0x7fffff * nValue) mod 2**24) / 2**24, about a fifth -- and each case
+        # consumes one of them via _remove_from_staking_prevouts. The suite runs
+        # its cases in well under a second, so the winners in the current granule
+        # run out and every later case fails at that nTime no matter how many
+        # prevouts remain. Waiting for the clock to tick re-rolls all of them,
+        # which is exactly what a real staker does.
+        for attempt in range(granule_attempts if not pinned_nTime else 1):
+            if attempt:
+                granule = WATTX_POS_TIMESTAMP_MASK + 1
+                time.sleep(granule - (int(time.time()) % granule) + 1)
+                nTime = (int(time.time()) + WATTX_POS_TIMESTAMP_MASK) & (0xffffffff - WATTX_POS_TIMESTAMP_MASK)
+            block = create_block(int(bestBlockHash, 16), coinbase, nTime)
+            block.hashPrevBlock = int(bestBlockHash, 16)
+            # create_block() fills in the PoW limit; a PoS block is measured
+            # against the PoS limit instead (see WATTX_POS_LIMIT_NBITS).
+            block.nBits = WATTX_POS_LIMIT_NBITS
+            if block.solve_stake(parent_block_stake_modifier, staking_prevouts):
+                break
+        else:
+            # Returning None here surfaces as "cannot unpack non-iterable
+            # NoneType" at whichever caller happened to run out of luck, which
+            # says nothing about why. Report the pool instead.
+            self.log.error(
+                'solve_stake found no kernel after %d granules, last nTime=%d, '
+                'over %d prevouts (values: %s)' % (
+                    granule_attempts, nTime, len(staking_prevouts),
+                    sorted({v for _, v, _ in staking_prevouts})))
             return None
 
         # create a new private key used for block signing.
@@ -398,10 +437,27 @@ class QtumPOSTest(BitcoinTestFramework):
         if not coinStakePrevout:
             coinStakePrevout = block.prevoutStake
 
+        if outNValue is None:
+            # Qtum's 10002 was its 20000 stake input plus its 4 PoS reward, split
+            # over two outputs. Neither number holds here: WATTx stakes 5 WTX
+            # prevouts, and by the height these tests reach the subsidy has run
+            # through all WATTX_MAX_HALVINGS and pays nothing at all. So the
+            # coinstake has to return exactly what it consumed, or ConnectBlock
+            # rejects the block with "block-reward-invalid" -- which it did, on
+            # the one case that expects a valid block to be accepted.
+            stake_value = 0
+            for prevout, nValue, _ in staking_prevouts:
+                if prevout.serialize() == coinStakePrevout.serialize():
+                    stake_value = nValue
+                    break
+            out_each = (stake_value + wattx_block_subsidy(block_height + 1)) // 2
+        else:
+            out_each = int(outNValue*COIN)
+
         stake_tx_unsigned.vin.append(CTxIn(coinStakePrevout))
         stake_tx_unsigned.vout.append(CTxOut())
-        stake_tx_unsigned.vout.append(CTxOut(int(outNValue*COIN), scriptPubKey))
-        stake_tx_unsigned.vout.append(CTxOut(int(outNValue*COIN), scriptPubKey))
+        stake_tx_unsigned.vout.append(CTxOut(out_each, scriptPubKey))
+        stake_tx_unsigned.vout.append(CTxOut(out_each, scriptPubKey))
 
         if signStakeTx:
             stake_tx_signed_raw_hex = self.node.signrawtransactionwithwallet(bytes_to_hex_str(stake_tx_unsigned.serialize()))['hex']

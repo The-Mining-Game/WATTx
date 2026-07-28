@@ -55,9 +55,21 @@ class QtumHeaderSpamTest(BitcoinTestFramework):
         scriptPubKey = CScript([pubkey, OP_CHECKSIG])
         stake_tx_unsigned = CTransaction()
 
+        # 2000400000000 was Qtum's 20004 COIN -- its 20000 stake input plus a 4
+        # coin PoS reward. WATTx stakes smaller prevouts and pays no subsidy at
+        # all this far past WATTX_MAX_HALVINGS, so that constant overpays and
+        # ConnectBlock rejects the block with "block-reward-invalid". The node
+        # then discourages the peer, and the next send in this test dies with
+        # "Not connected" -- a disconnect the test never asked for.
+        stake_value = 0
+        for prevout, nValue, _ in staking_prevouts:
+            if prevout.serialize() == block.prevoutStake.serialize():
+                stake_value = nValue
+                break
+
         stake_tx_unsigned.vin.append(CTxIn(block.prevoutStake))
         stake_tx_unsigned.vout.append(CTxOut())
-        stake_tx_unsigned.vout.append(CTxOut(2000400000000, scriptPubKey))
+        stake_tx_unsigned.vout.append(CTxOut(stake_value + wattx_block_subsidy(block_height + 1), scriptPubKey))
 
         stake_tx_signed_raw_hex = self.node.signrawtransactionwithwallet(bytes_to_hex_str(stake_tx_unsigned.serialize()))['hex']
         f = io.BytesIO(hex_str_to_bytes(stake_tx_signed_raw_hex))
@@ -81,7 +93,7 @@ class QtumHeaderSpamTest(BitcoinTestFramework):
         self.node.importprivkey(privkey)
         self.start_p2p_connection()
         self.node.setmocktime(int(time.time())-10000)
-        generatesynchronized(self.node, 100+COINBASE_MATURITY, "qSrM9K6FMhZ29Vkp8Rdk8Jp66bbfpjFETq", self.nodes)
+        generatesynchronized(self.node, 100+COINBASE_MATURITY, WATTX_REGTEST_BURN_ADDRESS, self.nodes)
         self.sync_all()
         self.disconnect_nodes(0, 1)
     

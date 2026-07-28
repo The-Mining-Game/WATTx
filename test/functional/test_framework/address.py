@@ -33,10 +33,10 @@ from test_framework.segwit_addr import (
 )
 
 
-ADDRESS_BCRT1_UNSPENDABLE = 'qcrt1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqen882c'
-ADDRESS_BCRT1_UNSPENDABLE_DESCRIPTOR = 'addr(qcrt1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqen882c)#uc8x94y3'
+ADDRESS_BCRT1_UNSPENDABLE = 'wr1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq0zdm2r'
+ADDRESS_BCRT1_UNSPENDABLE_DESCRIPTOR = 'addr(wr1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq0zdm2r)#zs2jn6ld'
 # Coins sent to this address can be spent with a witness stack of just OP_TRUE
-ADDRESS_BCRT1_P2WSH_OP_TRUE = 'qcrt1qft5p2uhsdcdc3l2ua4ap5qqfg4pjaqlp250x7us7a8qqhrxrxfsqcvxxf7'
+ADDRESS_BCRT1_P2WSH_OP_TRUE = 'wr1qft5p2uhsdcdc3l2ua4ap5qqfg4pjaqlp250x7us7a8qqhrxrxfsqwav6f9'
 
 
 class AddressType(enum.Enum):
@@ -60,7 +60,7 @@ def create_deterministic_address_bcrt1_p2tr_op_true(explicit_internal_key=None):
     taproot_info = taproot_construct(internal_key, [("only-path", CScript([OP_TRUE]))])
     address = output_key_to_p2tr(taproot_info.output_pubkey)
     if explicit_internal_key is None:
-        assert_equal(address, 'qcrt1p9yfmy5h72durp7zrhlw9lf7jpwjgvwdg0jr0lqmmjtgg83266lqs3rx7ch')
+        assert_equal(address, 'wr1p9yfmy5h72durp7zrhlw9lf7jpwjgvwdg0jr0lqmmjtgg83266lqs8jvzcv')
     return (address, taproot_info)
 
 
@@ -173,7 +173,11 @@ def program_to_witness(version, program, main=False):
     assert 0 <= version <= 16
     assert 2 <= len(program) <= 40
     assert version > 0 or len(program) in [20, 32]
-    return encode_segwit_address("qc" if main else "qcrt", version, program)
+    # WATTx bech32 HRPs (src/kernel/chainparams.cpp): mainnet "wx", regtest "wr".
+    # These were still Qtum's "qc"/"qcrt", so every segwit address the framework
+    # built was rejected as invalid -- which is what stopped create_cache.py, and
+    # with it test_runner.py, for the whole functional suite.
+    return encode_segwit_address("wx" if main else "wr", version, program)
 
 def script_to_p2wsh(script, main=False):
     script = check_script(script)

@@ -88,6 +88,13 @@ def make_op_call_output(value, version, gas_limit, gas_price, data, contract):
     scriptPubKey += OP_CALL
     return CTxOut(value, scriptPubKey)
 
+# A throwaway address for tests that just need somewhere to mine to. Several
+# tests hardcoded Qtum's "qSrM9K6FMhZ29Vkp8Rdk8Jp66bbfpjFETq", which the rebrand
+# left behind: it carries Qtum's version byte 120, and WATTx (135 on regtest)
+# rejects it outright with "Invalid address", before the test under test runs at
+# all. This is the same hash160 re-encoded under WATTx's prefix.
+WATTX_REGTEST_BURN_ADDRESS = 'wUvPuwZa1QWAQzr7VidXQBttYATpZMtgpB'
+
 def convert_btc_address_to_qtum(addr, main=False):
     version, hsh, checksum = base58_to_byte(addr, 25)
     if version == 111:
@@ -99,7 +106,7 @@ def convert_btc_address_to_qtum(addr, main=False):
 
 def convert_btc_bech32_address_to_qtum(addr, main=False, encoding=Encoding.BECH32):
     encoding, hdr, data = bech32_decode(addr)
-    return bech32_encode(encoding, 'qcrt' if not main else 'qc', data)
+    return bech32_encode(encoding, 'wr' if not main else 'wx', data)
 
 
 def p2pkh_to_hex_hash(address):
@@ -406,8 +413,12 @@ def collect_prevouts(node, amount=None, address=None, min_confirmations=COINBASE
 def create_unsigned_pos_block(node, staking_prevouts, nTime=None):
     tip = node.getblock(node.getbestblockhash())
     if not nTime:
-        current_time = int(time.time()) + TIMESTAMP_MASK+1
-        nTime = current_time & (0xffffffff - TIMESTAMP_MASK)
+        # WATTX_POS_TIMESTAMP_MASK, not TIMESTAMP_MASK: a PoS block is aligned to
+        # StakeTimestampMask(), which is 15 at every height here. Rounding up by
+        # mask (not mask+1) matters -- a full extra granule would put the block
+        # 16 seconds out, one second past what FutureDrift allows.
+        current_time = int(time.time()) + WATTX_POS_TIMESTAMP_MASK
+        nTime = current_time & (0xffffffff - WATTX_POS_TIMESTAMP_MASK)
 
     parent_block_stake_modifier = int(tip['modifier'], 16)
     coinbase = create_coinbase(tip['height']+1)
@@ -422,8 +433,12 @@ def create_unsigned_pos_block(node, staking_prevouts, nTime=None):
         return None
 
     txout = node.gettxout(hex(block.prevoutStake.hash)[2:].zfill(64), block.prevoutStake.n)
-    # input value + block reward
-    out_value = int((float(str(txout['value'])) + INITIAL_BLOCK_REWARD_POS) * COIN) // 2
+    # Input value + block reward. The reward is WATTx's subsidy at this height,
+    # not Qtum's flat INITIAL_BLOCK_REWARD_POS: WATTx halves the reward away
+    # entirely after WATTX_MAX_HALVINGS, and regtest reaches that long before
+    # COINBASE_MATURITY, so the constant overpays and ConnectBlock rejects the
+    # block with "block-reward-invalid" -- leaving the chain one block short.
+    out_value = (int(float(str(txout['value'])) * COIN) + wattx_block_subsidy(tip['height'] + 1)) // 2
 
     # create a new private key used for block signing.
     block_sig_key = ECKey()

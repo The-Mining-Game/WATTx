@@ -49,10 +49,23 @@ class QtumPOSSegwitTest(BitcoinTestFramework):
         stake_tx_unsigned = CTransaction()
         coinstake_prevout = block.prevoutStake
 
+        # Qtum's flat 10002 was its 20000 stake input plus its 4 PoS reward,
+        # halved over two outputs. WATTx stakes far smaller prevouts and its
+        # subsidy has halved away to nothing by this height, so the coinstake has
+        # to return the input plus whatever the subsidy actually is -- otherwise
+        # ConnectBlock rejects the block with "block-reward-invalid" and the
+        # chain ends up one block short of what this test asserts.
+        stake_value = 0
+        for prevout, nValue, _ in staking_prevouts:
+            if prevout.serialize() == coinstake_prevout.serialize():
+                stake_value = nValue
+                break
+        out_each = (stake_value + wattx_block_subsidy(block_height + 1)) // 2
+
         stake_tx_unsigned.vin.append(CTxIn(coinstake_prevout))
         stake_tx_unsigned.vout.append(CTxOut())
-        stake_tx_unsigned.vout.append(CTxOut(int(10002*COIN), scriptPubKey))
-        stake_tx_unsigned.vout.append(CTxOut(int(10002*COIN), scriptPubKey))
+        stake_tx_unsigned.vout.append(CTxOut(out_each, scriptPubKey))
+        stake_tx_unsigned.vout.append(CTxOut(out_each, scriptPubKey))
 
         stake_tx_signed_raw_hex = self.node.signrawtransactionwithwallet(bytes_to_hex_str(stake_tx_unsigned.serialize()))['hex']
         f = io.BytesIO(hex_str_to_bytes(stake_tx_signed_raw_hex))
@@ -90,7 +103,7 @@ class QtumPOSSegwitTest(BitcoinTestFramework):
 
         self.node = self.nodes[0]
         self.node.setmocktime(int(time.time()) - 2*COINBASE_MATURITY)
-        self.generatetoaddress(self.node, 50+COINBASE_MATURITY, "qSrM9K6FMhZ29Vkp8Rdk8Jp66bbfpjFETq")
+        self.generatetoaddress(self.node, 50+COINBASE_MATURITY, WATTX_REGTEST_BURN_ADDRESS)
 
         staking_prevouts = self.collect_staking_prevouts()
 
