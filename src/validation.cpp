@@ -6359,6 +6359,17 @@ bool HasValidProofOfWork(const std::vector<CBlockHeader>& headers, const Consens
                     target.SetCompact(header.nBits, &fNegative, &fOverflow);
                     return !(fNegative || fOverflow || target == 0);
                 }
+                // Multi-algo (X25X) blocks carry their algorithm in nVersion
+                // bits 8-15 and are hashed accordingly, so a bare RandomX check
+                // rejects every validly-mined sha256d/scrypt/x11/... header --
+                // the same class of propagation failure the AuxPoW branch above
+                // works around. CheckHeaderPoWAtHeight() picks the right check
+                // by height, but height is not known here (the header may not
+                // connect yet), so accept a header that satisfies EITHER rule.
+                // Both are real proof of work, so this stays sound as an
+                // anti-DoS gate, and the height-correct rule is still enforced
+                // by CheckBlockHeader() once the block connects.
+                if (CheckProofOfWorkX25X(header, header.nBits, consensusParams)) return true;
                 return CheckProofOfWorkRandomX(header, header.nBits, consensusParams);
             });
 }

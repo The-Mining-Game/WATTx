@@ -692,7 +692,7 @@ class CTransaction:
 
 
 class CBlockHeader(object):
-    __slots__ = ("hash", "hashMerkleRoot", "hashPrevBlock", "hashStateRoot", "hashUTXORoot", "prevoutStake", "vchBlockSig", "nBits", "nNonce",
+    __slots__ = ("hash", "hashMerkleRoot", "hashPrevBlock", "hashStateRoot", "hashUTXORoot", "prevoutStake", "vchBlockSig", "nShift", "nAdder", "nGapSize", "nBits", "nNonce",
                  "nTime", "nVersion", "sha256")
 
     def __init__(self, header=None):
@@ -708,6 +708,9 @@ class CBlockHeader(object):
             self.hashStateRoot = header.hashStateRoot
             self.hashUTXORoot = header.hashUTXORoot
             self.prevoutStake = header.prevoutStake
+            self.nShift = header.nShift
+            self.nAdder = header.nAdder
+            self.nGapSize = header.nGapSize
             self.vchBlockSig = header.vchBlockSig
             self.sha256 = header.sha256
             self.hash = header.hash
@@ -723,6 +726,12 @@ class CBlockHeader(object):
         self.hashStateRoot = INITIAL_HASH_STATE_ROOT
         self.hashUTXORoot = INITIAL_HASH_UTXO_ROOT
         self.prevoutStake = COutPoint(0, 0xffffffff)
+        # Deprecated Gapcoin fields, unused after the X25X fork but still part
+        # of the wire header (src/primitives/block.h). Omitting them truncates
+        # the header and the daemon rejects the message with "end of data".
+        self.nShift = 0
+        self.nAdder = 0
+        self.nGapSize = 0
         self.vchBlockSig = b""
         self.sha256 = None
         self.hash = None
@@ -739,6 +748,9 @@ class CBlockHeader(object):
         self.prevoutStake = COutPoint()
         self.prevoutStake.deserialize(f)
         self.vchBlockSig = deser_string(f)
+        self.nShift = int.from_bytes(f.read(4), "little")
+        self.nAdder = deser_uint256(f)
+        self.nGapSize = int.from_bytes(f.read(4), "little")
         self.sha256 = None
         self.hash = None
 
@@ -754,6 +766,9 @@ class CBlockHeader(object):
         r += ser_uint256(self.hashUTXORoot)
         r += self.prevoutStake.serialize() if self.prevoutStake else COutPoint(0, 0xffffffff).serialize()
         r += ser_string(self.vchBlockSig)
+        r += self.nShift.to_bytes(4, "little")
+        r += ser_uint256(self.nAdder)
+        r += self.nGapSize.to_bytes(4, "little")
         return r
 
     def calc_sha256(self):
@@ -769,6 +784,11 @@ class CBlockHeader(object):
             r += ser_uint256(self.hashUTXORoot)
             r += self.prevoutStake.serialize() if self.prevoutStake else COutPoint(0, 0xffffffff).serialize()
             r += ser_string(self.vchBlockSig)
+            # The hash covers the full header, deprecated Gapcoin fields
+            # included -- leave them out and the hash disagrees with the node's.
+            r += self.nShift.to_bytes(4, "little")
+            r += ser_uint256(self.nAdder)
+            r += self.nGapSize.to_bytes(4, "little")
             self.sha256 = uint256_from_str(hash256(r))
             self.hash = hash256(r)[::-1].hex()
 

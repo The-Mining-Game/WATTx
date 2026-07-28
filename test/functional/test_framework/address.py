@@ -142,12 +142,16 @@ def base58_to_byte_btc(s):
 
 def keyhash_to_p2pkh(hash, main=False):
     assert len(hash) == 20
-    version = 58 if main else 120
+    # WATTx base58 prefixes (src/kernel/chainparams.cpp): mainnet PUBKEY_ADDRESS
+    # 73, testnet/regtest 135. These were still Qtum's 58/120, so every address
+    # the framework produced was rejected by the daemon as invalid.
+    version = 73 if main else 135
     return byte_to_base58(hash, version)
 
 def scripthash_to_p2sh(hash, main=False):
     assert len(hash) == 20
-    version = 50 if main else 110
+    # WATTx SCRIPT_ADDRESS: mainnet 75, testnet/regtest 137 (was Qtum 50/110).
+    version = 75 if main else 137
     return byte_to_base58(hash, version)
 
 def key_to_p2pkh(key, main=False):
@@ -208,7 +212,7 @@ def check_script(script):
 
 def bech32_to_bytes(address):
     hrp = address.split('1')[0]
-    if hrp not in ['qc', 'tq', 'qcrt']:
+    if hrp not in ['wx', 'wt', 'wr', 'w4', 'ws']:  # WATTx bech32 HRPs
         return (None, None)
     version, payload = decode_segwit_address(hrp, address)
     if version is None:
@@ -222,9 +226,9 @@ def address_to_scriptpubkey(address):
     if version is not None:
         return program_to_witness_script(version, payload) # testnet segwit scriptpubkey
     payload, version = base58_to_byte_btc(address)
-    if version == 120:  # testnet pubkey hash
+    if version == 135:  # testnet/regtest pubkey hash
         return keyhash_to_p2pkh_script(payload)
-    elif version == 110:  # testnet script hash
+    elif version == 137:  # testnet/regtest script hash
         return scripthash_to_p2sh_script(payload)
     # TODO: also support other address formats
     else:

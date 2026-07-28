@@ -67,21 +67,39 @@ class QtumPOSTest(BitcoinTestFramework):
 
     def run_test(self):
         self.node = self.nodes[0]
-        privkey = byte_to_base58(hash256(struct.pack('<I', 0)), 239)
+        privkey_bytes = hash256(struct.pack('<I', 0))
+        privkey = byte_to_base58(privkey_bytes, 239)
         self.node.importprivkey(privkey)
+        # Derive the address from the key just imported rather than hardcoding
+        # it. The literal here was a Qtum address, which WATTx rejects outright
+        # (different base58 prefix), and a hardcoded address silently rots
+        # again the next time a prefix changes.
+        key = ECKey()
+        # Uncompressed: byte_to_base58() appends no 0x01 compression flag, so
+        # the node imports an uncompressed key. Deriving the address as
+        # compressed yields a different pubkey hash, the generated coinbases pay
+        # an address the wallet does not own, and the balance stays at zero.
+        key.set(privkey_bytes, False)
+        self.staking_address = key_to_p2pkh(key.get_pubkey().get_bytes())
         self.bootstrap_p2p()
         # returns a test case that asserts that the current tip was accepted
         # First generate some blocks so we have some spendable coins
-        block_hashes = self.generatetoaddress(self.node, 100, "qSrM9K6FMhZ29Vkp8Rdk8Jp66bbfpjFETq")
+        block_hashes = self.generatetoaddress(self.node, 100, self.staking_address)
 
         for i in range(COINBASE_MATURITY):
             self.tip = create_block(int(self.node.getbestblockhash(), 16), create_coinbase(self.node.getblockcount()+1), int(time.time()))
             self.tip.solve()
             self.sync_all_blocks([self.tip], success=True)
 
+        # Amount per staking output. Qtum's 1000 assumed its 20000-per-block
+        # bootstrap subsidy; WATTx pays 5 WTX a block, so 100 matured coinbases
+        # are ~500 WTX total and ten 1000-WTX sends fail with "Insufficient
+        # funds". Sized to fit what the matured coinbases actually provide.
+        stake_amount = 5
+        self.log.info('wallet balance before staking sends: %s' % self.node.getbalance())
         for _ in range(10):
-            self.node.sendtoaddress("qSrM9K6FMhZ29Vkp8Rdk8Jp66bbfpjFETq", 1000)
-        block_hashes += self.generatetoaddress(self.node, 1, "qSrM9K6FMhZ29Vkp8Rdk8Jp66bbfpjFETq")
+            self.node.sendtoaddress(self.staking_address, stake_amount)
+        block_hashes += self.generatetoaddress(self.node, 1, self.staking_address)
 
         blocks = []
         for block_hash in block_hashes:

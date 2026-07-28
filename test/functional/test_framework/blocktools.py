@@ -46,7 +46,7 @@ from .script_util import (
     script_to_p2wsh_script,
 )
 from .util import assert_equal
-from .qtumconfig import INITIAL_BLOCK_REWARD, INITIAL_BLOCK_REWARD_POS
+from .qtumconfig import INITIAL_BLOCK_REWARD, INITIAL_BLOCK_REWARD_POS, wattx_block_subsidy
 
 MAX_BLOCK_SIGOPS = 20000
 MAX_BLOCK_SIGOPS_WEIGHT = MAX_BLOCK_SIGOPS * WITNESS_SCALE_FACTOR
@@ -157,12 +157,11 @@ def create_coinbase(height, pubkey=None, *, script_pubkey=None, extra_output_scr
     coinbaseoutput = CTxOut()
     if nValue:
         coinbaseoutput.nValue = nValue
-    elif height > 5000:
-        coinbaseoutput.nValue = int(INITIAL_BLOCK_REWARD_POS*COIN)
     else:
-        coinbaseoutput.nValue = INITIAL_BLOCK_REWARD * COIN
-    #halvings = int(height / retarget_period)  # regtest
-    #coinbaseoutput.nValue >>= halvings
+        # WATTx's own subsidy schedule, not Qtum's flat bootstrap reward --
+        # see wattx_block_subsidy(). Overpaying here is rejected by
+        # ConnectBlock as "block-reward-invalid".
+        coinbaseoutput.nValue = wattx_block_subsidy(height)
         coinbaseoutput.nValue += fees
     if pubkey is not None:
         coinbaseoutput.scriptPubKey = key_to_p2pk_script(pubkey)
