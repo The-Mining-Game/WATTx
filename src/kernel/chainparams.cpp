@@ -953,9 +953,18 @@ public:
         consensus.nFcmpMaturity = 10;
         consensus.nFcmpCoinbaseMaturity = 100;
 
-        // PoS Difficulty Fix - Active from block 1 for regtest
+        // PoS Difficulty Fix - Active from block 1 for regtest.
+        // The limit stays at regtest's usual easiest value. Testnet's tighter
+        // 0000000000003fff... was copied here verbatim, which left regtest four
+        // million times harder to stake on than mainnet (0000000fffff...) --
+        // backwards for the one network whose purpose is producing blocks on
+        // demand. At that target a kernel search over a wallet's worth of
+        // matured coinbases needs millions of attempts, so the staking tests
+        // could not build a single block. Keeping the fix ACTIVE from height 1
+        // preserves everything else it changes (timestamp granularity, the
+        // tighter adjustment path) while leaving the difficulty itself trivial.
         consensus.nPoSDifficultyFixHeight = 1;
-        consensus.FixedRBTPosLimit = uint256{"0000000000003fffffffffffffffffffffffffffffffffffffffffffffffffff"};
+        consensus.FixedRBTPosLimit = uint256{"7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
 
         // Delegation parameters - lowered for regtest testing
         consensus.nDelegationMaturity = 10;
