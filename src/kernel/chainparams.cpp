@@ -167,9 +167,17 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 0;
 
+        // A brand-new chain has no history to assume valid and no accumulated work to
+        // require. Both stay empty until mainnet has enough chain to pin:
+        //   - nMinimumChainWork: set once there is real work, so a node cannot be fed a
+        //     low-work fork during initial sync.
+        //   - defaultAssumeValid: set to a deeply-buried mainnet block to let new nodes
+        //     skip script verification below it.
+        // These previously carried a hash inherited from Qtum (its block 131349), which
+        // names a block that does not exist on this chain — inert, but wrong, and it
+        // would have silently done nothing had anyone relied on it.
         consensus.nMinimumChainWork = uint256{};
-        // Block 131349 - skip PoW validation for faster sync
-        consensus.defaultAssumeValid = uint256{"d42e2563c08222446305b15791b850b61a1314945cc4d7e2cd3fe1687d7090e4"};
+        consensus.defaultAssumeValid = uint256{};
 
         /**
          * WATTx network magic bytes

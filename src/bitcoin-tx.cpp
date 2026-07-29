@@ -107,17 +107,17 @@ static int AppInitRawTx(int argc, char* argv[])
 
     if (argc < 2 || HelpRequested(gArgs) || gArgs.GetBoolArg("-version", false)) {
         // First part of help message is specific to this utility
-        std::string strUsage = CLIENT_NAME " qtum-tx utility version " + FormatFullVersion() + "\n";
+        std::string strUsage = CLIENT_NAME " wattx-tx utility version " + FormatFullVersion() + "\n";
 
         if (gArgs.GetBoolArg("-version", false)) {
             strUsage += FormatParagraph(LicenseInfo());
         } else {
             strUsage += "\n"
-                "The qtum-tx tool is used for creating and modifying qtum transactions.\n\n"
-                "qtum-tx can be used with \"<hex-tx> [commands]\" to update a hex-encoded qtum transaction, or with \"-create [commands]\" to create a hex-encoded qtum transaction.\n"
+                "The wattx-tx tool is used for creating and modifying qtum transactions.\n\n"
+                "wattx-tx can be used with \"<hex-tx> [commands]\" to update a hex-encoded qtum transaction, or with \"-create [commands]\" to create a hex-encoded qtum transaction.\n"
                 "\n"
-                "Usage: qtum-tx [options] <hex-tx> [commands]\n"
-                "or:    qtum-tx [options] -create [commands]\n"
+                "Usage: wattx-tx [options] <hex-tx> [commands]\n"
+                "or:    wattx-tx [options] -create [commands]\n"
                 "\n";
             strUsage += gArgs.GetHelpMessage();
         }

@@ -52,16 +52,16 @@ static int AppInitUtil(ArgsManager& args, int argc, char* argv[])
 
     if (HelpRequested(args) || args.GetBoolArg("-version", false)) {
         // First part of help message is specific to this utility
-        std::string strUsage = CLIENT_NAME " qtum-util utility version " + FormatFullVersion() + "\n";
+        std::string strUsage = CLIENT_NAME " wattx-util utility version " + FormatFullVersion() + "\n";
 
         if (args.GetBoolArg("-version", false)) {
             strUsage += FormatParagraph(LicenseInfo());
         } else {
             strUsage += "\n"
-                "The qtum-util tool provides qtum related functionality that does not rely on the ability to access a running node. Available [commands] are listed below.\n"
+                "The wattx-util tool provides qtum related functionality that does not rely on the ability to access a running node. Available [commands] are listed below.\n"
                 "\n"
-                "Usage:  qtum-util [options] [command]\n"
-                "or:     qtum-util [options] grind <hex-block-header>\n";
+                "Usage:  wattx-util [options] [command]\n"
+                "or:     wattx-util [options] grind <hex-block-header>\n";
             strUsage += "\n" + args.GetHelpMessage();
         }
 
