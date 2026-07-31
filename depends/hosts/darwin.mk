@@ -56,7 +56,7 @@ darwin_CC=$(clang_prog) --target=$(host) \
               -iwithsysroot/usr/include -iframeworkwithsysroot/System/Library/Frameworks -fuse-ld=lld -Qunused-arguments
 
 darwin_CXX=$(clangxx_prog) --target=$(host) \
-               -isysroot$(OSX_SDK) -nostdlibinc \
+               -isysroot$(OSX_SDK) -nostdlibinc -stdlib=libc++ \
                -iwithsysroot/usr/include/c++/v1 \
                -iwithsysroot/usr/include -iframeworkwithsysroot/System/Library/Frameworks -fuse-ld=lld -Qunused-arguments
 

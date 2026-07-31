@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WATTx Wallet — Downloads</title>
+<style>
+  :root{--bg:#0b0f14;--card:#121a24;--edge:#1e2a3a;--txt:#e8eef5;--dim:#8ba0b5;--acc:#f5b83d;--acc2:#35c26f}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--txt);font:16px/1.6 system-ui,Segoe UI,Roboto,sans-serif;min-height:100vh}
+  .wrap{max-width:1060px;margin:0 auto;padding:48px 20px}
+  header{text-align:center;margin-bottom:40px}
+  h1{font-size:2.2rem;letter-spacing:.5px}
+  h1 span{color:var(--acc)}
+  .sub{color:var(--dim);margin-top:8px}
+  .detected{margin:28px auto 36px;max-width:560px;background:linear-gradient(135deg,#16212e,#121a24);
+    border:1px solid var(--acc);border-radius:14px;padding:26px;text-align:center}
+  .detected .os{font-size:1.3rem;font-weight:700;margin-bottom:6px}
+  .btn{display:inline-block;margin-top:14px;padding:13px 34px;border-radius:10px;background:var(--acc);
+    color:#151515;font-weight:700;text-decoration:none;transition:transform .12s}
+  .btn:hover{transform:translateY(-2px)}
+  .btn.ghost{background:transparent;border:1px solid var(--edge);color:var(--dim);font-weight:500;padding:10px 22px}
+  .btn[aria-disabled="true"]{background:#2a3648;color:var(--dim);pointer-events:none}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:16px}
+  .card{background:var(--card);border:1px solid var(--edge);border-radius:12px;padding:22px;text-align:center}
+  .card.active{border-color:var(--acc)}
+  .card .ico{font-size:2rem}
+  .card h3{margin:10px 0 2px}
+  .card .meta{color:var(--dim);font-size:.85rem;min-height:2.4em}
+  .soon{display:inline-block;margin-top:14px;padding:8px 18px;border-radius:8px;background:#1b2635;color:var(--dim);font-size:.9rem}
+  .note{margin-top:44px;color:var(--dim);font-size:.9rem;text-align:center}
+  .note code{background:#16212e;padding:2px 7px;border-radius:6px}
+  footer{margin-top:56px;text-align:center;color:#54687d;font-size:.85rem}
+  a{color:var(--acc)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>WATT<span>x</span> Wallet</h1>
+    <p class="sub">Hybrid PoW/PoS · 7-algo merged mining · EVM (chain 22356)</p>
+  </header>
+
+  <div class="detected" id="detected" hidden>
+    <div style="color:var(--dim);font-size:.85rem">We detected your system</div>
+    <div class="os" id="detected-os"></div>
+    <a class="btn" id="detected-btn" href="#">Download</a>
+    <div style="margin-top:8px;font-size:.8rem;color:var(--dim)" id="detected-hint"></div>
+  </div>
+
+  <div class="grid" id="grid"></div>
+
+  <p class="note">
+    Linux: extract, double-click <code>wattx-qt</code> (or run <code>./install-desktop.sh</code> to add it to your app menu).<br>
+    Windows: extract the zip, double-click <code>wattx-qt.exe</code>.<br>
+    macOS: right-click the app → <b>Open</b> the first time (unsigned build).
+  </p>
+
+  <footer>WATTxchange · <a href="https://github.com/nucash-mining/WATTxchain">source on GitHub</a> ·
+    Seed nodes: seed1-3.wattxchange.app · RPC: rpc-wtx.wattxchange.app:8545</footer>
+</div>
+
+<script>
+const REL = "https://github.com/nucash-mining/WATTxchain/releases/latest/download/";
+const TARGETS = [
+  {key:"windows", name:"Windows",  ico:"🪟", file:"wattx-0.1.7.2-win64.zip",     meta:"64-bit · zip · Qt wallet + daemon", hint:"Extract and double-click wattx-qt.exe"},
+  {key:"linux",   name:"Linux",    ico:"🐧", file:"wattx-0.1.7.2-linux64.tar.gz", meta:"x86-64 · tar.gz · Qt wallet + daemon", hint:"Extract and double-click wattx-qt"},
+  {key:"mac",     name:"macOS",    ico:"🍎", file:null, soon:"Build in progress", meta:"Unsigned .dmg — right-click → Open", hint:""},
+  {key:"android", name:"Android",  ico:"🤖", file:"WATTxWallet-android.apk",      meta:"WATTxWallet · sideload APK (all ABIs)", hint:"Allow 'install from unknown sources', then open the APK"},
+  {key:"ios",     name:"iOS",      ico:"📱", file:null, soon:"Coming soon",       meta:"Pending App Store / TestFlight", hint:""},
+];
+function detectOS(){
+  const ua = navigator.userAgent, p = navigator.platform || "";
+  if (/android/i.test(ua)) return "android";
+  if (/iphone|ipad|ipod/i.test(ua) || (p==="MacIntel" && navigator.maxTouchPoints>1)) return "ios";
+  if (/win/i.test(p) || /windows/i.test(ua)) return "windows";
+  if (/mac/i.test(p) || /mac os/i.test(ua)) return "mac";
+  if (/linux|x11/i.test(p) || /linux/i.test(ua)) return "linux";
+  return null;
+}
+const os = detectOS(), grid = document.getElementById("grid");
+for (const t of TARGETS){
+  const c = document.createElement("div");
+  c.className = "card" + (t.key===os ? " active" : "");
+  c.innerHTML = `<div class="ico">${t.ico}</div><h3>${t.name}</h3><div class="meta">${t.meta}</div>` +
+    (t.file ? `<a class="btn ghost" href="${REL}${t.file}">Download</a>`
+            : `<span class="soon">${t.soon}</span>`);
+  grid.appendChild(c);
+}
+if (os){
+  const t = TARGETS.find(x=>x.key===os), d = document.getElementById("detected");
+  d.hidden = false;
+  document.getElementById("detected-os").textContent = t.ico + " " + t.name;
+  const b = document.getElementById("detected-btn");
+  if (t.file){ b.href = REL + t.file; b.textContent = "Download for " + t.name; }
+  else { b.setAttribute("aria-disabled","true"); b.textContent = t.soon; }
+  document.getElementById("detected-hint").textContent = t.hint;
+}
+</script>
+</body>
+</html>

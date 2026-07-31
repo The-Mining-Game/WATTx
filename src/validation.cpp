@@ -2169,8 +2169,9 @@ static bool EnsureRandomXInitializedForPow(const uint256& genesisHash) {
         return true;
     }
 
-    LogPrintf("RandomX PoW: Initializing with genesis hash key (FULL mode for faster validation)\n");
-    if (!miner.Initialize(genesisHash.data(), 32, node::RandomXMiner::Mode::FULL)) {
+    const bool light = gArgs.GetBoolArg("-randomxlightvalidation", false);
+    LogPrintf("RandomX PoW: Initializing with genesis hash key (%s mode)\n", light ? "LIGHT (~256MB)" : "FULL (~2GB, faster validation)");
+    if (!miner.Initialize(genesisHash.data(), 32, light ? node::RandomXMiner::Mode::LIGHT : node::RandomXMiner::Mode::FULL)) {
         LogPrintf("RandomX PoW: Failed to initialize with genesis hash\n");
         return false;
     }

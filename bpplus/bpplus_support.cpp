@@ -10,13 +10,9 @@ extern "C" {
 #include "crypto/keccak.h"
 
 extern "C" {
-// ref10 constant-time 32-byte compare: returns 0 iff x==y, -1 otherwise.
-// differentbits is an OR of per-byte XORs, so it stays in [0,255].
-int crypto_verify_32(const unsigned char *x, const unsigned char *y) {
-    unsigned int differentbits = 0;
-    for (int i = 0; i < 32; i++) differentbits |= (unsigned int)(x[i] ^ y[i]);
-    return (int)((1 & ((differentbits - 1) >> 8)) - 1);
-}
+// crypto_verify_32 comes from libsodium (rctTypes.h includes
+// <sodium/crypto_verify_32.h>); defining it here too breaks static links
+// (multiple definition vs libsodium.a on the mingw build).
 
 // C-linkage cn_fast_hash (declared in hash-ops.h, used by ringct/BP+).
 void cn_fast_hash(const void *data, size_t length, char *hash) {

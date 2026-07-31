@@ -42,6 +42,13 @@ target_include_directories(wattx_bpplus
         ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
+# crypto/warnings.h needs <boost/preprocessor/stringize.hpp>. On Linux the system
+# boost hides this; cross builds (mingw depends) must get it from Boost explicitly.
+find_package(Boost QUIET)
+if(Boost_FOUND)
+    target_include_directories(wattx_bpplus PRIVATE ${Boost_INCLUDE_DIRS})
+endif()
+
 set_target_properties(wattx_bpplus PROPERTIES
     C_STANDARD 11
     CXX_STANDARD 17
