@@ -169,10 +169,13 @@ public:
         // that peers (via the `block` message) and disk reads reconstruct the
         // parent-chain proof and can verify it in CheckBlock. The block hash is
         // computed from CBlockHeader alone, so this does NOT change block
-        // identity. `headers` messages serialize CBlockHeader (never CBlock), so
-        // they stay bare and defer to full-block validation. `auxpow` is mutable,
-        // so this compiles on the const serialize path.
-        if (obj.HasAuxPowFlag()) {
+        // identity. The vtx.empty() gate keeps `headers` messages bare: their
+        // entries are CBlocks with no transactions (net_processing uses CBlock
+        // for the trailing tx-count byte), while any real block carries at
+        // least its coinbase — and the receiver reads vtx before this point,
+        // so both sides agree on whether an AuxPoW follows. `auxpow` is
+        // mutable, so this compiles on the const serialize path.
+        if (obj.HasAuxPowFlag() && !obj.vtx.empty()) {
             if (!obj.auxpow) {
                 obj.auxpow = std::make_shared<CAuxPow>();
             }
