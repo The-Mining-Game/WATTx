@@ -631,6 +631,17 @@ void MultiMergedStratumServer::HandleMessage(int client_id, const std::string& m
         HandleLogin(client_id, id, params);
     } else if (method == "submit") {
         std::vector<std::string> params = ParseJsonArray(message, "params");
+        if (params.size() < 3) {
+            // Standard XMRig submits OBJECT params {"id","job_id","nonce","result"}
+            // rather than the array form; pull the fields by key so stock miners
+            // aren't rejected with "Invalid params".
+            std::string job_id = ParseJsonString(message, "job_id");
+            std::string nonce  = ParseJsonString(message, "nonce");
+            std::string result = ParseJsonString(message, "result");
+            if (!job_id.empty() && !nonce.empty()) {
+                params = {job_id, nonce, result};
+            }
+        }
         HandleSubmit(client_id, id, params);
     } else if (method == "getjob") {
         HandleGetJob(client_id, id);
@@ -1393,7 +1404,10 @@ void MultiMergedStratumServer::HandleLogin(int client_id, const std::string& id,
     // Advertise the pool share target (per-chain aware), not the parent block
     // target: miners submit at share difficulty; ValidateShare still checks
     // the parent target server-side for actual block finds.
-    oss << "\"target\":\"" << XmrigJobTarget(job).GetHex().substr(0, 16) << "\",";
+    oss << "\"target\":\"" << XmrigTargetHex(job) << "\",";
+    if (job.algo == ParentChainAlgo::RANDOMX) {
+        oss << "\"algo\":\"rx/0\",";
+    }
     oss << "\"height\":" << job.parent_height;
     if (!job.seed_hash.empty()) {
         oss << ",\"seed_hash\":\"" << job.seed_hash << "\"";
@@ -1638,6 +1652,25 @@ uint256 MultiMergedStratumServer::XmrigJobTarget(const MultiAlgoJob& job) {
         return EffectiveShareTarget(it->second);
     }
     return job.parent_target;
+}
+
+std::string MultiMergedStratumServer::XmrigTargetHex(const MultiAlgoJob& job) {
+    // XMRig reads `target` as raw bytes: 16 hex chars are the u64 value of
+    // (target >> 192) serialized LITTLE-endian. uint256::GetHex() is big-endian
+    // display order, so hexing its first 16 chars hands XMRig a byte-swapped
+    // target ~4 million times harder than intended (diff 256 became 1099G and
+    // miners could never find a share). data()[24..31] are exactly that u64's
+    // little-endian bytes.
+    const uint256 t = XmrigJobTarget(job);
+    const unsigned char* d = t.data();
+    static const char* hexmap = "0123456789abcdef";
+    std::string out;
+    out.reserve(16);
+    for (int i = 24; i < 32; ++i) {
+        out.push_back(hexmap[d[i] >> 4]);
+        out.push_back(hexmap[d[i] & 0xf]);
+    }
+    return out;
 }
 
 void MultiMergedStratumServer::CreateJob(ParentChainAlgo algo) {
@@ -2306,7 +2339,10 @@ void MultiMergedStratumServer::SendJob(int client_id, const MultiAlgoJob& job,
     oss << "{\"jsonrpc\":\"2.0\",\"method\":\"job\",\"params\":{";
     oss << "\"blob\":\"" << job.hashing_blob << "\",";
     oss << "\"job_id\":\"" << job.job_id << "\",";
-    oss << "\"target\":\"" << XmrigJobTarget(job).GetHex().substr(0, 16) << "\",";
+    oss << "\"target\":\"" << XmrigTargetHex(job) << "\",";
+    if (job.algo == ParentChainAlgo::RANDOMX) {
+        oss << "\"algo\":\"rx/0\",";
+    }
     oss << "\"height\":" << job.parent_height;
     if (!job.seed_hash.empty()) {
         oss << ",\"seed_hash\":\"" << job.seed_hash << "\"";

@@ -425,6 +425,7 @@ private:
     // Share target advertised in XMRig-protocol job pushes for the job's algo
     // (falls back to the parent block target if the algo has no primary chain).
     uint256 XmrigJobTarget(const MultiAlgoJob& job);
+    std::string XmrigTargetHex(const MultiAlgoJob& job);
     // Build the payout-split WATTx coinbase: divides the block reward among the
     // currently-scored miners by reward_share (value-conserving). Returns the
     // template's default coinbase if no miners are scored yet.
