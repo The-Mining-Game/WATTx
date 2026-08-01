@@ -1,5 +1,11 @@
 packages:= openssl gmp
 
+# Android takes OpenSSL 3.x instead: 1.1.1k cannot build against a modern NDK.
+# See packages/openssl_android.mk.
+ifeq ($(host_os),android)
+packages:= openssl_android gmp
+endif
+
 boost_packages = boost
 
 libevent_packages = libevent

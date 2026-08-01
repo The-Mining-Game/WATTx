@@ -6,6 +6,17 @@ $(package)_sha256_hash=892a0875b9872acd04a9fde79b1f943075d5ea162415de3047c327df3
 
 define $(package)_set_vars
 $(package)_config_env=AR="$($(package)_ar)" RANLIB="$($(package)_ranlib)" CC="$($(package)_cc)"
+# OpenSSL's android-* targets look the NDK up themselves and expect its clang
+# on PATH, so hand them both rather than only CC.
+# Per OpenSSL's own NOTES.ANDROID: CC must be the bare name "clang" with the
+# NDK toolchain on PATH. Handing it the absolute clang path makes Configure
+# fall through to the pre-r18 gcc naming and hunt for aarch64-linux-android-gcc,
+# which no modern NDK ships.
+# Configure insists the clang it finds on PATH lives under the NDK it just
+# validated, so this package uses one NDK end to end (the legacy one, which
+# still has the platforms/ directory 1.1.1k checks for). The rest of the build
+# uses the modern NDK; the two produce link-compatible arm64 objects.
+$(package)_config_env_android=CC=clang AR="$(ANDROID_NDK_OPENSSL)/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar" RANLIB="$(ANDROID_NDK_OPENSSL)/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib" ANDROID_NDK_HOME="$(ANDROID_NDK_OPENSSL)" ANDROID_NDK_ROOT="$(ANDROID_NDK_OPENSSL)" PATH="$(ANDROID_NDK_OPENSSL)/toolchains/llvm/prebuilt/linux-x86_64/bin:$(PATH)"
 $(package)_config_opts=--prefix=$(host_prefix) --openssldir=$(host_prefix)/etc/openssl
 $(package)_config_opts+=no-camellia
 $(package)_config_opts+=no-capieng
@@ -37,6 +48,13 @@ $(package)_config_opts+=no-zlib-dynamic
 $(package)_config_opts+=no-sock
 $(package)_config_opts+=-pipe -O2 $($(package)_cppflags)
 $(package)_config_opts_linux=-fPIC -Wa,--noexecstack
+# Android: without a target here Configure is handed an empty platform string
+# and prints its full target list before failing. OpenSSL names the arm64 ABI
+# android-arm64, and its Configure resolves the NDK through ANDROID_NDK_ROOT.
+$(package)_config_opts_android=-fPIC -Wa,--noexecstack -D__ANDROID_API__=$(ANDROID_API_LEVEL)
+$(package)_config_opts_aarch64_android=android-arm64
+$(package)_config_opts_arm_android=android-arm
+$(package)_config_opts_x86_64_android=android-x86_64
 $(package)_config_opts_x86_64_linux=linux-x86_64
 $(package)_config_opts_i686_linux=linux-generic32
 $(package)_config_opts_arm_linux=linux-generic32
@@ -59,8 +77,15 @@ define $(package)_preprocess_cmds
   sed -i.old "s|\"engines\", \"apps\", \"test\", \"util\", \"tools\", \"fuzz\"|\"engines\", \"util\", \"tools\"|" Configure
 endef
 
+# depends appends its own PATH after the per-package config_env, so exporting
+# the NDK bin there gets overridden before Configure runs. Prepend it on the
+# command itself, where nothing can clobber it.
+ifeq ($(host_os),android)
+$(package)_configure_path=PATH="$(ANDROID_NDK_OPENSSL)/toolchains/llvm/prebuilt/linux-x86_64/bin:/usr/local/bin:/usr/bin:/bin"
+endif
+
 define $(package)_config_cmds
-  ./Configure $($(package)_config_opts)
+  $($(package)_configure_path) ./Configure $($(package)_config_opts)
 endef
 
 define $(package)_build_cmds

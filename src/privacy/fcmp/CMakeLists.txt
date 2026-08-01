@@ -33,6 +33,13 @@ elseif(APPLE AND CMAKE_CROSSCOMPILING)
     set(RUST_LIB_NAME libwattx_fcmp.a)
     set(RUST_RELEASE_DIR ${RUST_TARGET_DIR}/${RUST_TARGET}/release)
     set(CARGO_TARGET_FLAG --target ${RUST_TARGET})
+elseif(ANDROID)
+    # Phones are arm64; the 32-bit ABI is not built because a validating node
+    # needs the 64-bit address space for the RandomX cache.
+    set(RUST_TARGET "aarch64-linux-android")
+    set(RUST_LIB_NAME libwattx_fcmp.a)
+    set(RUST_RELEASE_DIR ${RUST_TARGET_DIR}/${RUST_TARGET}/release)
+    set(CARGO_TARGET_FLAG --target ${RUST_TARGET})
 else()
     set(RUST_LIB_NAME libwattx_fcmp.a)
     set(CARGO_TARGET_FLAG "")

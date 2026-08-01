@@ -99,6 +99,13 @@ host_os+=$(findstring netbsd,$(full_host_os))
 host_os+=$(findstring openbsd,$(full_host_os))
 host_os+=$(findstring mingw32,$(full_host_os))
 
+# Android canonicalises to *-linux-android, which the findstring above would
+# match as plain linux and hand the build a glibc toolchain. It needs the NDK
+# toolchain instead, so let it win outright.
+ifneq ($(findstring android,$(full_host_os)),)
+host_os:=android
+endif
+
 host_os:=$(strip $(host_os))
 ifeq ($(host_os),)
 host_os=$(full_host_os)
