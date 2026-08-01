@@ -111,6 +111,11 @@ public:
 };
 #endif
 
+//! How many blocks behind the best announced header still counts as synced.
+//! Small enough to catch a real lag, large enough that normal propagation of a
+//! block or two does not flip the wallet GUI into its throttled polling mode.
+static constexpr int SYNC_BEHIND_BLOCKS{6};
+
 class NodeImpl : public Node
 {
 public:
@@ -405,15 +410,27 @@ public:
         minGasPrice = CAmount(qtumDGP.getMinGasPrice(numBlocks));
         nGasPrice = (minGasPrice>DEFAULT_GAS_PRICE)?minGasPrice:DEFAULT_GAS_PRICE;
     }
+    //! Whether the node is meaningfully behind the network.
+    //!
+    //! This used to be "the tip is more than 90 minutes old", inherited from
+    //! Bitcoin where that reliably means we are behind. WATTx blocks are
+    //! naturally sparse (and stop entirely when nobody mines), so a fully
+    //! synced node kept reporting itself as syncing -- which makes the wallet
+    //! GUI throttle balance polling to roughly once a minute and skip stake
+    //! weight updates altogether, so balances looked frozen until restart.
+    //! Compare against the best header our peers have announced instead.
+    bool isBehindNetwork(int active_height) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        if (chainman().IsInitialBlockDownload()) return true;
+        const CBlockIndex* best_header = chainman().m_best_header;
+        return best_header && (best_header->nHeight - active_height) > SYNC_BEHIND_BLOCKS;
+    }
     void getSyncInfo(int& numBlocks, bool& isSyncing) override
     {
         LOCK(::cs_main);
         // Get node synchronization information with minimal locks
         numBlocks = chainman().ActiveChain().Height();
-        int64_t blockTime = chainman().ActiveChain().Tip() ? chainman().ActiveChain().Tip()->GetBlockTime() :
-                                                  Params().GenesisBlock().GetBlockTime();
-        int64_t secs = GetTime() - blockTime;
-        isSyncing = secs >= 90*60 ? true : false;
+        isSyncing = isBehindNetwork(numBlocks);
     }
     bool tryGetSyncInfo(int& numBlocks, bool& isSyncing) override
     {
@@ -421,10 +438,7 @@ public:
         if (lockMain) {
             // Get node synchronization information with minimal locks
             numBlocks = chainman().ActiveChain().Height();
-            int64_t blockTime = chainman().ActiveChain().Tip() ? chainman().ActiveChain().Tip()->GetBlockTime() :
-                                                      Params().GenesisBlock().GetBlockTime();
-            int64_t secs = GetTime() - blockTime;
-            isSyncing = secs >= 90*60 ? true : false;
+            isSyncing = isBehindNetwork(numBlocks);
             return true;
         }
 

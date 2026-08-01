@@ -22,6 +22,7 @@
 #include <util/chaintype.h>
 #include <util/strencodings.h>
 #include <util/convert.h>
+#include <limits>
 
 #include <algorithm>
 #include <cassert>
@@ -153,6 +154,7 @@ public:
         consensus.fPowAllowMinDifficultyBlocks = false;
         consensus.enforce_BIP94 = false;
         consensus.fPowNoRetargeting = true;
+        consensus.nPowRetargetHeight = 2000; // difficulty retargets from this height (see params.h)
         consensus.fPoSNoRetargeting = false;
         consensus.nRuleChangeActivationThreshold = 540; // 90% of 600
         consensus.nMinerConfirmationWindow = 600; // 10 minutes worth of blocks
@@ -346,6 +348,7 @@ public:
         consensus.fPowAllowMinDifficultyBlocks = false;
         consensus.enforce_BIP94 = false;
         consensus.fPowNoRetargeting = true;
+        consensus.nPowRetargetHeight = 2000; // difficulty retargets from this height (see params.h)
         consensus.fPoSNoRetargeting = false;
         consensus.nRuleChangeActivationThreshold = 1512; // 75% for testchains
         consensus.nMinerConfirmationWindow = 2016; // nPowTargetTimespan / nPowTargetSpacing
@@ -512,6 +515,7 @@ public:
         consensus.fPowAllowMinDifficultyBlocks = false;
         consensus.enforce_BIP94 = true; // Special difficulty rule for Testnet4 in Bitcoin
         consensus.fPowNoRetargeting = true;
+        consensus.nPowRetargetHeight = 2000; // difficulty retargets from this height (see params.h)
         consensus.fPoSNoRetargeting = false;
         consensus.nRuleChangeActivationThreshold = 1512; // 75% for testchains
         consensus.nMinerConfirmationWindow = 2016; // nPowTargetTimespan / nPowTargetSpacing
@@ -690,6 +694,7 @@ public:
         consensus.fPowAllowMinDifficultyBlocks = false;
         consensus.enforce_BIP94 = false;
         consensus.fPowNoRetargeting = true;
+        consensus.nPowRetargetHeight = 2000; // difficulty retargets from this height (see params.h)
         consensus.fPoSNoRetargeting = false;
         consensus.nRuleChangeActivationThreshold = 1815; // 90% of 2016
         consensus.nMinerConfirmationWindow = 2016; // nPowTargetTimespan / nPowTargetSpacing
@@ -804,6 +809,7 @@ public:
         consensus.fPowAllowMinDifficultyBlocks = true;
         consensus.enforce_BIP94 = opts.enforce_bip94;
         consensus.fPowNoRetargeting = true;
+        consensus.nPowRetargetHeight = std::numeric_limits<int>::max(); // regtest keeps a fixed difficulty
         consensus.fPoSNoRetargeting = true;
         consensus.nRuleChangeActivationThreshold = 108; // 75% for testchains
         consensus.nMinerConfirmationWindow = 144; // Faster than normal for regtest (144 instead of 2016)

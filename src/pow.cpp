@@ -107,15 +107,18 @@ unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHead
 
 unsigned int CalculateNextWorkRequired(const CBlockIndex* pindexLast, int64_t nFirstBlockTime, const Consensus::Params& params, bool fProofOfStake)
 {
+    // Limit adjustment step
+    int nHeight = pindexLast->nHeight + 1;
     if(fProofOfStake){
         if (params.fPoSNoRetargeting)
             return pindexLast->nBits;
     }else{
-        if (params.fPowNoRetargeting)
+        // Blocks below nPowRetargetHeight keep the launch behaviour (difficulty
+        // frozen at the previous block's value) so the chain mined under that
+        // rule stays valid; from that height on, difficulty adjusts normally.
+        if (params.fPowNoRetargeting && nHeight < params.nPowRetargetHeight)
             return pindexLast->nBits;
     }
-    // Limit adjustment step
-    int nHeight = pindexLast->nHeight + 1;
     int64_t nTargetSpacing = params.TargetSpacing(nHeight);
     int64_t nActualSpacing = pindexLast->GetBlockTime() - nFirstBlockTime;
     // Retarget

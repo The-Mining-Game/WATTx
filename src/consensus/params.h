@@ -141,6 +141,19 @@ struct Params {
       */
     bool enforce_BIP94;
     bool fPowNoRetargeting;
+    /**
+     * Height at which proof-of-work difficulty starts retargeting when
+     * fPowNoRetargeting is set.
+     *
+     * Mainnet launched with fPowNoRetargeting = true — a regtest-only setting —
+     * which pinned difficulty to the genesis value forever: blocks arrived at
+     * ~37s against a 120s target and emission ran at triple the intended rate.
+     * Turning the flag off outright would change the expected nBits of every
+     * block already mined and invalidate the existing chain, so retargeting
+     * instead begins at this height and earlier blocks keep the launch rule.
+     * Set to std::numeric_limits<int>::max() to keep difficulty fixed (regtest).
+     */
+    int nPowRetargetHeight;
     bool fPoSNoRetargeting;
     int64_t nPowTargetSpacing;
     int64_t nRBTPowTargetSpacing;
