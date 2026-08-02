@@ -39,7 +39,7 @@ SplashScreen::SplashScreen(const NetworkStyle* networkStyle)
     int logoImageSize           = logoSize - 13;
     int packageTextHeight       = 30;
     int versionTextHeight       = 20;
-    int statusHeight            = 30;
+    int statusHeight            = 62;   // four lines: one per upstream project
     int titleAddTextHeight      = 12;
     int welcomeTextHeight       = 35;
     float fontFactor            = 1.0;
@@ -113,16 +113,19 @@ SplashScreen::SplashScreen(const NetworkStyle* networkStyle)
     pixPaint.setFont(QFont(font, 10 * fontFactor, QFont::Bold));
     pixPaint.drawText(welcomeRect, Qt::AlignRight | Qt::AlignTop, "WATTx-Qt Wallet");
 
-    // draw copyright stuff
+    // Draw the lineage credits: one project per line, Bitcoin at the foot,
+    // in the order the projects started.
     QFont statusFont = QApplication::font();
-    statusFont.setPointSizeF(statusFont.pointSizeF() * 0.9);
+    statusFont.setPointSizeF(statusFont.pointSizeF() * 0.62);
     pixPaint.setFont(statusFont);
     pixPaint.setPen(foreground_color_statusbar);
     QRect statusRect(mainRect.left(), mainRect.height() - statusHeight, mainRect.width(), statusHeight);
     QColor statusColor(255, 255, 255);
     statusColor.setAlphaF(0.1);
     pixPaint.fillRect(statusRect, statusColor);
-    pixPaint.drawText(statusRect.adjusted(10, 0, -10, 0), Qt::AlignRight | Qt::AlignVCenter, copyrightText);
+    pixPaint.drawText(statusRect.adjusted(10, 0, -10, 0),
+                      Qt::AlignRight | Qt::AlignVCenter | Qt::TextWordWrap,
+                      copyrightText);
     pixPaint.end();
 
     // Set window title

@@ -72,14 +72,14 @@ std::string FormatSubVersion(const std::string& name, int nClientVersion, const 
 
 std::string CopyrightHolders(const std::string& strPrefix)
 {
-    const auto copyright_devs = strprintf(_(COPYRIGHT_HOLDERS), COPYRIGHT_HOLDERS_SUBSTITUTION).translated;
-    std::string strCopyrightHolders = strPrefix + copyright_devs;
-
-    // Make sure Bitcoin Core copyright is not removed by accident
-    if (copyright_devs.find("Qtum Core") == std::string::npos) {
-        strCopyrightHolders += "\n" + strPrefix + "The Qtum Core Developers";
-    }
-    return strCopyrightHolders;
+    // WATTx descends from Bitcoin Core through Qtum, and takes its privacy work
+    // (FCMP++) from Monero. Listed newest first so the stack reads bottom-up in
+    // the order the projects started: Bitcoin 2009, Monero 2014, Qtum 2017,
+    // WATTx 2025.
+    return strPrefix + "WATTx Core developers 2025-2026\n"
+         + strPrefix + "Qtum Core developers 2017-2025\n"
+         + strPrefix + "Monero Core developers 2014-2026\n"
+         + strPrefix + "Bitcoin Core developers 2009-2017";
 }
 
 std::string LicenseInfo()
