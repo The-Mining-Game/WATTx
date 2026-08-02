@@ -253,6 +253,7 @@ public:
         // descending from it.
         consensus.nCoinbaseMaturity = 100;
         consensus.nRBTCoinbaseMaturity = 100; // the value actually used (nReduceBlocktimeHeight = 0)
+        consensus.nCoinbaseMaturityV2Height = 2500; // above the tip: PoS blocks already mined staked coins younger than 100
         consensus.nStakeMinConfirmations = 500; // WATTx: Coins need 500 confirmations to stake
         consensus.nSubsidyHalvingIntervalV2 = 210000; // the value in use (nReduceBlocktimeHeight = 0)
         consensus.nMinValidatorStake = 20000 * COIN; // 20,000 WATTx minimum for super staking validator
