@@ -4,7 +4,7 @@ Everything below is already committed on branch `feat/multi-algo-auxpow-merged-m
 in `~/Documents/WATTx/WATTx-0.1.7-dev`. Nothing needs to be re-edited; this
 explains what changed and how to build and ship it.
 
-HEAD when written: `f5e14da7`
+HEAD when written: `712a2620`
 
 ## What changed
 
@@ -16,6 +16,7 @@ HEAD when written: `f5e14da7`
 | `2bd54be5` | Per-algorithm difficulty was dead code (`GetNextWorkRequiredForAlgorithm` had no callers) — all 7 merged-mining algorithms shared one difficulty. Now routed per algorithm. Also moved `nX25XActivationHeight` and `nPoSDifficultyFixHeight` from 210000 to 2000. |
 | `6faa8c12` | Templates are built per algorithm (`pow_algo` in `BlockCreateOptions`) so nBits matches the algorithm stamped in the block version. Without this every merged block fails `bad-diffbits` at the activation height and the chain stalls. |
 | `4adf3023` | Coinbase maturity 1 → 100, matching `nMaxReorgDepth`. |
+| `712a2620` | Emission now reaches 21,000,000 WTX: 50 WTX/block, halving every 210,000 blocks, series running to zero. Was 5 WTX with a 1,051,200 interval and a 7-halving cutoff, capping supply at 10,429,875. Verified live — block 2050 pays 50 WTX. |
 
 Verified on the live chain: block 1999 `bits=1f00ffff` (frozen) → block 2000
 `bits=1e744164` (retargeted), zero rejections, blocks carry `version=20010300`
@@ -86,8 +87,9 @@ gh release upload v0.1.7.2 \
 `package_releases.sh` runs patchelf (`$ORIGIN` rpath) so the Linux binaries
 double-click without `LD_LIBRARY_PATH`, and strips the Windows exes.
 
-**Release note to include:** every node must upgrade — nodes on older builds
-reject blocks from height 2000 onward.
+**Release note to include:** every node must upgrade. Nodes on older builds
+reject blocks from height 2000 onward (difficulty rules) and reject the 50 WTX
+block reward as `bad-cb-amount`.
 
 ## Deploying to the running node (legion, 10.42.0.86)
 
@@ -125,11 +127,6 @@ cd ~/wattx-0.1.7.2 && DISPLAY=:0.0 setsid nohup ./wattx-qt \
 
 ## Still open
 
-- **Supply cap mismatch.** Emission totals ~10.43M WTX (5 WTX/block, halving
-  every 1,051,200 blocks, forced to zero after 7 halvings in
-  `GetBlockSubsidy`), but the wallet's Explorer tab advertises 21,000,000 WTX.
-  Either correct the display or change emission — the latter is a consensus
-  change and gets more expensive every block.
 - Android core port: depends builds for arm64, core configures and compiles
   ~13%, blocked on NDK 25's libc++ lacking C++20 concepts (NDK r27 is installed
   at `~/Android/Sdk/ndk/27.*`) and a missing libsodium recipe for that host.
