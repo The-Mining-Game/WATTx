@@ -18,3 +18,11 @@ src/privacy/fcmp/rust/target/
 
 # Regtest runtime datadir used by auxpow tests (LevelDB/wallet churn)
 test/auxpow/wattx_regtest_data/
+
+# Build outputs. These were tracked, so every packaging run modified the working
+# tree and stamped the version string "-dirty" even when no source had changed.
+/release-linux64/
+/release-win64/
+/contracts/mining-game/artifacts/
+/contracts/mining-game/cache/
+/build-android/

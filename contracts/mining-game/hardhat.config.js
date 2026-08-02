@@ -33,6 +33,14 @@ export default {
       // daemon is built without BDB, so descriptor wallets only).
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : "remote",
     },
+    // WATTx EVM (MAINNET, via the local janus at :23889 → wattxd :3889).
+    // Same remote-signing model as wattx_local; the node wallet must be the
+    // ONLY loaded wallet or every wallet RPC fails with "Multiple wallets".
+    wattx_janus_main: {
+      url: process.env.WATTX_MAIN_RPC || "http://127.0.0.1:23889",
+      chainId: 22356,
+      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : "remote",
+    },
     // WATTx EVM (Testnet)
     wattx_testnet: {
       url: process.env.WATTX_TESTNET_RPC || "http://testnet.wattx.io:8545",
