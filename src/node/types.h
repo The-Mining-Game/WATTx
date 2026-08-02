@@ -35,6 +35,16 @@ enum class TransactionError {
 
 struct BlockCreateOptions {
     /**
+     * Proof-of-work algorithm this template is for, as the id consensus stores
+     * in block version bits 8-15.
+     *
+     * It must be known before the template's nBits is computed: with
+     * per-algorithm difficulty each algorithm retargets separately, so a
+     * template built as SHA256D and later stamped as, say, RandomX would carry
+     * the wrong nBits and be rejected as bad-diffbits.
+     */
+    uint8_t pow_algo{0};
+    /**
      * Set false to omit mempool transactions
      */
     bool use_mempool{true};

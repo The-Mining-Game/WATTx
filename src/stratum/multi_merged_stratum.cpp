@@ -1738,7 +1738,12 @@ void MultiMergedStratumServer::CreateJob(ParentChainAlgo algo) {
             job.wattx_bits       = m_ethash_round.wattx_bits;
             job.wattx_target     = m_ethash_round.wattx_target;
         } else {
-            job.wattx_template = m_wattx_mining->createNewBlock();
+            // Build the template for this job's algorithm so its nBits is the
+            // one that algorithm must satisfy; per-algorithm difficulty makes
+            // that differ between algorithms.
+            node::BlockCreateOptions tpl_opts;
+            tpl_opts.pow_algo = AlgoToX25XId(job.algo);
+            job.wattx_template = m_wattx_mining->createNewBlock(tpl_opts);
             if (job.wattx_template) {
                 auto header = job.wattx_template->getBlockHeader();
                 job.wattx_height = tip ? tip->height + 1 : 0;
@@ -2274,17 +2279,11 @@ bool MultiMergedStratumServer::ValidateShare(int client_id, const std::string& j
             CTransactionRef submit_cb = payout_cb
                 ? payout_cb : wtpl->getCoinbaseTx();
 
-            // Stamp which algorithm won this block into version bits 8-15.
-            // Per-algorithm difficulty retargeting reads it to find the previous
-            // block of the same algorithm; without it every merged-mined block
-            // looks like SHA256D and all seven algorithms share one difficulty,
-            // so hashrate on any one of them prices the others out.
-            int32_t versioned = (header.nVersion & ~0x0000FF00)
-                | (static_cast<int32_t>(AlgoToX25XId(job.algo)) << 8)
-                | CAuxPowBlockHeader::AUXPOW_VERSION_FLAG;
-
+            // The template was created for this algorithm, so its version
+            // already carries the algorithm id that its nBits was derived
+            // from. Submit that version unchanged apart from the AuxPoW flag.
             bool success = wtpl->submitAuxPowSolution(
-                versioned,
+                header.nVersion | CAuxPowBlockHeader::AUXPOW_VERSION_FLAG,
                 header.nTime,
                 0,
                 submit_cb,

@@ -338,6 +338,14 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(bool fProofOfStak
     if (chainparams.MineBlocksOnDemand()) {
         pblock->nVersion = gArgs.GetIntArg("-blockversion", pblock->nVersion);
     }
+    
+    // Record the algorithm in version bits 8-15 before nBits is
+    // computed below: GetNextWorkRequired reads it to pick the
+    // per-algorithm difficulty this template must satisfy.
+    if (m_options.pow_algo != 0) {
+        pblock->nVersion = (pblock->nVersion & ~0x0000FF00) |
+                           (static_cast<int32_t>(m_options.pow_algo) << 8);
+    }
 
     if(txProofTime == 0) {
         txProofTime = TicksSinceEpoch<std::chrono::seconds>(NodeClock::now());
