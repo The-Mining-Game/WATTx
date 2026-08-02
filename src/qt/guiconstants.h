@@ -64,8 +64,11 @@ static constexpr uint64_t GB_BYTES{1000000000};
 // Default prune target displayed in GUI.
 static constexpr int DEFAULT_PRUNE_TARGET_GB{2};
 
-/* Mainnet wattx explorer uri */
-#define WATTX_INFO_MAINNET "<a href='https://explorer.wattxchange.app/%1/%2'>%2</a>"
+/* Mainnet wattx explorer uri.
+ * The explorer is a static single-page app, so records are addressed by hash
+ * fragment (#/tx/<id>) rather than a path - there is no server-side route to
+ * rewrite, and a hard refresh cannot 404. */
+#define WATTX_INFO_MAINNET "<a href='https://wtx-exp.wattxchange.app/#/%1/%2'>%2</a>"
 
 /* Testnet wattx explorer uri */
 #define WATTX_INFO_TESTNET "<a href='https://testnet.wattxchange.app/%1/%2'>%2</a>"
