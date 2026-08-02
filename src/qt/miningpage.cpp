@@ -782,9 +782,35 @@ void MiningPage::startMining()
                     blockFound = true;        // Then signal (memory barrier)
                 });
 
-                // Wait for block or stop signal
+                // Wait for a solution, a new network block, or a stop signal.
+                //
+                // The template is only valid on top of the tip it was built on. If
+                // another block arrives and we keep hashing this one, any solution we
+                // find extends a stale parent and is orphaned, so the work is wasted.
+                // Nothing else rebuilds it: MineThread holds the block by value and
+                // only walks the nonce, and with the full 2^32 range that loop does
+                // not end on its own. So watch the tip here and rebuild when it moves.
+                const uint256 templateTip = block.hashPrevBlock;
+                bool staleTemplate = false;
+                int tipPollTicks = 0;
                 while (!blockFound && isMining && miner.IsMining()) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+                    // Poll about once a second; getBestBlockHash() takes cs_main.
+                    if (++tipPollTicks >= 10) {
+                        tipPollTicks = 0;
+                        if (clientModel->node().getBestBlockHash() != templateTip) {
+                            staleTemplate = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (staleTemplate) {
+                    miner.StopMining();
+                    QMetaObject::invokeMethod(this, [this]() {
+                        logToConsole(tr("New block on the network - rebuilding template"));
+                    }, Qt::QueuedConnection);
                 }
 
                 if (blockFound && isMining) {
@@ -984,9 +1010,28 @@ void MiningPage::updateMiningStats()
     // Update network difficulty
     if (clientModel) {
         try {
-            UniValue diffResult = clientModel->node().executeRpc("getdifficulty", UniValue(UniValue::VARR), "/");
-            if (diffResult.isNum()) {
-                double diff = diffResult.get_real();
+            // Show the difficulty of the block being mined (the "next" one), not the
+            // chain tip's: they differ across a retarget, and "next" is what the miner
+            // is actually working against. getdifficulty is deliberately not used here
+            // because on WATTx it returns an OBJECT (proof-of-work and proof-of-stake
+            // retarget separately), so a plain isNum() test never fires and the label
+            // would sit on its initial "0" forever.
+            UniValue info = clientModel->node().executeRpc("getmininginfo", UniValue(UniValue::VARR), "/");
+            double diff = -1.0;
+            if (info.isObject()) {
+                if (info.exists("next") && info["next"].isObject() &&
+                    info["next"].exists("difficulty") && info["next"]["difficulty"].isNum()) {
+                    diff = info["next"]["difficulty"].get_real();
+                } else if (info.exists("difficulty")) {
+                    const UniValue& d = info["difficulty"];
+                    if (d.isObject() && d.exists("proof-of-work") && d["proof-of-work"].isNum()) {
+                        diff = d["proof-of-work"].get_real();
+                    } else if (d.isNum()) {
+                        diff = d.get_real();
+                    }
+                }
+            }
+            if (diff >= 0.0) {
                 if (diff < 0.001) {
                     currentDifficultyLabel->setText(QString::number(diff, 'e', 2));
                 } else if (diff < 1.0) {
