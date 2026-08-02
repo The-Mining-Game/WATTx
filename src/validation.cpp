@@ -2377,8 +2377,10 @@ CAmount GetBlockSubsidy(int nHeight, const Consensus::Params& consensusParams)
     int subsidyHalvingWeight = consensusParams.SubsidyHalvingWeight(nHeight);
     int halvings = (subsidyHalvingWeight - 1) / subsidyHalvingInterval;
 
-    // Force block reward to zero after 7 halvings
-    if (halvings >= 7)
+    // Let the series run until the shift exhausts the reward. Cutting it off at
+    // seven halvings stopped emission at 0.39 WTX/block and capped the supply
+    // well below the intended total.
+    if (halvings >= 64)
         return 0;
 
     // Apply halving

@@ -119,7 +119,7 @@ public:
         m_chain_type = ChainType::MAIN;
         consensus.signet_blocks = false;
         consensus.signet_challenge.clear();
-        consensus.nSubsidyHalvingInterval = 1051200; // WATTx halving every ~4 years at 2min blocks
+        consensus.nSubsidyHalvingInterval = 210000; // 50 WTX base x 210,000 x 2 = 21,000,000 WTX
         consensus.BIP34Height = 0;
         consensus.BIP34Hash = uint256{}; // Will be set after genesis mining
         consensus.BIP65Height = 0;
@@ -254,7 +254,7 @@ public:
         consensus.nCoinbaseMaturity = 100;
         consensus.nRBTCoinbaseMaturity = 100; // the value actually used (nReduceBlocktimeHeight = 0)
         consensus.nStakeMinConfirmations = 500; // WATTx: Coins need 500 confirmations to stake
-        consensus.nSubsidyHalvingIntervalV2 = 1051200; // ~4 years at 2min blocks (525600 min/year * 2)
+        consensus.nSubsidyHalvingIntervalV2 = 210000; // the value in use (nReduceBlocktimeHeight = 0)
         consensus.nMinValidatorStake = 20000 * COIN; // 20,000 WATTx minimum for super staking validator
 
         consensus.nLastPOWBlock = 5000; // PoS enabled after block 5000, hybrid PoW/PoS from then on

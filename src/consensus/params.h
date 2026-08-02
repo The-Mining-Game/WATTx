@@ -366,7 +366,10 @@ struct Params {
 
     /** Base block reward in satoshis (5 WATTx per block for each PoW/PoS) */
     /** 50% to PoW miners, 50% to PoS stakers - each receives this amount */
-    int64_t nBaseBlockReward{500000000};
+    /** Base block reward in satoshis: 50 WTX.
+     *  With a 210,000-block halving interval the full series totals exactly
+     *  21,000,000 WTX. */
+    int64_t nBaseBlockReward{5000000000};
 
     /** Height at which trust tier system activates */
     int nTrustTierActivationHeight{1001}; // After PoW phase
