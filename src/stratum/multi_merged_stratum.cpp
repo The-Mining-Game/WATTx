@@ -324,6 +324,24 @@ size_t MultiMergedStratumServer::GetTotalClientCount() const {
     return m_clients.size();
 }
 
+namespace {
+// Consensus encodes the mining algorithm in block version bits 8-15 using the
+// x25x::Algorithm ids; the stratum tracks parent chains with its own enum.
+uint8_t AlgoToX25XId(ParentChainAlgo algo)
+{
+    switch (algo) {
+        case ParentChainAlgo::SHA256D:    return 0x00;
+        case ParentChainAlgo::SCRYPT:     return 0x01;
+        case ParentChainAlgo::ETHASH:     return 0x02;
+        case ParentChainAlgo::RANDOMX:    return 0x03;
+        case ParentChainAlgo::EQUIHASH:   return 0x04;
+        case ParentChainAlgo::X11:        return 0x05;
+        case ParentChainAlgo::KHEAVYHASH: return 0x07;
+    }
+    return 0x00;
+}
+} // namespace
+
 size_t MultiMergedStratumServer::GetClientCount(ParentChainAlgo algo) const {
     std::lock_guard<std::mutex> lock(m_clients_mutex);
     size_t count = 0;
@@ -2256,8 +2274,17 @@ bool MultiMergedStratumServer::ValidateShare(int client_id, const std::string& j
             CTransactionRef submit_cb = payout_cb
                 ? payout_cb : wtpl->getCoinbaseTx();
 
+            // Stamp which algorithm won this block into version bits 8-15.
+            // Per-algorithm difficulty retargeting reads it to find the previous
+            // block of the same algorithm; without it every merged-mined block
+            // looks like SHA256D and all seven algorithms share one difficulty,
+            // so hashrate on any one of them prices the others out.
+            int32_t versioned = (header.nVersion & ~0x0000FF00)
+                | (static_cast<int32_t>(AlgoToX25XId(job.algo)) << 8)
+                | CAuxPowBlockHeader::AUXPOW_VERSION_FLAG;
+
             bool success = wtpl->submitAuxPowSolution(
-                header.nVersion | CAuxPowBlockHeader::AUXPOW_VERSION_FLAG,
+                versioned,
                 header.nTime,
                 0,
                 submit_cb,

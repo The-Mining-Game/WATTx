@@ -103,18 +103,17 @@ BitcoinGUI::BitcoinGUI(interfaces::Node& node, const PlatformStyle *_platformSty
 {
     QSettings settings;
 
-    // Clear old geometry setting to enforce new compact size
+    // The window is resizable from any edge or corner. It used to call
+    // setFixedSize(812, 635), which removes the resize handles entirely and
+    // pins the wallet to one size no matter the display.
     static const QString geometryKey = "MainWindowGeometry";
-    static const QString compactVersionKey = "MainWindowCompactV2";  // V2 forces smaller size
-    if (!settings.contains(compactVersionKey)) {
-        settings.remove(geometryKey);
-        settings.remove("MainWindowCompactV1");  // Remove old key
-        settings.setValue(compactVersionKey, true);
+    setMinimumSize(700, 520);                     // below this the tabs collide
+    if (settings.contains(geometryKey)) {
+        restoreGeometry(settings.value(geometryKey).toByteArray());
+    } else {
+        resize(812, 635);                         // same first-run size as before
+        move(QGuiApplication::primaryScreen()->availableGeometry().center() - frameGeometry().center());
     }
-
-    // Always set to compact size: 812x635
-    setFixedSize(812, 635);
-    move(QGuiApplication::primaryScreen()->availableGeometry().center() - frameGeometry().center());
 
     setContextMenuPolicy(Qt::PreventContextMenu);
 

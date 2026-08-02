@@ -275,7 +275,7 @@ public:
         // Set to a future block height to preserve existing chain
         // Miners can use SHA256, Scrypt, Ethash, RandomX, Equihash, X11, or kHeavyHash after this height
         consensus.nRandomXActivationHeight = 210000; // Activate RandomX at block 210,000
-        consensus.nX25XActivationHeight = 210000; // Activate X25X at block 210,000
+        consensus.nX25XActivationHeight = 2000; // per-algorithm difficulty; see nPowRetargetHeight
 
         // FCMP Privacy Transaction Activation
         consensus.nFcmpActivationHeight = 210000; // Activate FCMP at block 210,000
@@ -289,7 +289,7 @@ public:
         // and 4x stronger difficulty adjustment multiplier for faster convergence.
         // The timestamp mask alone slows blocks from ~10s to ~160s, then the 4x multiplier
         // converges toward the 120s target within a few blocks.
-        consensus.nPoSDifficultyFixHeight = 210000;
+        consensus.nPoSDifficultyFixHeight = 2000; // 16s stake mask + 4x convergence, with the other difficulty fixes
         consensus.FixedRBTPosLimit = uint256{"0000000fffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
 
         // WATTx Trust Tier parameters (to be added to consensus struct)
