@@ -1,11 +1,15 @@
 #!/bin/bash
-# Package WATTx 0.1.7.2 release archives from the current build trees.
-#   linux: build/bin      -> release-linux64/ -> wattx-0.1.7.2-linux64.tar.gz
-#   win:   build-win/bin  -> release-win64/   -> wattx-0.1.7.2-win64.zip
+# Package WATTx release archives from the current build trees.
+#   linux: build/bin      -> release-linux64/ -> wattx-$VER-linux64.tar.gz
+#   win:   build-win/bin  -> release-win64/   -> wattx-$VER-win64.zip
 # Run from the repo root after both builds succeed.
+#
+# Override the version with the environment, e.g. VER=0.1.7.4 contrib/package_releases.sh
+# Keep this in step with the release tag: shipping archives whose version does not
+# match the tag they hang off leaves people building the wrong source.
 set -e
 cd "$(dirname "$0")/.."
-VER=0.1.7.2
+VER=${VER:-0.1.7.3}
 PE=$(ls "$HOME/.local/bin/patchelf" 2>/dev/null || command -v patchelf)
 
 echo "== linux =="
