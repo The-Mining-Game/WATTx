@@ -132,7 +132,7 @@ public:
         consensus.QIP7Height = 0;
         consensus.QIP9Height = 0;
         consensus.nOfflineStakeHeight = 1; // Enable offline staking from start
-        consensus.nReduceBlocktimeHeight = 0; // 1-second blocks from genesis
+        consensus.nReduceBlocktimeHeight = 0; // RBT spacing/maturity apply from genesis (120s blocks)
         consensus.nMuirGlacierHeight = 0;
         consensus.nLondonHeight = 0;
         consensus.nShanghaiHeight = 0;
@@ -247,8 +247,12 @@ public:
 
         // WATTx-specific parameters
         consensus.nBlocktimeDownscaleFactor = 1; // No downscaling
-        consensus.nCoinbaseMaturity = 1; // WATTx: PoW rewards spendable after 1 confirmation
-        consensus.nRBTCoinbaseMaturity = 1;
+        // Must not be shorter than the reorg the chain is willing to accept
+        // (nMaxReorgDepth, 100). At 1 confirmation a two-block reorg orphans a
+        // coinbase that has already been spent, invalidating every transaction
+        // descending from it.
+        consensus.nCoinbaseMaturity = 100;
+        consensus.nRBTCoinbaseMaturity = 100; // the value actually used (nReduceBlocktimeHeight = 0)
         consensus.nStakeMinConfirmations = 500; // WATTx: Coins need 500 confirmations to stake
         consensus.nSubsidyHalvingIntervalV2 = 1051200; // ~4 years at 2min blocks (525600 min/year * 2)
         consensus.nMinValidatorStake = 20000 * COIN; // 20,000 WATTx minimum for super staking validator
@@ -268,7 +272,7 @@ public:
         consensus.nRBTCheckpointSpan = 500;
         consensus.delegationsAddress = uint160(ParseHex("0000000000000000000000000000000000000086"));
         consensus.historyStorageAddress = uint160(ParseHex("0000F90827F1C53a10cb7A02335B175320002935"));
-        consensus.nStakeTimestampMask = 0; // 1-second precision for 1s blocks
+        consensus.nStakeTimestampMask = 0;   // superseded by the 16s mask at nPoSDifficultyFixHeight
         consensus.nRBTStakeTimestampMask = 0;
 
         // X25X Multi-Algorithm Mining Activation
