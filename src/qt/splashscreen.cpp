@@ -24,6 +24,7 @@
 
 #include <QApplication>
 #include <QCloseEvent>
+#include <QIcon>
 #include <QPainter>
 #include <QPainterPath>
 #include <QRadialGradient>
@@ -82,7 +83,9 @@ SplashScreen::SplashScreen(const NetworkStyle* networkStyle)
     pixPaint.setPen(logo_frame_color);
     pixPaint.drawPath(logoPath);
 
-    QPixmap logo = PlatformStyle::SingleColorIcon(":/icons/bitcoin", foreground_color).pixmap(QSize(logoImageSize, logoImageSize));
+    // Draw the logo as authored. SingleColorIcon flattens it to one colour,
+    // which throws away the gradient, the blue shadow and the lightning bolt.
+    QPixmap logo = QIcon(":/icons/bitcoin").pixmap(QSize(logoImageSize, logoImageSize));
     pixPaint.drawPixmap(logoRect.x() + 6, logoRect.y() + 6, logo);
 
     pixPaint.setPen(foreground_color);
