@@ -41,6 +41,11 @@ class CCoinsViewCache;
 
 namespace privacy {
 
+//! Master switch for the FCMP confidential amount layer. Default false.
+//! See fcmp_consensus.cpp for why this stays off until the builder and
+//! end-to-end regtest spends are proven.
+extern bool g_fcmp_amount_layer_enabled;
+
 // ============================================================================
 // Key Image Database
 // ============================================================================

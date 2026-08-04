@@ -143,6 +143,10 @@ std::optional<CPrivacyTransaction> CPrivacyTransactionBuilder::Build()
         return std::nullopt; // Insufficient funds
     }
 
+    // Blinding factors of the input pseudo-outputs, needed to balance the
+    // outputs so that sum(in) == sum(out) + fee holds on the curve.
+    std::vector<CBlindingFactor> inputBlinds;
+
     // Build inputs
     for (const auto& [outpoint, privKey, amount, blind] : m_inputs) {
         CPrivacyInput input;
@@ -168,6 +172,10 @@ std::optional<CPrivacyTransaction> CPrivacyTransactionBuilder::Build()
         if (m_type == PrivacyType::CONFIDENTIAL || m_type == PrivacyType::RINGCT) {
             CBlindingFactor bf = blind.IsValid() ? blind : CBlindingFactor::Random();
             CreateCommitment(amount, bf, input.commitment);
+            // Tracked so the outputs can be made to balance against them; without
+            // this the G-components never cancel and consensus rejects the tx as
+            // imbalanced even when the values are correct.
+            inputBlinds.push_back(bf);
         }
 
         tx.privacyInputs.push_back(input);
@@ -215,10 +223,45 @@ std::optional<CPrivacyTransaction> CPrivacyTransactionBuilder::Build()
         tx.privacyOutputs.push_back(output);
     }
 
-    // Create range proofs
+    // Make the outputs balance the inputs before proving anything.
+    //
+    // The last output's blinding is replaced with sum(inputBlinds) -
+    // sum(other outputBlinds), so the G-components cancel in
+    //     sum(in) == sum(out) + fee
+    // (the fee commitment carries zero blinding). Its commitment must then be
+    // recomputed, and the range proof must be built over the FINAL commitments
+    // or it will not bind to what the transaction actually carries.
     if (!outputCommitments.empty()) {
-        CreateAggregatedRangeProof(outputAmounts, outputBlinds, outputCommitments,
-                                    tx.aggregatedRangeProof);
+        if (inputBlinds.empty()) {
+            return std::nullopt; // confidential outputs with no shielded inputs to fund them
+        }
+        if (!BalanceBlindingFactors(inputBlinds, outputBlinds)) {
+            return std::nullopt;
+        }
+
+        const size_t last = outputBlinds.size() - 1;
+        if (!CreateCommitment(outputAmounts[last], outputBlinds[last], outputCommitments[last])) {
+            return std::nullopt;
+        }
+        // Mirror the corrected commitment back into the transaction itself; the
+        // vector is only a working copy.
+        size_t confIdx = 0;
+        for (auto& out : tx.privacyOutputs) {
+            if (out.confidentialOutput.commitment.IsNull()) continue;
+            if (confIdx == last) {
+                out.confidentialOutput.commitment = outputCommitments[last];
+                break;
+            }
+            confIdx++;
+        }
+    }
+
+    // Create range proofs over the final commitments
+    if (!outputCommitments.empty()) {
+        if (!CreateAggregatedRangeProof(outputAmounts, outputBlinds, outputCommitments,
+                                        tx.aggregatedRangeProof)) {
+            return std::nullopt;
+        }
     }
 
     // Create MLSAG signature (placeholder - needs full implementation)

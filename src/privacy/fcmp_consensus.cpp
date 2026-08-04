@@ -20,6 +20,16 @@
 
 namespace privacy {
 
+// Master switch for the FCMP confidential AMOUNT layer (commitments + range
+// proofs + balance). Default OFF: on mainnet nothing changes until this is
+// deliberately enabled, and `tree_size == 0` means no shielded output has ever
+// existed, so there is no legacy state to be compatible with.
+//
+// Turn on with -fcmpamountlayer (regtest/testnet) once the transaction builder
+// balances blinding factors. Enabling it before end-to-end spends verify is how
+// an inflation bug reaches production.
+bool g_fcmp_amount_layer_enabled = false;
+
 // ============================================================================
 // Key Image Database Implementation
 // ============================================================================
@@ -336,11 +346,111 @@ bool CFcmpConsensusState::CheckFcmpTransaction(const CTransaction& tx, TxValidat
     // FCMP transaction that creates confidential outputs. No shielded value can be
     // minted. Re-enable by removing this guard once the coherent ed25519 amount layer
     // and its range-proof verifier are wired and tested end-to-end.
+    // Confidential outputs are verified in ONE group (ed25519) by
+    // confidential_ed25519.cpp: every output carries an audited Bulletproofs+
+    // range proof bound to its own commitment, and the values must conserve.
+    //
+    // NOTE: g_fcmp_amount_layer_enabled is still false by default. The checks
+    // below are complete and unit-tested, but the amount layer stays OFF until
+    // the transaction builder balances blinding factors and end-to-end regtest
+    // spends pass -- until then no confidential output can be created, exactly
+    // as before. Flipping this on without that is how inflation ships.
     if (!privTx.privacyOutputs.empty()) {
-        return state.Invalid(TxValidationResult::TX_CONSENSUS,
-                             "fcmp-amount-layer-disabled",
-                             "FCMP confidential outputs are disabled pending a curve-coherent, "
-                             "range-proven amount layer (anti-inflation fail-closed)");
+        if (!g_fcmp_amount_layer_enabled) {
+            return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                                 "fcmp-amount-layer-disabled",
+                                 "FCMP confidential outputs are disabled pending a curve-coherent, "
+                                 "range-proven amount layer (anti-inflation fail-closed)");
+        }
+
+        std::vector<CPedersenCommitment> outputCommitments;
+        for (const auto& out : privTx.privacyOutputs) {
+            const CConfidentialOutput& co = out.confidentialOutput;
+
+            // A purely transparent output inside an FCMP transaction carries no
+            // commitment and no proof; it is covered by the explicit nValue.
+            if (co.commitment.IsNull() && co.rangeProof.data.empty()) {
+                continue;
+            }
+
+            if (!co.commitment.IsValid()) {
+                return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                                     "fcmp-output-commitment-invalid",
+                                     "FCMP confidential output has an invalid commitment");
+            }
+
+            // A per-output proof is optional; the builder emits ONE aggregated
+            // proof covering every commitment (smaller, and what BP+ is for).
+            // If a per-output proof is present it must still be valid -- an
+            // unverifiable blob is never allowed to ride along.
+            if (!co.rangeProof.data.empty() && !VerifyRangeProof(co.commitment, co.rangeProof)) {
+                return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                                     "fcmp-output-rangeproof-invalid",
+                                     "FCMP confidential output has an invalid range proof");
+            }
+
+            outputCommitments.push_back(co.commitment);
+        }
+
+        // Fail closed: every confidential output must be covered by the
+        // aggregated range proof. Without it an output could hide a wrapped or
+        // negative value and mint supply out of nothing.
+        if (!outputCommitments.empty()) {
+            if (!VerifyAggregatedRangeProof(outputCommitments, privTx.aggregatedRangeProof)) {
+                return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                                     "fcmp-aggregated-rangeproof-invalid",
+                                     "FCMP confidential outputs are not covered by a valid "
+                                     "aggregated range proof");
+            }
+        }
+
+        if (!outputCommitments.empty()) {
+            // Value conservation: sum(input pseudo-outputs) == sum(outputs) + fee.
+            std::vector<CPedersenCommitment> inputCommitments;
+            inputCommitments.reserve(privTx.fcmpInputs.size());
+            for (const auto& input : privTx.fcmpInputs) {
+                if (!input.pseudoOutput.IsValid()) {
+                    return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                                         "fcmp-pseudo-output-invalid",
+                                         "FCMP input has invalid pseudo-output");
+                }
+                inputCommitments.push_back(input.pseudoOutput);
+            }
+
+            if (inputCommitments.empty()) {
+                return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                                     "fcmp-outputs-without-inputs",
+                                     "FCMP confidential outputs with no shielded inputs to fund them");
+            }
+
+            // The fee is public, so its commitment has zero blinding and every
+            // verifier recomputes it identically.
+            //
+            // A zero fee contributes 0*H + 0*G = the identity point, which is
+            // the additive neutral element -- there is simply no term to add,
+            // and constructing it would produce a point that IsValid() rejects.
+            CPedersenCommitment feeCommitment;
+            const CPedersenCommitment* feePtr = nullptr;
+            if (privTx.nFee < 0) {
+                return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                                     "fcmp-fee-negative",
+                                     "FCMP transaction has a negative fee");
+            }
+            if (privTx.nFee > 0) {
+                if (!CreatePublicValueCommitment(privTx.nFee, feeCommitment)) {
+                    return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                                         "fcmp-fee-commitment-failed",
+                                         "FCMP transaction has an unrepresentable fee");
+                }
+                feePtr = &feeCommitment;
+            }
+
+            if (!VerifyCommitmentBalance(inputCommitments, outputCommitments, feePtr)) {
+                return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                                     "fcmp-amount-imbalance",
+                                     "FCMP transaction inputs do not balance outputs plus fee");
+            }
+        }
     }
 
     // Check FCMP inputs
