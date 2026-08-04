@@ -617,11 +617,14 @@ unsigned int GetNextWorkRequiredForAlgorithm(const CBlockIndex* pindexLast,
     // Use per-algorithm difficulty lookback from consensus params
     int nLookback = params.nX25XDifficultyLookback;
 
-    // Find the previous block with this algorithm for timing calculation
+    // Find the previous block with this algorithm for timing calculation.
+    // PoS blocks must be skipped: their version field carries no PoW algo id
+    // (it decodes as SHA256D), so without the IsProofOfStake() check a PoS
+    // block anchors the retarget and PoW inherits the PoS difficulty.
     const CBlockIndex* pindexAlgoPrev = nullptr;
     const CBlockIndex* pindex = pindexAlgoLast->pprev;
     while (pindex != nullptr) {
-        if (GetBlockAlgorithm(pindex->nVersion) == algo) {
+        if (!pindex->IsProofOfStake() && GetBlockAlgorithm(pindex->nVersion) == algo) {
             pindexAlgoPrev = pindex;
             break;
         }
@@ -673,7 +676,9 @@ const CBlockIndex* MultiAlgoDifficultyManager::GetLastBlockForAlgorithm(const CB
 {
     const CBlockIndex* pindex = pindexLast;
     while (pindex != nullptr) {
-        if (GetBlockAlgorithm(pindex->nVersion) == algo) {
+        // PoS blocks carry no PoW algo id (version bits decode as SHA256D) —
+        // only PoW blocks may anchor a PoW algorithm's difficulty.
+        if (!pindex->IsProofOfStake() && GetBlockAlgorithm(pindex->nVersion) == algo) {
             return pindex;
         }
         pindex = pindex->pprev;
@@ -688,7 +693,7 @@ int MultiAlgoDifficultyManager::CountBlocksForAlgorithm(const CBlockIndex* pinde
     int blocksChecked = 0;
 
     while (pindex != nullptr && blocksChecked < nCount) {
-        if (GetBlockAlgorithm(pindex->nVersion) == algo) {
+        if (!pindex->IsProofOfStake() && GetBlockAlgorithm(pindex->nVersion) == algo) {
             count++;
         }
         pindex = pindex->pprev;
