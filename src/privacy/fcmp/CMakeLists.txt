@@ -12,7 +12,12 @@ if(NOT CARGO_EXECUTABLE)
     return()
 endif()
 
-set(WATTX_FCMP_ENABLED ON CACHE BOOL "FCMP library enabled")
+# FORCE here is REQUIRED, not optional. Without it, a build directory that was
+# first configured on a machine with no cargo keeps the OFF value written above
+# forever: a plain set(... CACHE ...) never overwrites an existing cache entry,
+# so installing Rust and re-running cmake silently leaves FCMP disabled and the
+# link then fails with undefined references to fcmp_init/fcmp_error_string.
+set(WATTX_FCMP_ENABLED ON CACHE BOOL "FCMP library enabled" FORCE)
 
 # Rust build configuration
 set(RUST_DIR ${CMAKE_CURRENT_SOURCE_DIR}/rust)
@@ -37,6 +42,17 @@ elseif(ANDROID)
     # Phones are arm64; the 32-bit ABI is not built because a validating node
     # needs the 64-bit address space for the RandomX cache.
     set(RUST_TARGET "aarch64-linux-android")
+    set(RUST_LIB_NAME libwattx_fcmp.a)
+    set(RUST_RELEASE_DIR ${RUST_TARGET_DIR}/${RUST_TARGET}/release)
+    set(CARGO_TARGET_FLAG --target ${RUST_TARGET})
+elseif(CMAKE_CROSSCOMPILING AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
+       AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+    # Cross-building for 64-bit ARM Linux (e.g. an Oracle Ampere A1 seed node).
+    # Without an explicit --target, cargo builds for the HOST arch and the x86
+    # objects only surface much later as undefined references at link time.
+    # Needs: rustup target add aarch64-unknown-linux-gnu, and
+    # CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+    set(RUST_TARGET "aarch64-unknown-linux-gnu")
     set(RUST_LIB_NAME libwattx_fcmp.a)
     set(RUST_RELEASE_DIR ${RUST_TARGET_DIR}/${RUST_TARGET}/release)
     set(CARGO_TARGET_FLAG --target ${RUST_TARGET})

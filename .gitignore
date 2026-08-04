@@ -1,6 +1,12 @@
-build/
-build-win/
-build-win64/
+# Anchored with a leading slash ON PURPOSE. An unanchored "build/" matches a
+# directory named build at ANY depth, which silently excluded src/blst/build/ --
+# the vendored per-architecture assembly. A fresh clone then failed to build with
+# "assembly.S: No such file or directory". Keep these anchored to the repo root.
+/build/
+/build-win/
+/build-win64/
+/build-arm64/
+/build-*/
 *.o
 *.a
 *.so
