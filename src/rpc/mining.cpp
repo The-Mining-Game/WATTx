@@ -238,17 +238,26 @@ static UniValue generateBlocks(ChainstateManager& chainman, Mining& miner, const
     UniValue blockHashes(UniValue::VARR);
     while (nGenerate > 0 && !chainman.m_interrupt) {
         int32_t nTimeLimit = TicksSinceEpoch<std::chrono::seconds>(NodeClock::now()) + node::POW_MINER_MAX_TIME;
-        std::unique_ptr<BlockTemplate> block_template(miner.createNewBlock({ .coinbase_output_script = coinbase_output_script }, false, nullptr, 0, nTimeLimit));
+        // Build the template FOR the requested algorithm. Stamping the version
+        // afterwards was not enough: nBits is computed inside createNewBlock from
+        // the version's algorithm bits, so a template built as SHA256D and then
+        // relabelled carried SHA256D's difficulty and was rejected. That is
+        // exactly the trap BlockCreateOptions::pow_algo documents, and it meant
+        // generatetoaddress with any non-default algo could never produce an
+        // acceptable block.
+        node::BlockCreateOptions tpl_opts{ .coinbase_output_script = coinbase_output_script };
+        if (algo.has_value()) {
+            tpl_opts.pow_algo = static_cast<uint8_t>(algo.value());
+        }
+        std::unique_ptr<BlockTemplate> block_template(miner.createNewBlock(tpl_opts, false, nullptr, 0, nTimeLimit));
         CHECK_NONFATAL(block_template);
 
         // Get a copy of the block that we can modify
         CBlock block = block_template->getBlock();
 
-        // If algorithm specified, set block version for X25X mining
         if (algo.has_value()) {
-            block.nVersion = x25x::SetBlockAlgorithm(block.nVersion, algo.value());
-            LogPrintf("generateBlocks: Using algorithm %s (version 0x%08x)\n",
-                      x25x::GetAlgorithmInfo(algo.value()).name, block.nVersion);
+            LogPrintf("generateBlocks: Using algorithm %s (version 0x%08x, nBits %08x)\n",
+                      x25x::GetAlgorithmInfo(algo.value()).name, block.nVersion, block.nBits);
         }
 
         std::shared_ptr<const CBlock> block_out;
@@ -776,6 +785,16 @@ static RPCHelpMan getblocktemplate()
                 {RPCResult::Type::NUM, "height", "The height of the next block"},
                 {RPCResult::Type::STR_HEX, "signet_challenge", /*optional=*/true, "Only on signet"},
                 {RPCResult::Type::STR_HEX, "default_witness_commitment", /*optional=*/true, "a valid witness commitment for the unmodified block template"},
+                {RPCResult::Type::STR_HEX, "hashStateRoot", "the EVM state root the next block builds on"},
+                {RPCResult::Type::STR_HEX, "hashUTXORoot", "the EVM UTXO root the next block builds on"},
+                {RPCResult::Type::ARR, "coinbaseoutputs", "additional outputs the coinbase must pay (e.g. gas refunds); each is a scriptPubKey/value pair",
+                {
+                    {RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::STR_HEX, "scriptPubKey", "output script, hex encoded"},
+                        {RPCResult::Type::NUM, "value", "output value in satoshis"},
+                    }},
+                }},
             }},
         },
         RPCExamples{

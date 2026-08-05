@@ -164,6 +164,41 @@ bool BalanceBlindingFactors(
     return outputBlinds.back().IsValid();
 }
 
+bool ComputeBalancingBlindingFactor(
+    const std::vector<CBlindingFactor>& inputBlinds,
+    const std::vector<CBlindingFactor>& outputBlinds,
+    CBlindingFactor& balancingBlind)
+{
+    // sum(inputs) - sum(known outputs), on ed25519.
+    //
+    // The previous implementation summed these modulo the SECP256K1 group order
+    // and was left behind when the amount layer moved to ed25519 -- it kept the
+    // unprefixed name while its siblings became legacy_secp256k1_*. Reducing mod
+    // the wrong order yields a scalar that does not cancel, so commitments built
+    // from it never balanced, with nothing to indicate why.
+    if (inputBlinds.empty()) return false;
+
+    ed25519::Scalar sum = ed25519::Scalar::Zero();
+    for (const auto& b : inputBlinds) {
+        if (!b.IsValid()) return false;
+        sum = sum + BlindingToScalar(b);
+    }
+    for (const auto& b : outputBlinds) {
+        if (!b.IsValid()) return false;
+        sum = sum - BlindingToScalar(b);
+    }
+
+    const std::vector<uint8_t> bytes = sum.GetBytes();
+    if (bytes.size() != 32) return false;
+
+    uint256 u;
+    std::memcpy(u.begin(), bytes.data(), 32);
+    balancingBlind = CBlindingFactor(u);
+
+    // A zero result would leave the final commitment unblinded.
+    return balancingBlind.IsValid();
+}
+
 bool CreatePublicValueCommitment(
     CAmount amount,
     CPedersenCommitment& commitment)

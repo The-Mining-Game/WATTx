@@ -8,9 +8,9 @@
 #include <privacy/ring_signature.h>
 #include <privacy/confidential.h>
 #include <privacy/privacy.h>
+#include <privacy/ed25519/ed25519_types.h>
 #include <key.h>
 #include <random.h>
-#include <secp256k1.h>
 #include <streams.h>
 #include <test/util/setup_common.h>
 
@@ -235,49 +235,51 @@ BOOST_AUTO_TEST_CASE(range_proof_aggregated)
 
 BOOST_AUTO_TEST_CASE(commitment_homomorphic)
 {
-    // Test that commitments are homomorphic: C(a) + C(b) == C(a+b)
-    CAmount a = 100000000;  // 1 WTX
-    CAmount b = 50000000;   // 0.5 WTX
+    // Commitments are homomorphic: C(a, r_a) + C(b, r_b) == C(a+b, r_a+r_b).
+    //
+    // Rewritten for ed25519. This test used to verify the identity with
+    // secp256k1 primitives, which stopped being correct when the amount layer
+    // moved to ed25519 -- and it did not merely fail. secp256k1_ec_pubkey_parse
+    // rejected the ed25519 commitment, leaving the pubkeys uninitialised, and
+    // the following secp256k1_ec_pubkey_combine tripped libsecp256k1's illegal
+    // callback and ABORTED the process. That killed the whole test binary, so
+    // every test declared after this one silently never ran -- 424 of them.
+    //
+    // Homomorphism is now checked through the layer that actually owns the
+    // format, so this can never again depend on the wrong curve.
+    const CAmount a = 100000000;  // 1 WTX
+    const CAmount b = 50000000;   // 0.5 WTX
 
-    privacy::CBlindingFactor blindA = privacy::CBlindingFactor::Random();
-    privacy::CBlindingFactor blindB = privacy::CBlindingFactor::Random();
+    const privacy::CBlindingFactor blindA = privacy::CBlindingFactor::Random();
+    const privacy::CBlindingFactor blindB = privacy::CBlindingFactor::Random();
 
     privacy::CPedersenCommitment commitA, commitB;
-    BOOST_CHECK(privacy::CreateCommitment(a, blindA, commitA));
-    BOOST_CHECK(privacy::CreateCommitment(b, blindB, commitB));
+    BOOST_REQUIRE(privacy::CreateCommitment(a, blindA, commitA));
+    BOOST_REQUIRE(privacy::CreateCommitment(b, blindB, commitB));
 
-    // Create commitment to a+b with combined blinding factor
-    privacy::CBlindingFactor blindAB;
-    memcpy(blindAB.data.begin(), blindA.begin(), 32);
+    // Sum the blindings on the ed25519 scalar field.
+    const ed25519::Scalar sA = ed25519::Scalar::FromBytesModOrder(blindA.begin(), 32);
+    const ed25519::Scalar sB = ed25519::Scalar::FromBytesModOrder(blindB.begin(), 32);
+    const std::vector<uint8_t> sumBytes = (sA + sB).GetBytes();
+    BOOST_REQUIRE_EQUAL(sumBytes.size(), 32U);
 
-    secp256k1_context* ctx = secp256k1_context_create(SECP256K1_CONTEXT_SIGN);
-    BOOST_CHECK(ctx != nullptr);
-    bool addSuccess = secp256k1_ec_seckey_tweak_add(ctx, blindAB.data.begin(), blindB.begin());
-    BOOST_CHECK(addSuccess);
-    secp256k1_context_destroy(ctx);
+    uint256 sumU;
+    memcpy(sumU.begin(), sumBytes.data(), 32);
+    const privacy::CBlindingFactor blindAB{sumU};
 
     privacy::CPedersenCommitment commitAB;
-    BOOST_CHECK(privacy::CreateCommitment(a + b, blindAB, commitAB));
+    BOOST_REQUIRE(privacy::CreateCommitment(a + b, blindAB, commitAB));
 
-    // Verify that CommitA + CommitB == CommitAB
-    ctx = secp256k1_context_create(SECP256K1_CONTEXT_VERIFY);
-    BOOST_CHECK(ctx != nullptr);
+    // C(a) + C(b) must equal C(a+b) exactly. VerifyPoolBalance treats the two
+    // sides as inputs and outputs with no net value crossing the pool, which is
+    // precisely the statement "these sum to the same point".
+    BOOST_CHECK(privacy::VerifyPoolBalance({commitA, commitB}, {commitAB}, 0));
 
-    secp256k1_pubkey pA, pB, pAB;
-    BOOST_CHECK(secp256k1_ec_pubkey_parse(ctx, &pA, commitA.data.data(), 33));
-    BOOST_CHECK(secp256k1_ec_pubkey_parse(ctx, &pB, commitB.data.data(), 33));
-
-    const secp256k1_pubkey* pts[2] = {&pA, &pB};
-    secp256k1_pubkey combined;
-    BOOST_CHECK(secp256k1_ec_pubkey_combine(ctx, &combined, pts, 2));
-
-    unsigned char combinedSer[33], abSer[33];
-    size_t len = 33;
-    secp256k1_ec_pubkey_serialize(ctx, combinedSer, &len, &combined, SECP256K1_EC_COMPRESSED);
-
-    BOOST_CHECK(memcmp(combinedSer, commitAB.data.data(), 33) == 0);
-
-    secp256k1_context_destroy(ctx);
+    // And the identity must be sensitive to the value: committing to a+b+1
+    // under the same blinding must NOT balance.
+    privacy::CPedersenCommitment commitWrong;
+    BOOST_REQUIRE(privacy::CreateCommitment(a + b + 1, blindAB, commitWrong));
+    BOOST_CHECK(!privacy::VerifyPoolBalance({commitA, commitB}, {commitWrong}, 0));
 }
 
 BOOST_AUTO_TEST_CASE(amount_encryption)

@@ -323,6 +323,7 @@ BASE_SCRIPTS = [
     'wallet_importdescriptors.py --descriptors',
     'wallet_upgradewallet.py --legacy-wallet',
     # 'wallet_crosschain.py',
+    'mining_solo_algo_restart.py',
     'mining_basic.py',
     # 'mining_mainnet.py',
     'feature_signet.py',
