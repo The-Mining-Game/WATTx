@@ -9,6 +9,7 @@
 
 #include <arith_uint256.h>
 #include <chain.h>
+#include <crypto/x25x/x25x.h>
 #include <chainparams.h>
 #include <checkqueue.h>
 #include <clientversion.h>
@@ -2262,6 +2263,22 @@ bool CheckHeaderPoWAtHeight(const CBlockHeader& block, int nHeight, const Consen
 
     // Check if X25X is active at this height
     if (consensusParams.IsX25XActive(nHeight)) {
+        // RandomX must go through CheckProofOfWorkRandomX, which guarantees the
+        // verifier's RandomX context is keyed with the genesis hash.
+        //
+        // The generic X25X path reaches hash::RandomX(), which -- if no context
+        // exists yet -- silently initialises one with an ALL-ZERO key and returns
+        // a hash computed against the wrong dataset. That answer is then compared
+        // to the target as if it were authoritative, so a perfectly valid block is
+        // rejected. It bit at startup: LoadBlockIndexGuts validates block index
+        // entries before anything has initialised RandomX, so the first
+        // solo-mined (non-merged) RandomX block on the chain made the node fail
+        // to start with "Error loading block database". Merged-mined blocks hid
+        // the bug for the chain's whole history -- they carry AUXPOW_VERSION_FLAG
+        // and return earlier, never reaching this code.
+        if (x25x::GetBlockAlgorithm(block.nVersion) == x25x::Algorithm::RANDOMX) {
+            return CheckProofOfWorkRandomX(block, block.nBits, consensusParams);
+        }
         // Use X25X multi-algorithm validation
         return CheckProofOfWorkX25X(block, block.nBits, consensusParams);
     } else {
