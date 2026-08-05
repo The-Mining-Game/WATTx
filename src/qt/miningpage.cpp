@@ -511,6 +511,17 @@ void MiningPage::startMining()
     int numThreads = cpuThreadsSpinBox->value();
     bool safeMode = safeModeCheckbox && safeModeCheckbox->isChecked();
 
+    // Take the spin box as the source of truth for how many threads to run.
+    //
+    // currentCpuThreads is initialised to 1 and was only ever updated by the
+    // valueChanged signal -- but the spin box's initial setValue() happens in the
+    // constructor BEFORE that signal is connected, so the default never reached
+    // it. The result: the UI showed "7", the log below printed "Threads: 7", and
+    // the miner read currentCpuThreads and ran exactly ONE thread. Anyone who did
+    // not happen to nudge the spin box by hand mined at a fraction of their
+    // hardware and wondered why they never found a block.
+    currentCpuThreads = numThreads;
+
     logToConsole(tr("Mode: %1, Threads: %2, Safe Mode: %3")
         .arg(fullMode ? "Full (2GB)" : "Light (256MB)")
         .arg(numThreads)
