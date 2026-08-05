@@ -38,6 +38,7 @@
 #include <privacy/ed25519/ed25519_types.h>
 #include <privacy/ed25519/pedersen.h>
 #include <privacy/curvetree/curve_tree.h>
+#include <privacy/fcmp_consensus.h>
 #endif
 
 #include <algorithm>
@@ -378,8 +379,28 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(bool fProofOfStak
     {
         CAmount coinbaseReward = nFees + GetBlockSubsidy(nHeight, chainparams.GetConsensus());
 #ifdef ENABLE_WALLET
-        // After FCMP coinbase activation, create FCMP OP_RETURN output for PoW rewards
-        if (chainparams.GetConsensus().IsFcmpCoinbaseActive(nHeight))
+        // After FCMP coinbase activation, create FCMP OP_RETURN output for PoW rewards.
+        //
+        // SAFETY GATE: only if the shielded amount layer is actually enabled.
+        //
+        // A shielded coinbase pays the reward into an unspendable OP_RETURN and
+        // relies on the note entering the curve tree to be spendable again. While
+        // the FCMP spend path is unfinished that note can never be spent, so
+        // mining one would DESTROY the block reward -- silently, for every miner,
+        // starting at nFcmpCoinbaseActivationHeight (210,100 on mainnet) whether
+        // or not anyone had opted in.
+        //
+        // A runtime flag would be unsafe in validation (two nodes at the same
+        // height could disagree about what is valid), but this is block CREATION:
+        // it only affects what this node chooses to mine, never what it accepts,
+        // so it cannot split the chain. Falling back to a transparent coinbase is
+        // always valid under every ruleset.
+        //
+        // Under the pool model this path must additionally pay into
+        // GetShieldedPoolScript() rather than burning to an OP_RETURN -- see
+        // doc/design/fcmp-value-balance.md, open question 2.
+        if (chainparams.GetConsensus().IsFcmpCoinbaseActive(nHeight) &&
+            privacy::g_fcmp_amount_layer_enabled)
         {
             CPubKey scanPub, spendPub;
             bool haveStealth = false;
