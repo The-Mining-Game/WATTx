@@ -714,6 +714,7 @@ static RPCHelpMan getblocktemplate()
                     {"str", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "other client side supported softfork deployment"},
                 }},
                 {"longpollid", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "delay processing request until the result would vary significantly from the \"longpollid\" of a prior template"},
+                    {"algo", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Proof-of-work algorithm this template is for: sha256d, scrypt, ethash, randomx, equihash, x11, kheavyhash (default: sha256d). Each algorithm has its own difficulty, so a template must be requested for the algorithm that will actually mine it."},
                 {"data", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "proposed block data to check, encoded in hexadecimal; valid only for mode=\"proposal\""},
             },
             },
@@ -792,9 +793,37 @@ static RPCHelpMan getblocktemplate()
     std::string strMode = "template";
     UniValue lpval = NullUniValue;
     std::set<std::string> setClientRules;
+
+    // Which proof-of-work algorithm this template is for.
+    //
+    // WATTx retargets each algorithm separately, and consensus reads the
+    // algorithm out of the block's version bits. A template that does not say
+    // which algorithm it is for is necessarily built as SHA256D: it carries
+    // SHA256D's nBits and no algorithm tag. A miner that then hashes it with,
+    // say, RandomX produces real work against the wrong difficulty AND submits a
+    // header consensus will hash as SHA256D -- so every solution it finds is
+    // rejected as high-hash. Defaulting to SHA256D keeps existing sha256d
+    // callers working unchanged.
+    x25x::Algorithm requested_algo = x25x::Algorithm::SHA256D;
+
     if (!request.params[0].isNull())
     {
         const UniValue& oparam = request.params[0].get_obj();
+        const UniValue& algoval = oparam.find_value("algo");
+        if (!algoval.isNull()) {
+            if (!algoval.isStr()) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "algo must be a string");
+            }
+            requested_algo = x25x::GetAlgorithmByName(algoval.get_str());
+            if (requested_algo == x25x::Algorithm::INVALID) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                   "Unknown mining algorithm: " + algoval.get_str());
+            }
+            if (!x25x::IsAlgorithmEnabled(requested_algo)) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                   "Mining algorithm is not enabled: " + algoval.get_str());
+            }
+        }
         const UniValue& modeval = oparam.find_value("mode");
         if (modeval.isStr())
             strMode = modeval.get_str();
@@ -938,7 +967,8 @@ static RPCHelpMan getblocktemplate()
         // Create new block - WATTx Hybrid Consensus: Always create PoW templates for miners
         // PoS blocks are created via staking, not getblocktemplate
         bool fProofOfStake = false;
-        block_template = miner.createNewBlock({}, fProofOfStake);
+        block_template = miner.createNewBlock(
+            {.pow_algo = static_cast<uint8_t>(requested_algo)}, fProofOfStake);
         CHECK_NONFATAL(block_template);
 
 

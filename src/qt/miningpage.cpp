@@ -612,6 +612,15 @@ void MiningPage::startMining()
                 rulesArray.push_back("segwit");
                 templateRequest.pushKV("rules", rulesArray);
 
+                // This page mines RandomX, so the template must be built for
+                // RandomX. Without this the node returns a SHA256D template --
+                // SHA256D's nBits and no algorithm tag in the version -- and every
+                // block we solve is rejected as high-hash: we hash the header with
+                // RandomX while consensus, reading the version, hashes it as
+                // SHA256D. The two never agree, so the miner runs forever and wins
+                // nothing.
+                templateRequest.pushKV("algo", "randomx");
+
                 UniValue params(UniValue::VARR);
                 params.push_back(templateRequest);
 
