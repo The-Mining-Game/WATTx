@@ -399,6 +399,53 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "stop", 0, "wait" },
     { "addnode", 2, "v2transport" },
     { "addconnection", 2, "v2transport" },
+
+    // WATTx/Qtum RPCs whose non-string arguments were never registered here.
+    //
+    // Without an entry, bitcoin-cli passes the argument through as a JSON
+    // STRING, so the server rejects it as the wrong type. That is why merged
+    // stratum had to be started with curl instead of wattx-cli, and why numeric
+    // arguments to shieldfcmp/sendfcmp/delegatestake could not be given on the
+    // command line at all. rpc_help.py compares this table against the servers'
+    // declared named arguments and had been failing on all of them.
+    { "delegatestake", 1, "amount" },
+    { "eth_call", 0, "transaction" },
+    { "eth_estimateGas", 0, "transaction" },
+    { "eth_getBlockByHash", 1, "fullTransactions" },
+    { "eth_getBlockByNumber", 1, "fullTransactions" },
+    { "eth_getLogs", 0, "filter" },
+    { "eth_newFilter", 0, "filter" },
+    { "eth_sendTransaction", 0, "transaction" },
+    { "getfcmpbalance", 0, "minconf" },
+    { "importfcmpoutput", 1, "vout" },
+    { "importfcmpoutput", 2, "amount" },
+    { "importfcmpoutput", 5, "leaf_index" },
+    { "listfcmpoutputs", 0, "include_spent" },
+    { "listfcmpoutputs", 1, "minconf" },
+    { "listmessages", 0, "count" },
+    { "listmessages", 1, "skip" },
+    { "listvalidators", 0, "minFee" },
+    { "listvalidators", 1, "activeOnly" },
+    { "registervalidator", 0, "fee_rate" },
+    { "sendfcmp", 1, "amount" },
+    { "sendfcmp", 2, "minconf" },
+    { "sendfcmp", 3, "subtractfeefromamount" },
+    { "setparentchainconfig", 2, "port" },
+    { "setvalidatorpoolfee", 0, "fee_rate" },
+    { "shieldfcmp", 0, "amount" },
+    { "shieldfcmp", 2, "minconf" },
+    { "startbitcoinmergedstratum", 0, "port" },
+    { "startbitcoinmergedstratum", 2, "bitcoin_port" },
+    { "startmergedstratum", 0, "port" },
+    { "startmergedstratum", 2, "monero_port" },
+    { "startmultimergedstratum", 1, "base_port" },
+    { "startmultimergedstratum", 2, "parent_chains" },
+    { "startmultimergedstratum", 4, "share_difficulty" },
+    { "startmultimergedstratum", 5, "share_nbits" },
+    { "startmultimergedstratum", 7, "wallet_nethash_cap_percent" },
+    { "startmultimergedstratum", 8, "ip_nethash_cap_percent" },
+    { "startstratum", 0, "port" },
+    { "undelegatestake", 1, "amount" },
 };
 // clang-format on
 
