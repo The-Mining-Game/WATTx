@@ -953,7 +953,16 @@ static RPCHelpMan getblocktemplate()
     static CBlockIndex* pindexPrev;
     static int64_t time_start;
     static std::unique_ptr<BlockTemplate> block_template;
+
+    // The algorithm the cached template was built for. A template is only valid
+    // for its own algorithm -- it carries that algorithm's nBits and version tag
+    // -- so a request for a different one must rebuild rather than return the
+    // cached block. Without this, two miners on different algorithms hand each
+    // other's work back and forth and neither can ever produce a valid block.
+    static x25x::Algorithm cached_algo = x25x::Algorithm::SHA256D;
+
     if (!pindexPrev || pindexPrev->GetBlockHash() != tip ||
+        requested_algo != cached_algo ||
         (mempool.GetTransactionsUpdated() != nTransactionsUpdatedLast && GetTime() - time_start > 5))
     {
         // Clear pindexPrev so future calls make a new block, despite any failures from here on
@@ -974,6 +983,7 @@ static RPCHelpMan getblocktemplate()
 
         // Need to update only after we know createNewBlock succeeded
         pindexPrev = pindexPrevNew;
+        cached_algo = requested_algo;
     }
     CHECK_NONFATAL(pindexPrev);
     CBlock block{block_template->getBlock()};
