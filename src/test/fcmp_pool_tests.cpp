@@ -19,6 +19,7 @@
 #include <primitives/transaction.h>
 #include <privacy/confidential.h>
 #include <privacy/fcmp_consensus.h>
+#include <privacy/privacy.h>
 #include <script/script.h>
 #include <test/util/setup_common.h>
 
@@ -334,6 +335,100 @@ BOOST_AUTO_TEST_CASE(pool_balance_rejects_empty_and_malformed)
     CPedersenCommitment short_c;
     short_c.data.assign(32, 0x0E);
     BOOST_CHECK(!VerifyPoolBalance({}, {short_c}, 0));
+}
+
+// ---------------------------------------------------------------------------
+// Transaction assembly
+// ---------------------------------------------------------------------------
+
+BOOST_AUTO_TEST_CASE(fcmp_transaction_carries_its_payload)
+{
+    // THE ORIGINAL BUG: ToTransaction() walked privacyInputs -- the RingCT vector,
+    // which FCMP never populates -- so every FCMP spend serialized with vin: [] and
+    // no witness. DecodeFcmpTransaction found no payload, and consensus skipped
+    // every FCMP check on it. The mempool rejected the result only because a
+    // non-coinbase transaction with an empty vin is invalid.
+    CPrivacyTransaction ptx;
+    ptx.privacyType = PrivacyType::FCMP;
+    ptx.nFee = 1000;
+
+    CFcmpInput input;
+    input.keyImage.data.assign(32, 0xAB);
+    ptx.fcmpInputs.push_back(input);
+
+    CPrivacyTransaction::CFcmpShell shell;
+    shell.poolInputs.emplace_back(Txid::FromUint256(uint256{7}), 0);
+    shell.outputs.emplace_back(99 * COIN, GetShieldedPoolScript());
+
+    const auto assembled = ptx.ToFcmpTransaction(shell);
+    BOOST_REQUIRE(assembled.has_value());
+
+    // Real inputs, and a witness carrying the payload.
+    BOOST_CHECK_EQUAL(assembled->vin.size(), 1U);
+    BOOST_CHECK_EQUAL(assembled->vout.size(), 1U);
+    BOOST_CHECK(assembled->HasWitness());
+    BOOST_CHECK(assembled->vin[0].scriptSig.empty());
+
+    // And it decodes back to the same shielded payload.
+    CPrivacyTransaction decoded;
+    BOOST_REQUIRE(DecodeFcmpTransaction(*assembled, decoded));
+    BOOST_CHECK(decoded.privacyType == PrivacyType::FCMP);
+    BOOST_REQUIRE_EQUAL(decoded.fcmpInputs.size(), 1U);
+    BOOST_CHECK(decoded.fcmpInputs[0].keyImage.data == input.keyImage.data);
+
+    BOOST_CHECK(CreatesPool(*assembled));
+}
+
+BOOST_AUTO_TEST_CASE(fcmp_transaction_refuses_to_build_without_inputs)
+{
+    // An input-less "transaction" must never be produced in the first place.
+    CPrivacyTransaction ptx;
+    ptx.privacyType = PrivacyType::FCMP;
+
+    CPrivacyTransaction::CFcmpShell shell;
+    shell.outputs.emplace_back(1 * COIN, GetShieldedPoolScript());
+    BOOST_CHECK(!ptx.ToFcmpTransaction(shell).has_value());
+
+    // Nor one with inputs but nothing to pay.
+    CPrivacyTransaction::CFcmpShell no_outputs;
+    no_outputs.poolInputs.emplace_back(Txid::FromUint256(uint256{7}), 0);
+    BOOST_CHECK(!ptx.ToFcmpTransaction(no_outputs).has_value());
+
+    // And a non-FCMP transaction must not go down this path at all.
+    CPrivacyTransaction ringct;
+    ringct.privacyType = PrivacyType::RINGCT;
+    CPrivacyTransaction::CFcmpShell ok;
+    ok.poolInputs.emplace_back(Txid::FromUint256(uint256{7}), 0);
+    ok.outputs.emplace_back(1 * COIN, GetShieldedPoolScript());
+    BOOST_CHECK(!ringct.ToFcmpTransaction(ok).has_value());
+}
+
+BOOST_AUTO_TEST_CASE(fcmp_payload_does_not_bind_the_txid)
+{
+    // The payload rides in the witness, which the txid excludes. This is what lets
+    // the SA+L signature commit to the txid without circularity -- sign the txid,
+    // then attach the signature, without changing what was signed.
+    CPrivacyTransaction ptx;
+    ptx.privacyType = PrivacyType::FCMP;
+    CFcmpInput input;
+    input.keyImage.data.assign(32, 0x11);
+    ptx.fcmpInputs.push_back(input);
+
+    CPrivacyTransaction::CFcmpShell shell;
+    shell.poolInputs.emplace_back(Txid::FromUint256(uint256{7}), 0);
+    shell.outputs.emplace_back(5 * COIN, GetShieldedPoolScript());
+
+    const auto a = ptx.ToFcmpTransaction(shell);
+    BOOST_REQUIRE(a.has_value());
+
+    CPrivacyTransaction other = ptx;
+    other.fcmpInputs[0].keyImage.data.assign(32, 0x22);
+    const auto b = other.ToFcmpTransaction(shell);
+    BOOST_REQUIRE(b.has_value());
+
+    // Different payloads, same txid; different witnesses, so different wtxid.
+    BOOST_CHECK(a->GetHash() == b->GetHash());
+    BOOST_CHECK(a->GetWitnessHash() != b->GetWitnessHash());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

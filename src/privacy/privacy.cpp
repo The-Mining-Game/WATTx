@@ -443,7 +443,7 @@ bool CPrivacyTransaction::VerifyFcmp() const
     return true;
 }
 
-bool CPrivacyTransaction::VerifyFcmpSelfCheck() const
+bool CPrivacyTransaction::VerifyFcmpSelfCheck(CAmount poolDelta) const
 {
     // 1. Check FCMP inputs exist
     if (fcmpInputs.empty()) {
@@ -473,23 +473,122 @@ bool CPrivacyTransaction::VerifyFcmpSelfCheck() const
         }
     }
 
-    // 4. Verify commitment balance
+    // 4. Verify commitment balance.
+    //
+    // Collect by COMMITMENT, not by CConfidentialOutput::IsValid(). IsValid()
+    // additionally requires a non-empty per-output rangeProof, and the builder
+    // emits ONE aggregated proof instead -- so this loop used to find zero
+    // commitments on every wallet-built transaction, skip the balance check
+    // entirely, and report PASSED. That vacuous pass is how an unbalanced,
+    // input-less transaction reached the wire with a txid returned to the user.
     std::vector<CPedersenCommitment> outputCommitments;
     for (const auto& output : privacyOutputs) {
-        if (output.confidentialOutput.IsValid()) {
-            outputCommitments.push_back(output.confidentialOutput.commitment);
+        const CConfidentialOutput& co = output.confidentialOutput;
+        if (co.commitment.IsNull() && co.rangeProof.data.empty()) {
+            continue; // genuinely transparent output
         }
-    }
-
-    if (!outputCommitments.empty()) {
-        if (!VerifyFcmpBalance(fcmpInputs, outputCommitments, nFee)) {
-            LogPrintf("FCMP SelfCheck: FAILED - commitment balance check failed\n");
+        if (!co.commitment.IsValid()) {
+            LogPrintf("FCMP SelfCheck: FAILED - output has an invalid commitment\n");
             return false;
         }
+        outputCommitments.push_back(co.commitment);
     }
 
-    LogPrintf("FCMP SelfCheck: PASSED (SA+L sig + balance verified, proof deferred to consensus)\n");
+    // Fail closed: a shielded transaction with nothing to balance is malformed,
+    // not trivially valid.
+    if (outputCommitments.empty()) {
+        LogPrintf("FCMP SelfCheck: FAILED - no output commitments to balance\n");
+        return false;
+    }
+
+    // The aggregated range proof must cover them, and must exist. Checking it here
+    // means the wallet never broadcasts something consensus will reject.
+    if (!VerifyAggregatedRangeProof(outputCommitments, aggregatedRangeProof)) {
+        LogPrintf("FCMP SelfCheck: FAILED - outputs are not covered by a valid "
+                  "aggregated range proof\n");
+        return false;
+    }
+
+    // Balance against the pool delta. nFee is NOT used: under the pool model the
+    // fee is transparent, and paying it simply makes the delta more negative.
+    std::vector<CPedersenCommitment> inputCommitments;
+    inputCommitments.reserve(fcmpInputs.size());
+    for (const auto& input : fcmpInputs) {
+        if (!input.pseudoOutput.IsValid()) {
+            LogPrintf("FCMP SelfCheck: FAILED - input has an invalid pseudo-output\n");
+            return false;
+        }
+        inputCommitments.push_back(input.pseudoOutput);
+    }
+
+    if (!VerifyPoolBalance(inputCommitments, outputCommitments, poolDelta)) {
+        LogPrintf("FCMP SelfCheck: FAILED - shielded value does not balance the "
+                  "pool delta (%d in, %d out, delta=%lld)\n",
+                  inputCommitments.size(), outputCommitments.size(), poolDelta);
+        return false;
+    }
+
+    LogPrintf("FCMP SelfCheck: PASSED (SA+L sig + range proof + pool balance verified, "
+              "membership proof deferred to consensus)\n");
     return true;
+}
+
+std::optional<CTransaction> CPrivacyTransaction::ToFcmpTransaction(const CFcmpShell& shell) const
+{
+    if (privacyType != PrivacyType::FCMP) {
+        return std::nullopt;
+    }
+
+    // A transaction with no inputs is not a transaction. This is what the old
+    // ToTransaction() produced for every FCMP spend: it walked privacyInputs (the
+    // RingCT vector, always empty here), emitted vin: [], and the resulting tx had
+    // no witness for the payload -- so DecodeFcmpTransaction found nothing and
+    // consensus skipped every FCMP check. The mempool rejected it only because a
+    // non-coinbase tx with an empty vin is invalid.
+    if (shell.poolInputs.empty()) {
+        LogPrintf("FCMP ToFcmpTransaction: no pool inputs -- refusing to build an "
+                  "input-less transaction\n");
+        return std::nullopt;
+    }
+    if (shell.outputs.empty()) {
+        LogPrintf("FCMP ToFcmpTransaction: no outputs\n");
+        return std::nullopt;
+    }
+
+    CMutableTransaction mtx;
+    mtx.version = nVersion;
+    mtx.nLockTime = nLockTime;
+
+    for (const auto& outpoint : shell.poolInputs) {
+        // Empty scriptSig: the pool script is a native witness program, so the
+        // txid is not scriptSig-malleable. The SA+L signature commits to that
+        // txid, which is what stops a third party rewriting the outputs of a
+        // transaction paying from an anyone-can-spend script.
+        mtx.vin.emplace_back(outpoint);
+    }
+
+    for (const auto& out : shell.outputs) {
+        mtx.vout.push_back(out);
+    }
+
+    // Serialize the payload behind the "FCMP" marker and attach it to vin[0]'s
+    // witness, which is where DecodeFcmpTransaction looks for it.
+    DataStream payload;
+    payload << *this;
+
+    std::vector<unsigned char> item;
+    item.reserve(4 + payload.size());
+    item.push_back(0x46); // 'F'
+    item.push_back(0x43); // 'C'
+    item.push_back(0x4D); // 'M'
+    item.push_back(0x50); // 'P'
+    for (const std::byte b : payload) {
+        item.push_back(static_cast<unsigned char>(b));
+    }
+
+    mtx.vin[0].scriptWitness.stack.push_back(std::move(item));
+
+    return CTransaction(mtx);
 }
 
 CTransaction CPrivacyTransaction::ToTransaction() const
