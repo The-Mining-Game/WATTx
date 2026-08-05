@@ -9,6 +9,8 @@
 #include <privacy/ed25519/pedersen.h>
 #include <privacy/curvetree/tree_db.h>
 #include <chain.h>
+#include <coins.h>
+#include <util/moneystr.h>
 #include <logging.h>
 #include <hash.h>
 #include <streams.h>
@@ -238,8 +240,28 @@ bool CFcmpConsensusState::ConnectBlock(const CBlock& block, const CBlockIndex* p
     std::vector<curvetree::OutputTuple> outputsToAdd;
 
     for (const auto& tx : block.vtx) {
-        // Extract FCMP outputs
+        // A note may only enter the tree from a transaction that PAID for it.
+        //
+        // Previously this added a leaf for ANY OP_RETURN carrying the "FCMP"
+        // marker, with no value check and no cost: anyone could publish a
+        // commitment to any amount and have consensus accept it as a shielded
+        // note. That is unlimited inflation the moment the spend path works.
+        //
+        // A note-bearing OP_RETURN is still the ENCODING of a leaf, but the leaf
+        // is only created when the containing transaction backed it by paying
+        // into the shielded pool -- i.e. it created a pool output. The value
+        // conservation itself is checked in CheckFcmpInputs, which runs against
+        // the coins view before we get here; this is the structural gate that
+        // stops a free-standing OP_RETURN from ever reaching the tree.
+        const bool backed = CreatesPool(*tx);
+
         auto outputs = ExtractFcmpOutputs(*tx);
+        if (!outputs.empty() && !backed) {
+            LogPrintf("FCMP: block %d tx %s carries %lu note(s) with no pool "
+                      "output backing them - ignored\n",
+                      height, tx->GetHash().ToString(), outputs.size());
+            outputs.clear();
+        }
         for (auto& output : outputs) {
             outputsToAdd.push_back(std::move(output));
             outputsAdded++;
@@ -516,9 +538,35 @@ bool CFcmpConsensusState::CheckFcmpInputs(const CTransaction& tx, TxValidationSt
         return true;
     }
 
+    // RULE P1 -- a transaction that touches the shielded pool MUST carry a valid
+    // FCMP payload, and one that carries a payload MUST touch the pool.
+    //
+    // This is what makes the pool script safe to leave anyone-can-spend at the
+    // script level. It must be checked BEFORE the decode-and-skip below: a decode
+    // failure on a pool-spending transaction is a REJECTION, never a "not an FCMP
+    // transaction, carry on". The old behaviour -- decode fails, return true --
+    // meant a malformed payload silently bypassed every check in this function.
+    const bool spends_pool = SpendsPool(tx, view);
+    const bool creates_pool = CreatesPool(tx);
+    const bool touches_pool = spends_pool || creates_pool;
+
     CPrivacyTransaction privTx;
-    if (!DecodeFcmpTransaction(tx, privTx)) {
-        return true; // Not an FCMP transaction
+    const bool has_payload = DecodeFcmpTransaction(tx, privTx);
+
+    if (touches_pool && !has_payload) {
+        return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                             "fcmp-pool-without-payload",
+                             "transaction touches the shielded pool without a valid FCMP payload");
+    }
+    if (has_payload && !touches_pool) {
+        // A payload with no pool involvement has no value backing it: its outputs
+        // would be notes nobody paid for.
+        return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                             "fcmp-payload-without-pool",
+                             "FCMP payload on a transaction that does not touch the shielded pool");
+    }
+    if (!has_payload) {
+        return true; // Not an FCMP transaction, and it does not touch the pool
     }
 
     // Get current tree root for verification
@@ -553,38 +601,98 @@ bool CFcmpConsensusState::CheckFcmpInputs(const CTransaction& tx, TxValidationSt
         }
     }
 
-    // 4. SECURITY — every confidential output MUST carry a valid ed25519 Bulletproofs+
-    // range proof over its commitment. The homomorphic balance check (step 5) only
-    // proves the commitments SUM correctly; without a range proof an output can commit
-    // to an out-of-range (negative / >2^64 wraparound) value that still balances and
-    // mints on redemption (the Particl/Ghost/DASH inflation-bug class). Verified by the
-    // ported Monero BP+ (libwattx_bpplus): the proof must verify AND commit to exactly
-    // this output's commitment (enforced internally via the 8*V == C cofactor match).
+    // 4. SECURITY — every confidential output MUST be covered by a valid ed25519
+    // Bulletproofs+ range proof. The balance check (step 6) only proves the
+    // commitments SUM correctly; without a range proof an output can commit to an
+    // out-of-range (negative / >2^64 wraparound) value that still balances and mints
+    // on redemption (the Particl/Ghost/DASH inflation-bug class).
+    //
+    // The builder emits ONE aggregated proof over all output commitments, which is
+    // what BP+ is for and is smaller than one proof per output. Verification goes
+    // through VerifyAggregatedRangeProof, which validates the 0x0E commitment tag and
+    // strips the proof's 0x02 version byte -- the previous code passed the version
+    // byte through to wattx_bpplus::verify, so a correctly-formed proof could never
+    // verify, and demanded a per-output proof on every privacyOutput, which made a
+    // transparent output inside an FCMP transaction impossible to express.
     std::vector<CPedersenCommitment> outputCommitments;
     for (const auto& output : privTx.privacyOutputs) {
-        const std::vector<unsigned char>& cdata = output.confidentialOutput.commitment.data;
-        const std::vector<unsigned char>& pdata = output.confidentialOutput.rangeProof.data;
-        // 32-byte compressed ed25519 commitment (drop a 33-byte length/type prefix).
-        const uint8_t* c32 = cdata.data();
-        if (cdata.size() == 33) c32 = cdata.data() + 1;
-        else if (cdata.size() != 32) {
+        const CConfidentialOutput& co = output.confidentialOutput;
+
+        // A transparent output inside an FCMP transaction (a deshield recipient, or
+        // transparent change) carries no commitment and no proof; its value is
+        // explicit in nValue and covered by the transparent conservation rules.
+        if (co.commitment.IsNull() && co.rangeProof.data.empty()) {
+            continue;
+        }
+
+        if (!co.commitment.IsValid()) {
             return state.Invalid(TxValidationResult::TX_CONSENSUS,
                                  "fcmp-bad-commitment",
-                                 "FCMP output commitment is not a 32-byte ed25519 point");
+                                 "FCMP confidential output has an invalid commitment");
         }
-        if (!wattx_bpplus::verify(c32, 1, pdata.data(), pdata.size())) {
+
+        // A per-output proof is optional, but an unverifiable blob never rides along.
+        if (!co.rangeProof.data.empty() && !VerifyRangeProof(co.commitment, co.rangeProof)) {
             return state.Invalid(TxValidationResult::TX_CONSENSUS,
-                                 "fcmp-rangeproof-invalid",
-                                 "FCMP output Bulletproofs+ range proof missing or invalid");
+                                 "fcmp-output-rangeproof-invalid",
+                                 "FCMP confidential output has an invalid range proof");
         }
-        outputCommitments.push_back(output.confidentialOutput.commitment);
+
+        outputCommitments.push_back(co.commitment);
     }
 
-    // 5. Verify balance (sum of pseudo-outputs = sum of outputs + fee)
-    if (!VerifyFcmpBalance(privTx.fcmpInputs, outputCommitments, privTx.nFee)) {
+    if (!outputCommitments.empty()) {
+        if (!VerifyAggregatedRangeProof(outputCommitments, privTx.aggregatedRangeProof)) {
+            return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                                 "fcmp-aggregated-rangeproof-invalid",
+                                 "FCMP confidential outputs are not covered by a valid "
+                                 "aggregated range proof");
+        }
+    }
+
+    // 5. Compute the pool delta -- the net transparent value the shielded set gained.
+    // Read from the transaction and the coins view, so the sender declares nothing
+    // and can lie about nothing.
+    CAmount poolDelta = 0;
+    if (!ComputePoolDelta(tx, view, poolDelta)) {
         return state.Invalid(TxValidationResult::TX_CONSENSUS,
-                             "fcmp-balance-invalid",
-                             "FCMP transaction balance verification failed");
+                             "fcmp-pool-delta-unavailable",
+                             "could not compute the shielded pool delta");
+    }
+
+    // 6. THE LEDGER INVARIANT:  sum(pseudo-outputs) + delta*H == sum(output commitments)
+    //
+    // Pinning the shielded value change to delta is what ties the shielded set to
+    // real coin: delta is transparent value that Consensus::CheckTxInputs has already
+    // conserved, so shielded value cannot be created here, only moved.
+    //
+    // The fee needs no term of its own. A fee paid out of the pool simply makes delta
+    // more negative, and the miner collects it through the ordinary sum(vin)-sum(vout)
+    // path -- which is why privTx.nFee is NOT trusted or used in this check.
+    if (privTx.fcmpInputs.empty() && outputCommitments.empty()) {
+        return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                             "fcmp-nothing-to-balance",
+                             "FCMP transaction touches the pool with no shielded inputs or outputs");
+    }
+
+    std::vector<CPedersenCommitment> inputCommitments;
+    inputCommitments.reserve(privTx.fcmpInputs.size());
+    for (const auto& input : privTx.fcmpInputs) {
+        if (!input.pseudoOutput.IsValid()) {
+            return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                                 "fcmp-pseudo-output-invalid",
+                                 "FCMP input has an invalid pseudo-output");
+        }
+        inputCommitments.push_back(input.pseudoOutput);
+    }
+
+    if (!VerifyPoolBalance(inputCommitments, outputCommitments, poolDelta)) {
+        return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                             "fcmp-amount-imbalance",
+                             strprintf("FCMP shielded value does not balance the pool delta "
+                                       "(%d in, %d out, delta=%s)",
+                                       inputCommitments.size(), outputCommitments.size(),
+                                       FormatMoney(poolDelta)));
     }
 
     return true;
@@ -702,6 +810,88 @@ void ShutdownFcmpConsensus()
 // ============================================================================
 // Validation Helper Functions
 // ============================================================================
+
+// ============================================================================
+// Shielded Pool (value backing)
+// ============================================================================
+
+const CScript& GetShieldedPoolScript()
+{
+    // Witness program, version 16 (as-yet unassigned), 32-byte domain-separated
+    // program. Unassigned witness versions are anyone-can-spend to nodes that do
+    // not know the rule, which is what lets this deploy as a softfork; Rule P1 is
+    // what actually protects the funds.
+    //
+    // The program is a fixed constant, NOT a hash of anything transaction-specific:
+    // there is exactly one pool, and every node must recognise it byte-for-byte
+    // without needing any context to derive it.
+    static const CScript pool_script = [] {
+        const std::string tag = "WATTx FCMP shielded pool v1";
+        const uint256 program = Hash(std::span<const unsigned char>(
+            reinterpret_cast<const unsigned char*>(tag.data()), tag.size()));
+        CScript s;
+        s << OP_16 << std::vector<unsigned char>(program.begin(), program.end());
+        return s;
+    }();
+    return pool_script;
+}
+
+bool IsPoolScript(const CScript& scriptPubKey)
+{
+    return scriptPubKey == GetShieldedPoolScript();
+}
+
+bool CreatesPool(const CTransaction& tx)
+{
+    for (const auto& out : tx.vout) {
+        if (IsPoolScript(out.scriptPubKey)) return true;
+    }
+    return false;
+}
+
+bool SpendsPool(const CTransaction& tx, const CCoinsViewCache& view)
+{
+    if (tx.IsCoinBase()) return false;
+    for (const auto& in : tx.vin) {
+        const Coin& coin = view.AccessCoin(in.prevout);
+        // A missing coin cannot be classified. Report "does not spend the pool"
+        // and let the ordinary missing-inputs machinery reject the transaction;
+        // claiming otherwise here would turn an unavailable UTXO into an FCMP
+        // rule violation and produce a misleading rejection reason.
+        if (coin.IsSpent()) continue;
+        if (IsPoolScript(coin.out.scriptPubKey)) return true;
+    }
+    return false;
+}
+
+bool ComputePoolDelta(const CTransaction& tx, const CCoinsViewCache& view, CAmount& delta)
+{
+    CAmount created = 0;
+    for (const auto& out : tx.vout) {
+        if (!IsPoolScript(out.scriptPubKey)) continue;
+        // Every value here is already MoneyRange-checked by CheckTransaction, but
+        // this function must be safe to call in any order relative to that, and a
+        // silent overflow would forge pool value.
+        if (out.nValue < 0 || out.nValue > MAX_MONEY) return false;
+        created += out.nValue;
+        if (created > MAX_MONEY) return false;
+    }
+
+    CAmount spent = 0;
+    if (!tx.IsCoinBase()) {
+        for (const auto& in : tx.vin) {
+            const Coin& coin = view.AccessCoin(in.prevout);
+            if (coin.IsSpent()) return false; // caller must supply every input coin
+            if (!IsPoolScript(coin.out.scriptPubKey)) continue;
+            if (coin.out.nValue < 0 || coin.out.nValue > MAX_MONEY) return false;
+            spent += coin.out.nValue;
+            if (spent > MAX_MONEY) return false;
+        }
+    }
+
+    delta = created - spent;
+    return true;
+}
 
 bool HasFcmpInputs(const CTransaction& tx)
 {

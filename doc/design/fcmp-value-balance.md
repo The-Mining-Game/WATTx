@@ -184,6 +184,27 @@ shrinks `Δ`, and the miner collects it through the ordinary
 zero-fee-identity-point special case from the consensus path (it stays useful in
 tests).
 
+**Implemented** as `GetShieldedPoolScript` / `IsPoolScript` / `ComputePoolDelta`
+/ `SpendsPool` / `CreatesPool` in `fcmp_consensus.{h,cpp}`. The script is a
+version-16 witness program over a fixed 32-byte domain-separated constant —
+unassigned witness versions are anyone-can-spend to nodes that do not know the
+rule, which is the softfork path segwit and taproot used.
+
+### A consequence worth knowing before "improving" it
+
+`Δ·H` carries no blinding. A **pure shield** has no shielded inputs to
+contribute one, so its output commitments' blindings must sum to zero — for a
+single output, exactly zero. Giving that output a random blinding, which looks
+like an obvious privacy improvement, makes (VB) unsatisfiable and every shield
+invalid.
+
+This is not a privacy loss. A shield's amount is already public from the
+transparent input funding it. The note becomes unlinkable when it is **spent**,
+via `C~ = C + r_c·G`, and the membership proof is what hides which leaf that was.
+If hidden shield amounts are ever wanted, the fix is a Zcash-style **binding
+signature** proving knowledge of the blinding sum — not a random blinding here.
+Pinned by `pool_balance_shield_output_must_have_zero_blinding`.
+
 Transparent conservation `Σ P_in + Σ U_in = Σ P_out + Σ U_out + F` is enforced by
 existing code and is not restated in FCMP logic.
 

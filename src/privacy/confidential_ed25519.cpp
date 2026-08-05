@@ -214,6 +214,61 @@ bool VerifyCommitmentBalance(
     return lhs.GetBytes() == rhs.GetBytes();
 }
 
+bool VerifyPoolBalance(
+    const std::vector<CPedersenCommitment>& inputCommitments,
+    const std::vector<CPedersenCommitment>& outputCommitments,
+    CAmount delta)
+{
+    // Unlike VerifyCommitmentBalance, EITHER side may legitimately be empty: a pure
+    // shield has no shielded inputs (delta > 0 funds the outputs), and a full
+    // unshield has no shielded outputs (delta < 0 pays the value out). Requiring
+    // both would make those two shapes inexpressible.
+    if (inputCommitments.empty() && outputCommitments.empty()) return false;
+
+    ed25519::Point lhs = ed25519::Point::Identity();
+    for (const auto& c : inputCommitments) {
+        ed25519::Point p;
+        if (!DecodeCommitment(c, p)) return false;
+        lhs = lhs + p;
+    }
+
+    ed25519::Point rhs = ed25519::Point::Identity();
+    for (const auto& c : outputCommitments) {
+        ed25519::Point p;
+        if (!DecodeCommitment(c, p)) return false;
+        rhs = rhs + p;
+    }
+
+    // delta*H, with zero blinding because delta is public.
+    //
+    // The sign is handled by choosing WHICH SIDE the term lands on, never by
+    // negating into a scalar: scalars here are residues mod the group order, so a
+    // negative CAmount cast into one would silently become an enormous positive
+    // value and the equation would balance against a number nobody intended.
+    // CreatePublicValueCommitment likewise rejects a negative amount outright.
+    if (delta != 0) {
+        const CAmount magnitude = (delta > 0) ? delta : -delta;
+
+        // Guard the negation itself: -CAmount_MIN is undefined behaviour, and a
+        // delta of that magnitude is not a real transaction in any case.
+        if (magnitude < 0) return false;
+
+        CPedersenCommitment deltaCommitment;
+        if (!CreatePublicValueCommitment(magnitude, deltaCommitment)) return false;
+
+        ed25519::Point d;
+        if (!DecodeCommitment(deltaCommitment, d)) return false;
+
+        if (delta > 0) {
+            lhs = lhs + d;   // value entered the pool: it funds the outputs
+        } else {
+            rhs = rhs + d;   // value left the pool: the inputs paid for it
+        }
+    }
+
+    return lhs.GetBytes() == rhs.GetBytes();
+}
+
 bool CreateRangeProof(
     CAmount amount,
     const CBlindingFactor& blindingFactor,

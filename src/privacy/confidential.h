@@ -224,6 +224,35 @@ bool VerifyCommitmentBalance(
     const CPedersenCommitment* feeCommitment = nullptr);
 
 /**
+ * @brief Verify the shielded pool ledger invariant.
+ *
+ *     sum(inputCommitments) + delta*H == sum(outputCommitments)
+ *
+ * where `delta` is the net transparent value the shielded pool gained in this
+ * transaction: positive when value was shielded, negative when it was unshielded
+ * or when a fee was paid out of the pool, zero for a transfer whose fee is paid
+ * transparently.
+ *
+ * `delta` is a PUBLIC value with zero blinding, so every verifier computes the
+ * same delta*H term from the transaction and the coins view alone. It is signed,
+ * and the sign is handled by moving the term to the other side of the equation
+ * rather than by negating a scalar -- see the implementation.
+ *
+ * Either commitment vector may be empty: a pure shield has no shielded inputs,
+ * and a full unshield produces no shielded outputs. Both are legitimate, and
+ * both still have to balance.
+ *
+ * @param inputCommitments  Pseudo-output commitments of the shielded inputs
+ * @param outputCommitments Commitments of the shielded outputs
+ * @param delta             Net value the pool gained (signed)
+ * @return true if the invariant holds
+ */
+bool VerifyPoolBalance(
+    const std::vector<CPedersenCommitment>& inputCommitments,
+    const std::vector<CPedersenCommitment>& outputCommitments,
+    CAmount delta);
+
+/**
  * @brief Create a range proof for an amount
  *
  * @param amount The amount

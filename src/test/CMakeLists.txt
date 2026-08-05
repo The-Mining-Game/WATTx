@@ -74,6 +74,7 @@ add_executable(test_wattx
   policyestimator_tests.cpp
   pool_tests.cpp
   pow_tests.cpp
+  fcmp_pool_tests.cpp
   privacy_tests.cpp
   prevector_tests.cpp
   raii_event_tests.cpp
