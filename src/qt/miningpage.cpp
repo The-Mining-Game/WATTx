@@ -92,8 +92,18 @@ void MiningPage::setupUi()
     modeLayout->setContentsMargins(4, 2, 4, 2);
 
     soloMiningRadio = new QRadioButton(tr("Solo"), this);
-    poolMiningRadio = new QRadioButton(tr("Pool"), this);
+    poolMiningRadio = new QRadioButton(tr("Pool (not available)"), this);
     soloMiningRadio->setChecked(true);
+
+    // Pool mining is not implemented. The pool URL and worker fields are only
+    // validated for non-emptiness and are never connected to -- there is no
+    // stratum client in the GUI at all -- so selecting "Pool" silently mined
+    // solo against the local node. A user who entered a pool address and then
+    // saw no shares had no way to tell that nothing was listening. Disable the
+    // option rather than let the UI imply a feature that does not exist.
+    poolMiningRadio->setEnabled(false);
+    poolMiningRadio->setToolTip(tr("Pool mining is not implemented in the wallet yet. "
+                                   "Use an external miner such as XMRig to mine to a pool."));
 
     QButtonGroup *modeButtonGroup = new QButtonGroup(this);
     modeButtonGroup->addButton(soloMiningRadio);
