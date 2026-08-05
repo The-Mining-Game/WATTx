@@ -459,7 +459,30 @@ This is a policy layer, not consensus. Consensus only cares about `Δ`.
 
 ---
 
-## 9. Acceptance criteria
+## 9. Implementation status (2026-08-04)
+
+| Step | State |
+|---|---|
+| Export `r_c` from the real prover (P-b) | **done** — `100c4a15`, 9/9 Rust tests |
+| Pool script, Rule P1, `Δ`, free-leaf fix | **done** — `68603c31` |
+| Transaction assembly, self-check, D3/D4/D6/D8 | **done** — `0b70f953` |
+| Wallet onto the real prover (P-a) | **blocked on P-c** |
+| Curve tree on the right curve (P-c) | **not started — decision needed (C1 vs C2)** |
+| Pool UTXO selection in the wallet | not started |
+| Height gate replacing `-fcmpamountlayer` | not started |
+
+27 tests green (15 C++ `fcmp_pool_tests`, 12 Rust). The 19 failures in
+`privacy_tests` are pre-existing and unrelated — they parse commitments as
+secp256k1; verified identical before and after these changes.
+
+**Still not spendable end-to-end**, by design rather than omission:
+`CreateFcmpTransaction` returns `standardTx = nullptr` and an explicit error
+instead of a txid for something that cannot confirm. Two things are missing —
+pool UTXO selection (§7), and a membership proof that verifies against a real
+tree root (P-c). The inflation hole is closed regardless: notes can no longer
+enter the tree without pool backing.
+
+## 10. Acceptance criteria
 
 Design is not done until these pass; implementation lands in this order.
 
@@ -482,7 +505,7 @@ Design is not done until these pass; implementation lands in this order.
 
 ---
 
-## 10. Open questions
+## 11. Open questions
 
 1. ~~**Membership proof binds `C`?**~~ Resolved 2026-08-04: yes, in
    `fcmp_prove_full`, which the wallet does not yet call. See §6 — prerequisites
