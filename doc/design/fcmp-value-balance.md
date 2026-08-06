@@ -482,6 +482,43 @@ pool UTXO selection (§7), and a membership proof that verifies against a real
 tree root (P-c). The inflation hole is closed regardless: notes can no longer
 enter the tree without pool backing.
 
+### P-d. Blocks do not validate FCMP at all — PARTIALLY FIXED
+
+Found 2026-08-05 while auditing for double-spends.
+
+`CheckFcmpTransaction` and `CheckFcmpInputs` are called **only** from
+`MemPoolAccept::PreChecks`. `Chainstate::ConnectBlock`'s sole FCMP call is
+`GetFcmpState().ConnectBlock()`, which marked key images spent **without
+validating them**. The per-transaction privacy hook in `ConnectBlock` covers the
+older RingCT path, not FCMP.
+
+So a transaction mined straight into a block — never entering any mempool —
+faced no key-image check, no membership proof, no range proof and no balance
+check. Two transactions in the *same* block could also carry the same key image,
+since duplicates were rejected only within a single transaction and the mempool
+check queries a database that does not yet contain the block's own spends.
+
+`CFcmpConsensusState::ConnectBlock` now rejects a block that repeats a key image
+or reuses one already recorded as spent. **That is only the double-spend half.**
+Blocks still do not re-verify membership proofs, range proofs, or value balance,
+because `ConnectBlock` has no coins view to compute Δ from. Full block-level
+validation needs the coins view threaded through — design work, not a patch, and
+a hard blocker alongside P-c.
+
+### An outside data point
+
+A Salvium developer reports a double-spend bug found in Monero's own FCMP++ work
+in early August 2026, in migration-period code, and advises against independent
+FCMP++ implementations: fork Monero classic, wait for FCMP++ on Monero mainnet,
+let it settle, then hard-fork it in.
+
+WATTx has no RingCT→FCMP migration, so that specific bug likely does not apply.
+The general point does, and this document is evidence for it: a single session's
+audit found an unbacked shielded set, a curve tree on the wrong curve that makes
+membership proofs bind nothing, a vacuous self-check, a balance helper on the
+wrong curve, a spend path that never worked, and the double-spend gap above.
+Six critical defects, in code that looked finished.
+
 ## 10. Acceptance criteria
 
 Design is not done until these pass; implementation lands in this order.
