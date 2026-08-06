@@ -239,6 +239,10 @@ bool CFcmpConsensusState::ConnectBlock(const CBlock& block, const CBlockIndex* p
     // Collect outputs to add to tree
     std::vector<curvetree::OutputTuple> outputsToAdd;
 
+    // Key images seen anywhere in THIS block, so the same note cannot be spent
+    // by two different transactions that are individually well-formed.
+    std::set<uint256> seenInThisBlock;
+
     for (const auto& tx : block.vtx) {
         // A note may only enter the tree from a transaction that PAID for it.
         //
@@ -267,9 +271,40 @@ bool CFcmpConsensusState::ConnectBlock(const CBlock& block, const CBlockIndex* p
             outputsAdded++;
         }
 
-        // Extract key images from FCMP inputs
+        // Extract key images from FCMP inputs, refusing any that would double-spend.
+        //
+        // Two gaps are closed here, both of which let a shielded note be spent
+        // twice:
+        //
+        //  * ACROSS TRANSACTIONS IN THIS BLOCK. Duplicate key images were only
+        //    rejected WITHIN a single transaction (CheckFcmpTransaction). Two
+        //    separate transactions in the same block carrying the same key image
+        //    both passed, because the mempool check queries a database that does
+        //    not yet contain this block's own spends.
+        //
+        //  * ALREADY SPENT IN AN EARLIER BLOCK. CheckFcmpInputs performs that
+        //    check, but it runs ONLY from MemPoolAccept::PreChecks. A miner
+        //    including a transaction directly in a block bypasses the mempool
+        //    entirely, and ConnectBlock marked key images spent without ever
+        //    validating them.
+        //
+        // Rejecting the block is the correct response: a block containing a
+        // double-spend is invalid, not something to silently deduplicate.
         auto keyImages = ExtractKeyImages(*tx);
         for (const auto& ki : keyImages) {
+            const uint256 kiHash = ki.GetHash();
+            if (!seenInThisBlock.insert(kiHash).second) {
+                LogPrintf("FCMP: block %d rejected - key image %s spent twice within "
+                          "the block (tx %s)\n",
+                          height, kiHash.ToString(), tx->GetHash().ToString());
+                return false;
+            }
+            if (IsKeyImageSpent(ki)) {
+                LogPrintf("FCMP: block %d rejected - key image %s was already spent "
+                          "in an earlier block (tx %s)\n",
+                          height, kiHash.ToString(), tx->GetHash().ToString());
+                return false;
+            }
             keyImagesToMark.emplace_back(ki, std::make_pair(tx->GetHash(), height));
         }
     }
