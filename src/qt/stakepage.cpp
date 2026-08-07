@@ -100,8 +100,36 @@ void StakePage::setBalance(const interfaces::WalletBalances& balances)
         balance += balances.watch_only_balance;
         stake += balances.watch_only_stake;
     }
-    ui->labelAssets->setText(BitcoinUnits::formatWithUnit(unit, balance, false, BitcoinUnits::SeparatorStyle::ALWAYS));
+    // "Staking assets" must be what can ACTUALLY stake, not the whole spendable
+    // balance.
+    //
+    // Coins only become eligible after stakematurity confirmations (500), so a
+    // wallet whose coins are all younger has a spendable balance but zero
+    // staking weight. Showing the raw balance told users they had assets
+    // staking while the staking indicator was correctly dark and no stake was
+    // possible -- the page and the indicator disagreed, and the page was wrong.
+    //
+    // tryGetStakeWeight() is the amount the staking code itself considers
+    // eligible, so it cannot drift from reality the way a balance figure does.
+    uint64_t nWeight = 0;
+    const bool haveWeight = walletModel->wallet().tryGetStakeWeight(nWeight);
+    const CAmount eligible = haveWeight ? static_cast<CAmount>(nWeight) : 0;
+
+    ui->labelAssets->setText(BitcoinUnits::formatWithUnit(unit, eligible, false, BitcoinUnits::SeparatorStyle::ALWAYS));
     ui->labelStake->setText(BitcoinUnits::formatWithUnit(unit, stake, false, BitcoinUnits::SeparatorStyle::ALWAYS));
+
+    // Say plainly why nothing is staking yet, rather than leaving the user to
+    // infer it from a zero next to a spendable balance.
+    if (eligible < balance) {
+        const CAmount waiting = balance - eligible;
+        ui->labelAssets->setToolTip(
+            tr("%1 is not yet old enough to stake. Coins become eligible once "
+               "they reach the stake maturity shown by getstakinginfo.")
+                .arg(BitcoinUnits::formatWithUnit(unit, waiting, false,
+                                                  BitcoinUnits::SeparatorStyle::ALWAYS)));
+    } else {
+        ui->labelAssets->setToolTip(tr("Coins eligible to stake."));
+    }
 }
 
 void StakePage::on_checkStake_clicked(bool checked)
