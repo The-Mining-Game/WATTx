@@ -110,8 +110,13 @@ if [ "$MODE" = binary ]; then
   # ships boost 1.83, so 1.74 simply is not installable there and the binary
   # cannot run — which is why the run check below, not the download, decides
   # whether this path worked.
+  # libevent is SPLIT into separate packages here: libevent-2.1-7 alone ships
+  # libevent-2.1.so.7 and none of the core/extra/pthreads sonames wattxd links
+  # against, and apt still exits 0 — so getting this list wrong sends every
+  # host down the source-build path for no reason.
   log "installing runtime libraries"
-  apt-get install -y -qq libevent-2.1-7 libsodium23 libsqlite3-0 >/dev/null 2>&1 || true
+  apt-get install -y -qq libevent-core-2.1-7 libevent-extra-2.1-7 \
+      libevent-pthreads-2.1-7 libsodium23 libsqlite3-0 >/dev/null 2>&1 || true
   apt-get install -y -qq libboost-filesystem1.74.0 libboost-program-options1.74.0 \
       libboost-thread1.74.0 >/dev/null 2>&1 || true
 
