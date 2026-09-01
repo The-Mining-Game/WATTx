@@ -307,16 +307,23 @@ uint256 RandomX(const unsigned char* data, size_t len)
     // Get the global RandomX miner instance
     node::RandomXMiner& miner = node::GetRandomXMiner();
 
-    // Check if RandomX is initialized
+    // FAIL rather than hash against a key we know is wrong.
+    //
+    // This used to initialise a context with an ALL-ZERO key when none existed,
+    // producing a hash from the wrong dataset -- which callers then compared
+    // against the PoW target as though it were authoritative, rejecting valid
+    // blocks. A verifier that cannot answer must say so, not guess.
+    //
+    // The correct key is the genesis hash; EnsureRandomXInitializedForPow() in
+    // validation.cpp owns that, and CheckProofOfWorkRandomX() is the supported
+    // entry point for verifying RandomX proofs. Reaching here uninitialised means
+    // a caller bypassed it.
     if (!miner.IsInitialized()) {
-        // Initialize with default key if not already initialized
-        // In production, this should be initialized with proper key from blockchain
-        static const unsigned char defaultKey[32] = {0};
-        if (!miner.Initialize(defaultKey, 32, node::RandomXMiner::Mode::LIGHT, false)) {
-            LogPrintf("RandomX: Failed to initialize miner\n");
-            hash.SetNull();
-            return hash;
-        }
+        LogPrintf("RandomX: hash requested before the RandomX context was keyed "
+                  "with the genesis hash -- refusing to hash against an unknown "
+                  "key (use CheckProofOfWorkRandomX)\n");
+        hash.SetNull();
+        return hash;
     }
 
     // Calculate the RandomX hash
@@ -617,11 +624,14 @@ unsigned int GetNextWorkRequiredForAlgorithm(const CBlockIndex* pindexLast,
     // Use per-algorithm difficulty lookback from consensus params
     int nLookback = params.nX25XDifficultyLookback;
 
-    // Find the previous block with this algorithm for timing calculation
+    // Find the previous block with this algorithm for timing calculation.
+    // PoS blocks must be skipped: their version field carries no PoW algo id
+    // (it decodes as SHA256D), so without the IsProofOfStake() check a PoS
+    // block anchors the retarget and PoW inherits the PoS difficulty.
     const CBlockIndex* pindexAlgoPrev = nullptr;
     const CBlockIndex* pindex = pindexAlgoLast->pprev;
     while (pindex != nullptr) {
-        if (GetBlockAlgorithm(pindex->nVersion) == algo) {
+        if (!pindex->IsProofOfStake() && GetBlockAlgorithm(pindex->nVersion) == algo) {
             pindexAlgoPrev = pindex;
             break;
         }
@@ -673,7 +683,9 @@ const CBlockIndex* MultiAlgoDifficultyManager::GetLastBlockForAlgorithm(const CB
 {
     const CBlockIndex* pindex = pindexLast;
     while (pindex != nullptr) {
-        if (GetBlockAlgorithm(pindex->nVersion) == algo) {
+        // PoS blocks carry no PoW algo id (version bits decode as SHA256D) —
+        // only PoW blocks may anchor a PoW algorithm's difficulty.
+        if (!pindex->IsProofOfStake() && GetBlockAlgorithm(pindex->nVersion) == algo) {
             return pindex;
         }
         pindex = pindex->pprev;
@@ -688,7 +700,7 @@ int MultiAlgoDifficultyManager::CountBlocksForAlgorithm(const CBlockIndex* pinde
     int blocksChecked = 0;
 
     while (pindex != nullptr && blocksChecked < nCount) {
-        if (GetBlockAlgorithm(pindex->nVersion) == algo) {
+        if (!pindex->IsProofOfStake() && GetBlockAlgorithm(pindex->nVersion) == algo) {
             count++;
         }
         pindex = pindex->pprev;

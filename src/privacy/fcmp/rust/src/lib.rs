@@ -892,8 +892,15 @@ pub unsafe extern "C" fn fcmp_verify(
 /// `O = x·G + y·T`, and the 32-byte `signable_tx_hash`.
 ///
 /// On success the serialised `FcmpPlusPlus` proof is written to `proof_out`, its length to
-/// `*proof_len_out`, the key image `L = x·I` to `key_image_out`, and the pseudo-out `C~` to
-/// `c_tilde_out`.  Both 32-byte output buffers must be provided by the caller.
+/// `*proof_len_out`, the key image `L = x·I` to `key_image_out`, the pseudo-out `C~` to
+/// `c_tilde_out`, and the commitment re-randomiser `r_c` to `c_blind_out`.  All three 32-byte
+/// output buffers must be provided by the caller.
+///
+/// `r_c` is required by the caller, not merely informative: the re-randomisation is
+/// `C~ = C + r_c·G`, so the blinding of the pseudo-out is `b~ = b + r_c`, and a spender cannot
+/// balance a transaction's output blindings against its inputs without it.  The blinds are drawn
+/// inside `RerandomizedOutput::new` from the OS RNG, so this is the only way out.  Treat it as
+/// secret: publishing `r_c` alongside `C~` would re-link the input to its tree leaf.
 ///
 /// # Safety
 /// All pointers must be valid for the described lengths.
@@ -910,6 +917,7 @@ pub unsafe extern "C" fn fcmp_prove_full(
     tx_hash: *const u8,       // 32 bytes: signable tx hash
     key_image_out: *mut u8,   // 32 bytes output
     c_tilde_out: *mut u8,     // 32 bytes output (pseudo-out)
+    c_blind_out: *mut u8,     // 32 bytes output (r_c, SECRET - never publish)
 ) -> i32 {
     use monero_fcmp_plus_plus::{
         FCMP_PARAMS, Output as MoneroOutput, Curves, FcmpPlusPlus,
@@ -926,7 +934,7 @@ pub unsafe extern "C" fn fcmp_prove_full(
 
     if proof_out.is_null() || proof_len_out.is_null() || leaves_data.is_null() ||
        x_bytes.is_null() || y_bytes.is_null() || tx_hash.is_null() ||
-       key_image_out.is_null() || c_tilde_out.is_null() {
+       key_image_out.is_null() || c_tilde_out.is_null() || c_blind_out.is_null() {
         return FCMP_ERROR_INVALID_PARAM;
     }
     if num_leaves == 0 || our_leaf_index >= num_leaves {
@@ -1066,6 +1074,17 @@ pub unsafe extern "C" fn fcmp_prove_full(
     ptr::copy_nonoverlapping(ki.as_ptr(), key_image_out, 32);
     let ct = monero_input.C_tilde().to_bytes();
     ptr::copy_nonoverlapping(ct.as_ptr(), c_tilde_out, 32);
+
+    // Write r_c, the commitment re-randomiser.
+    //
+    // NOT `c_blind()`: that accessor returns `-r_c`, the additive inverse the FCMP
+    // proof consumes (see RerandomizedOutput::c_blind in the fcmp++ crate). The
+    // re-randomisation itself is `C~ = C + r_c·G`, so a spender balancing blindings
+    // needs `+r_c` to form `b~ = b + r_c`. Handing back the negated form here would
+    // produce transactions that fail the balance check for no visible reason.
+    let r_c = -rerandomized.c_blind();
+    let rc_bytes = r_c.to_repr();
+    ptr::copy_nonoverlapping(rc_bytes.as_ptr(), c_blind_out, 32);
 
     FCMP_SUCCESS
 }
@@ -1448,6 +1467,140 @@ mod tests {
             let mut commitment2 = [0u8; POINT_SIZE];
             assert_eq!(fcmp_pedersen_commit(commitment2.as_mut_ptr(), value.as_ptr(), blinding.as_ptr()), FCMP_SUCCESS);
             assert_eq!(commitment, commitment2);
+        }
+    }
+
+    /// The exported `r_c` must satisfy `C~ == C + r_c*G` EXACTLY.
+    ///
+    /// This pins the sign convention. `RerandomizedOutput::c_blind()` returns `-r_c`
+    /// (it is the additive inverse the FCMP proof consumes), so exporting that value
+    /// directly would be off by a negation -- and the failure mode is silent: the
+    /// proof still verifies, the commitment is still well-formed, and only the
+    /// spender's balance equation breaks, with nothing pointing at why. Assert the
+    /// relation on the curve rather than trusting the accessor's name.
+    #[test]
+    fn test_prove_full_exports_usable_c_blind() {
+        use curve25519_dalek::constants::ED25519_BASEPOINT_POINT;
+        use curve25519_dalek::edwards::CompressedEdwardsY;
+        use curve25519_dalek::scalar::Scalar as DalekScalar;
+        use dalek_ff_group::{EdwardsPoint as DfgPoint, Scalar as DfgScalar};
+        use ciphersuite::group::{ff::Field, Group, GroupEncoding};
+        use monero_generators::T as MoneroT;
+        use rand_core::OsRng;
+
+        unsafe {
+            assert_eq!(fcmp_init(), FCMP_SUCCESS);
+
+            // A spendable leaf: O = x*G + y*T, with I and C free points.
+            let x = DfgScalar::random(&mut OsRng);
+            let y = DfgScalar::random(&mut OsRng);
+            let o_pt = (DfgPoint::generator() * x) + (DfgPoint(MoneroT()) * y);
+            let i_pt = DfgPoint::random(&mut OsRng);
+            let c_pt = DfgPoint::random(&mut OsRng);
+
+            let mut leaf = [0u8; 96];
+            leaf[..32].copy_from_slice(&o_pt.to_bytes());
+            leaf[32..64].copy_from_slice(&i_pt.to_bytes());
+            leaf[64..].copy_from_slice(&c_pt.to_bytes());
+
+            let tx_hash = [7u8; 32];
+            let mut proof = vec![0u8; 64 * 1024];
+            let mut proof_len = 0usize;
+            let mut key_image = [0u8; 32];
+            let mut c_tilde = [0u8; 32];
+            let mut c_blind = [0u8; 32];
+
+            let rc = fcmp_prove_full(
+                proof.as_mut_ptr(), &mut proof_len, proof.len(),
+                leaf.as_ptr(), 1, 0,
+                x.to_bytes().as_ptr(), y.to_bytes().as_ptr(),
+                tx_hash.as_ptr(),
+                key_image.as_mut_ptr(), c_tilde.as_mut_ptr(), c_blind.as_mut_ptr(),
+            );
+            assert_eq!(rc, FCMP_SUCCESS, "prove_full failed");
+
+            // C + r_c*G, computed independently of the crate's accessors.
+            let c_dalek = CompressedEdwardsY(c_pt.to_bytes()).decompress().unwrap();
+            let r_c = DalekScalar::from_canonical_bytes(c_blind).unwrap();
+            let expected = (c_dalek + (ED25519_BASEPOINT_POINT * r_c)).compress().to_bytes();
+
+            assert_eq!(
+                c_tilde, expected,
+                "C~ != C + r_c*G -- exported c_blind has the wrong sign or is not r_c"
+            );
+
+            // A null c_blind_out must be refused, not silently skipped.
+            let rc_null = fcmp_prove_full(
+                proof.as_mut_ptr(), &mut proof_len, proof.len(),
+                leaf.as_ptr(), 1, 0,
+                x.to_bytes().as_ptr(), y.to_bytes().as_ptr(),
+                tx_hash.as_ptr(),
+                key_image.as_mut_ptr(), c_tilde.as_mut_ptr(), ptr::null_mut(),
+            );
+            assert_eq!(rc_null, FCMP_ERROR_INVALID_PARAM);
+
+            fcmp_cleanup();
+        }
+    }
+
+    /// The proof that carried the exported r_c must itself verify against the tree
+    /// root. Guards against "the scalar is right but we broke proving to get it".
+    #[test]
+    fn test_prove_full_still_verifies() {
+        use dalek_ff_group::{EdwardsPoint as DfgPoint, Scalar as DfgScalar};
+        use ciphersuite::group::{ff::Field, Group, GroupEncoding};
+        use monero_generators::T as MoneroT;
+        use rand_core::OsRng;
+
+        unsafe {
+            assert_eq!(fcmp_init(), FCMP_SUCCESS);
+
+            let x = DfgScalar::random(&mut OsRng);
+            let y = DfgScalar::random(&mut OsRng);
+            let o_pt = (DfgPoint::generator() * x) + (DfgPoint(MoneroT()) * y);
+            let i_pt = DfgPoint::random(&mut OsRng);
+            let c_pt = DfgPoint::random(&mut OsRng);
+
+            let mut leaf = [0u8; 96];
+            leaf[..32].copy_from_slice(&o_pt.to_bytes());
+            leaf[32..64].copy_from_slice(&i_pt.to_bytes());
+            leaf[64..].copy_from_slice(&c_pt.to_bytes());
+
+            let tx_hash = [9u8; 32];
+            let mut proof = vec![0u8; 64 * 1024];
+            let mut proof_len = 0usize;
+            let mut key_image = [0u8; 32];
+            let mut c_tilde = [0u8; 32];
+            let mut c_blind = [0u8; 32];
+
+            assert_eq!(
+                fcmp_prove_full(
+                    proof.as_mut_ptr(), &mut proof_len, proof.len(),
+                    leaf.as_ptr(), 1, 0,
+                    x.to_bytes().as_ptr(), y.to_bytes().as_ptr(),
+                    tx_hash.as_ptr(),
+                    key_image.as_mut_ptr(), c_tilde.as_mut_ptr(), c_blind.as_mut_ptr(),
+                ),
+                FCMP_SUCCESS
+            );
+
+            let mut root = [0u8; 32];
+            assert_eq!(
+                fcmp_compute_leaf_root(root.as_mut_ptr(), leaf.as_ptr(), 1),
+                FCMP_SUCCESS
+            );
+
+            assert_eq!(
+                fcmp_verify_full(
+                    root.as_ptr(), 1,
+                    proof.as_ptr(), proof_len,
+                    key_image.as_ptr(), c_tilde.as_ptr(), tx_hash.as_ptr(),
+                ),
+                FCMP_SUCCESS,
+                "proof from prove_full does not verify"
+            );
+
+            fcmp_cleanup();
         }
     }
 }

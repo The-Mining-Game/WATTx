@@ -190,8 +190,46 @@ public:
 
     /**
      * @brief Convert to standard transaction for broadcast
+     *
+     * RingCT/legacy path only. An FCMP transaction MUST go through
+     * ToFcmpTransaction: this function walks privacyInputs, which FCMP never
+     * populates, so it would emit a transaction with an empty vin.
      */
     CTransaction ToTransaction() const;
+
+    /**
+     * @brief The transparent shell of an FCMP transaction.
+     *
+     * The shielded payload proves value conservation; the shell is what carries
+     * real coin. Under the pool model (doc/design/fcmp-value-balance.md) an FCMP
+     * transaction spends pool UTXOs and creates a pool output, and it is those
+     * transparent values -- not anything the payload says -- that consensus uses
+     * to compute the pool delta.
+     */
+    struct CFcmpShell {
+        //! Pool UTXOs being spent. Must be non-empty for any transaction that
+        //! spends shielded value; vin[0] carries the payload witness.
+        std::vector<COutPoint> poolInputs;
+
+        //! Pool output, note OP_RETURNs, transparent recipients and change, in
+        //! the order they should appear in vout.
+        std::vector<CTxOut> outputs;
+    };
+
+    /**
+     * @brief Assemble the broadcastable transaction for an FCMP spend.
+     *
+     * The serialized payload rides in vin[0]'s witness behind the "FCMP" marker.
+     * Witness data is excluded from the txid, which is what lets the SA+L
+     * signature commit to the txid without circularity.
+     *
+     * Note the payload deliberately does NOT carry the pool outpoints: they are
+     * already in vin, and duplicating them would create a way for the two copies
+     * to disagree. vin is authoritative.
+     *
+     * @return the assembled transaction, or nullopt if the shell is unusable
+     */
+    std::optional<CTransaction> ToFcmpTransaction(const CFcmpShell& shell) const;
 
     /**
      * @brief Parse from standard transaction
@@ -213,8 +251,19 @@ public:
      */
     bool VerifyFcmp() const;
 
-    /** Self-check for wallet-created FCMP transactions (skips FFI proof verification) */
-    bool VerifyFcmpSelfCheck() const;
+    /**
+     * @brief Self-check for wallet-created FCMP transactions.
+     *
+     * Verifies the SA+L signatures, the aggregated range proof, and value
+     * conservation against @p poolDelta. The membership proof is deferred to
+     * consensus (it needs the chain's tree root).
+     *
+     * @param poolDelta Net value the shielded pool gains, as the shell will
+     *                  express it transparently. The caller must pass the SAME
+     *                  delta the assembled transaction produces, or the wallet
+     *                  will broadcast something consensus rejects.
+     */
+    bool VerifyFcmpSelfCheck(CAmount poolDelta) const;
 
     template <typename Stream>
     void Serialize(Stream& s) const {

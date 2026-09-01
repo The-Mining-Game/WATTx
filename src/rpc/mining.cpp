@@ -238,17 +238,26 @@ static UniValue generateBlocks(ChainstateManager& chainman, Mining& miner, const
     UniValue blockHashes(UniValue::VARR);
     while (nGenerate > 0 && !chainman.m_interrupt) {
         int32_t nTimeLimit = TicksSinceEpoch<std::chrono::seconds>(NodeClock::now()) + node::POW_MINER_MAX_TIME;
-        std::unique_ptr<BlockTemplate> block_template(miner.createNewBlock({ .coinbase_output_script = coinbase_output_script }, false, nullptr, 0, nTimeLimit));
+        // Build the template FOR the requested algorithm. Stamping the version
+        // afterwards was not enough: nBits is computed inside createNewBlock from
+        // the version's algorithm bits, so a template built as SHA256D and then
+        // relabelled carried SHA256D's difficulty and was rejected. That is
+        // exactly the trap BlockCreateOptions::pow_algo documents, and it meant
+        // generatetoaddress with any non-default algo could never produce an
+        // acceptable block.
+        node::BlockCreateOptions tpl_opts{ .coinbase_output_script = coinbase_output_script };
+        if (algo.has_value()) {
+            tpl_opts.pow_algo = static_cast<uint8_t>(algo.value());
+        }
+        std::unique_ptr<BlockTemplate> block_template(miner.createNewBlock(tpl_opts, false, nullptr, 0, nTimeLimit));
         CHECK_NONFATAL(block_template);
 
         // Get a copy of the block that we can modify
         CBlock block = block_template->getBlock();
 
-        // If algorithm specified, set block version for X25X mining
         if (algo.has_value()) {
-            block.nVersion = x25x::SetBlockAlgorithm(block.nVersion, algo.value());
-            LogPrintf("generateBlocks: Using algorithm %s (version 0x%08x)\n",
-                      x25x::GetAlgorithmInfo(algo.value()).name, block.nVersion);
+            LogPrintf("generateBlocks: Using algorithm %s (version 0x%08x, nBits %08x)\n",
+                      x25x::GetAlgorithmInfo(algo.value()).name, block.nVersion, block.nBits);
         }
 
         std::shared_ptr<const CBlock> block_out;
@@ -714,6 +723,7 @@ static RPCHelpMan getblocktemplate()
                     {"str", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "other client side supported softfork deployment"},
                 }},
                 {"longpollid", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "delay processing request until the result would vary significantly from the \"longpollid\" of a prior template"},
+                    {"algo", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Proof-of-work algorithm this template is for: sha256d, scrypt, ethash, randomx, equihash, x11, kheavyhash (default: sha256d). Each algorithm has its own difficulty, so a template must be requested for the algorithm that will actually mine it."},
                 {"data", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "proposed block data to check, encoded in hexadecimal; valid only for mode=\"proposal\""},
             },
             },
@@ -775,6 +785,16 @@ static RPCHelpMan getblocktemplate()
                 {RPCResult::Type::NUM, "height", "The height of the next block"},
                 {RPCResult::Type::STR_HEX, "signet_challenge", /*optional=*/true, "Only on signet"},
                 {RPCResult::Type::STR_HEX, "default_witness_commitment", /*optional=*/true, "a valid witness commitment for the unmodified block template"},
+                {RPCResult::Type::STR_HEX, "hashStateRoot", "the EVM state root the next block builds on"},
+                {RPCResult::Type::STR_HEX, "hashUTXORoot", "the EVM UTXO root the next block builds on"},
+                {RPCResult::Type::ARR, "coinbaseoutputs", "additional outputs the coinbase must pay (e.g. gas refunds); each is a scriptPubKey/value pair",
+                {
+                    {RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::STR_HEX, "scriptPubKey", "output script, hex encoded"},
+                        {RPCResult::Type::NUM, "value", "output value in satoshis"},
+                    }},
+                }},
             }},
         },
         RPCExamples{
@@ -792,9 +812,37 @@ static RPCHelpMan getblocktemplate()
     std::string strMode = "template";
     UniValue lpval = NullUniValue;
     std::set<std::string> setClientRules;
+
+    // Which proof-of-work algorithm this template is for.
+    //
+    // WATTx retargets each algorithm separately, and consensus reads the
+    // algorithm out of the block's version bits. A template that does not say
+    // which algorithm it is for is necessarily built as SHA256D: it carries
+    // SHA256D's nBits and no algorithm tag. A miner that then hashes it with,
+    // say, RandomX produces real work against the wrong difficulty AND submits a
+    // header consensus will hash as SHA256D -- so every solution it finds is
+    // rejected as high-hash. Defaulting to SHA256D keeps existing sha256d
+    // callers working unchanged.
+    x25x::Algorithm requested_algo = x25x::Algorithm::SHA256D;
+
     if (!request.params[0].isNull())
     {
         const UniValue& oparam = request.params[0].get_obj();
+        const UniValue& algoval = oparam.find_value("algo");
+        if (!algoval.isNull()) {
+            if (!algoval.isStr()) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "algo must be a string");
+            }
+            requested_algo = x25x::GetAlgorithmByName(algoval.get_str());
+            if (requested_algo == x25x::Algorithm::INVALID) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                   "Unknown mining algorithm: " + algoval.get_str());
+            }
+            if (!x25x::IsAlgorithmEnabled(requested_algo)) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                   "Mining algorithm is not enabled: " + algoval.get_str());
+            }
+        }
         const UniValue& modeval = oparam.find_value("mode");
         if (modeval.isStr())
             strMode = modeval.get_str();
@@ -924,7 +972,16 @@ static RPCHelpMan getblocktemplate()
     static CBlockIndex* pindexPrev;
     static int64_t time_start;
     static std::unique_ptr<BlockTemplate> block_template;
+
+    // The algorithm the cached template was built for. A template is only valid
+    // for its own algorithm -- it carries that algorithm's nBits and version tag
+    // -- so a request for a different one must rebuild rather than return the
+    // cached block. Without this, two miners on different algorithms hand each
+    // other's work back and forth and neither can ever produce a valid block.
+    static x25x::Algorithm cached_algo = x25x::Algorithm::SHA256D;
+
     if (!pindexPrev || pindexPrev->GetBlockHash() != tip ||
+        requested_algo != cached_algo ||
         (mempool.GetTransactionsUpdated() != nTransactionsUpdatedLast && GetTime() - time_start > 5))
     {
         // Clear pindexPrev so future calls make a new block, despite any failures from here on
@@ -938,12 +995,14 @@ static RPCHelpMan getblocktemplate()
         // Create new block - WATTx Hybrid Consensus: Always create PoW templates for miners
         // PoS blocks are created via staking, not getblocktemplate
         bool fProofOfStake = false;
-        block_template = miner.createNewBlock({}, fProofOfStake);
+        block_template = miner.createNewBlock(
+            {.pow_algo = static_cast<uint8_t>(requested_algo)}, fProofOfStake);
         CHECK_NONFATAL(block_template);
 
 
         // Need to update only after we know createNewBlock succeeded
         pindexPrev = pindexPrevNew;
+        cached_algo = requested_algo;
     }
     CHECK_NONFATAL(pindexPrev);
     CBlock block{block_template->getBlock()};

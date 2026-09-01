@@ -2,6 +2,38 @@
 
 WATTx is a hybrid Proof-of-Work/Proof-of-Stake blockchain featuring multi-algorithm mining, smart contracts, and privacy-focused features. Built on QTUM's foundation with significant enhancements for mining flexibility, cross-chain interoperability, and user privacy.
 
+## Lineage
+
+Bitcoin Core (2009) → Qtum (2017) → WATTx (2025), with Monero's FCMP++ privacy and
+RandomX merged in, and the X25X algorithms vendored from the chains they came from.
+
+```mermaid
+%%{init: {'theme':'dark'}}%%
+gitGraph
+    commit id: "Bitcoin Core 2009"
+    commit id: "UTXO, PoW, P2P"
+    branch monero
+    commit id: "Monero 2014"
+    commit id: "RingCT / stealth addrs"
+    commit id: "FCMP++ 2024"
+    checkout main
+    commit id: "Bitcoin Core 2017"
+    branch qtum
+    commit id: "Qtum 2017"
+    commit id: "EVM on UTXO (AAL)"
+    commit id: "Hybrid PoW/PoS"
+    branch wattx
+    commit id: "WATTx 2025"
+    merge monero id: "FCMP++ privacy"
+    commit id: "X25X 7-algo PoW"
+    commit id: "AuxPoW merged mining"
+    commit id: "Per-algo difficulty"
+```
+
+Full attribution — what came from each project, the Monero FCMP++ merge and the
+per-algorithm X25X sources — is in [LINEAGE.md](LINEAGE.md). The same credits
+appear on the wallet splash screen and in `wattxd -version`.
+
 ## Key Features
 
 ### Multi-Algorithm Mining (X25X)

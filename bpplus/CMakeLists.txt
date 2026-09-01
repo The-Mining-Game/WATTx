@@ -54,6 +54,13 @@ set_target_properties(wattx_bpplus PROPERTIES
     CXX_STANDARD 17
     CXX_STANDARD_REQUIRED ON)
 
+# crypto/int-util.h needs BYTE_ORDER/LITTLE_ENDIAN from <endian.h>, which glibc
+# only exposes under __USE_MISC -- i.e. with GNU extensions on. C_STANDARD 11
+# selects strict -std=c11, so on toolchains that do not enable them by default
+# (notably the aarch64-linux-gnu cross compiler) the build dies on
+# 'static assertion failed: "BYTE_ORDER is undefined"'. Ask for them explicitly.
+target_compile_definitions(wattx_bpplus PRIVATE _GNU_SOURCE)
+
 # In-tree tests use rct:: directly, so they need the INTERNAL headers too.
 set(_bpplus_internal_inc
     ${CMAKE_CURRENT_SOURCE_DIR}

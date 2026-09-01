@@ -92,8 +92,18 @@ void MiningPage::setupUi()
     modeLayout->setContentsMargins(4, 2, 4, 2);
 
     soloMiningRadio = new QRadioButton(tr("Solo"), this);
-    poolMiningRadio = new QRadioButton(tr("Pool"), this);
+    poolMiningRadio = new QRadioButton(tr("Pool (not available)"), this);
     soloMiningRadio->setChecked(true);
+
+    // Pool mining is not implemented. The pool URL and worker fields are only
+    // validated for non-emptiness and are never connected to -- there is no
+    // stratum client in the GUI at all -- so selecting "Pool" silently mined
+    // solo against the local node. A user who entered a pool address and then
+    // saw no shares had no way to tell that nothing was listening. Disable the
+    // option rather than let the UI imply a feature that does not exist.
+    poolMiningRadio->setEnabled(false);
+    poolMiningRadio->setToolTip(tr("Pool mining is not implemented in the wallet yet. "
+                                   "Use an external miner such as XMRig to mine to a pool."));
 
     QButtonGroup *modeButtonGroup = new QButtonGroup(this);
     modeButtonGroup->addButton(soloMiningRadio);
@@ -511,6 +521,17 @@ void MiningPage::startMining()
     int numThreads = cpuThreadsSpinBox->value();
     bool safeMode = safeModeCheckbox && safeModeCheckbox->isChecked();
 
+    // Take the spin box as the source of truth for how many threads to run.
+    //
+    // currentCpuThreads is initialised to 1 and was only ever updated by the
+    // valueChanged signal -- but the spin box's initial setValue() happens in the
+    // constructor BEFORE that signal is connected, so the default never reached
+    // it. The result: the UI showed "7", the log below printed "Threads: 7", and
+    // the miner read currentCpuThreads and ran exactly ONE thread. Anyone who did
+    // not happen to nudge the spin box by hand mined at a fraction of their
+    // hardware and wondered why they never found a block.
+    currentCpuThreads = numThreads;
+
     logToConsole(tr("Mode: %1, Threads: %2, Safe Mode: %3")
         .arg(fullMode ? "Full (2GB)" : "Light (256MB)")
         .arg(numThreads)
@@ -600,6 +621,15 @@ void MiningPage::startMining()
                 UniValue rulesArray(UniValue::VARR);
                 rulesArray.push_back("segwit");
                 templateRequest.pushKV("rules", rulesArray);
+
+                // This page mines RandomX, so the template must be built for
+                // RandomX. Without this the node returns a SHA256D template --
+                // SHA256D's nBits and no algorithm tag in the version -- and every
+                // block we solve is rejected as high-hash: we hash the header with
+                // RandomX while consensus, reading the version, hashes it as
+                // SHA256D. The two never agree, so the miner runs forever and wins
+                // nothing.
+                templateRequest.pushKV("algo", "randomx");
 
                 UniValue params(UniValue::VARR);
                 params.push_back(templateRequest);
@@ -782,9 +812,35 @@ void MiningPage::startMining()
                     blockFound = true;        // Then signal (memory barrier)
                 });
 
-                // Wait for block or stop signal
+                // Wait for a solution, a new network block, or a stop signal.
+                //
+                // The template is only valid on top of the tip it was built on. If
+                // another block arrives and we keep hashing this one, any solution we
+                // find extends a stale parent and is orphaned, so the work is wasted.
+                // Nothing else rebuilds it: MineThread holds the block by value and
+                // only walks the nonce, and with the full 2^32 range that loop does
+                // not end on its own. So watch the tip here and rebuild when it moves.
+                const uint256 templateTip = block.hashPrevBlock;
+                bool staleTemplate = false;
+                int tipPollTicks = 0;
                 while (!blockFound && isMining && miner.IsMining()) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+                    // Poll about once a second; getBestBlockHash() takes cs_main.
+                    if (++tipPollTicks >= 10) {
+                        tipPollTicks = 0;
+                        if (clientModel->node().getBestBlockHash() != templateTip) {
+                            staleTemplate = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (staleTemplate) {
+                    miner.StopMining();
+                    QMetaObject::invokeMethod(this, [this]() {
+                        logToConsole(tr("New block on the network - rebuilding template"));
+                    }, Qt::QueuedConnection);
                 }
 
                 if (blockFound && isMining) {
@@ -984,9 +1040,28 @@ void MiningPage::updateMiningStats()
     // Update network difficulty
     if (clientModel) {
         try {
-            UniValue diffResult = clientModel->node().executeRpc("getdifficulty", UniValue(UniValue::VARR), "/");
-            if (diffResult.isNum()) {
-                double diff = diffResult.get_real();
+            // Show the difficulty of the block being mined (the "next" one), not the
+            // chain tip's: they differ across a retarget, and "next" is what the miner
+            // is actually working against. getdifficulty is deliberately not used here
+            // because on WATTx it returns an OBJECT (proof-of-work and proof-of-stake
+            // retarget separately), so a plain isNum() test never fires and the label
+            // would sit on its initial "0" forever.
+            UniValue info = clientModel->node().executeRpc("getmininginfo", UniValue(UniValue::VARR), "/");
+            double diff = -1.0;
+            if (info.isObject()) {
+                if (info.exists("next") && info["next"].isObject() &&
+                    info["next"].exists("difficulty") && info["next"]["difficulty"].isNum()) {
+                    diff = info["next"]["difficulty"].get_real();
+                } else if (info.exists("difficulty")) {
+                    const UniValue& d = info["difficulty"];
+                    if (d.isObject() && d.exists("proof-of-work") && d["proof-of-work"].isNum()) {
+                        diff = d["proof-of-work"].get_real();
+                    } else if (d.isNum()) {
+                        diff = d.get_real();
+                    }
+                }
+            }
+            if (diff >= 0.0) {
                 if (diff < 0.001) {
                     currentDifficultyLabel->setText(QString::number(diff, 'e', 2));
                 } else if (diff < 1.0) {

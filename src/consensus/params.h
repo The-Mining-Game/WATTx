@@ -224,6 +224,10 @@ struct Params {
     int64_t nBlocktimeDownscaleFactor;
     /** Coinbase transaction outputs can only be spent after this number of new blocks (network rule) */
     int nCoinbaseMaturity;
+    /** Maturity used below nCoinbaseMaturityV2Height (the chain's launch value). */
+    int nCoinbaseMaturityV1{1};
+    /** Height from which the longer coinbase/coinstake maturity applies. */
+    int nCoinbaseMaturityV2Height{0};
     int nRBTCoinbaseMaturity;
     /** Base minimum confirmations for coins to be eligible for staking (halves with each reward halving) */
     int nStakeMinConfirmations{500};
@@ -303,8 +307,19 @@ struct Params {
     {
         return height < nReduceBlocktimeHeight ? nCheckpointSpan : nRBTCheckpointSpan;
     }
+    /**
+     * Confirmations before a coinbase or coinstake output can be spent.
+     *
+     * The chain launched with 1, which contradicts a 100-block reorg limit: a
+     * two-block reorg could orphan a coinbase that had already been spent. It
+     * cannot simply be raised, because proof-of-stake blocks already on the
+     * chain spend outputs younger than the new value and would be rejected on
+     * revalidation, so the longer maturity starts at nCoinbaseMaturityV2Height
+     * and earlier blocks keep the rule they were mined under.
+     */
     int CoinbaseMaturity(int height) const
     {
+        if (height < nCoinbaseMaturityV2Height) return nCoinbaseMaturityV1;
         return height < nReduceBlocktimeHeight ? nCoinbaseMaturity : nRBTCoinbaseMaturity;
     }
     int MaxCheckpointSpan() const
@@ -366,7 +381,10 @@ struct Params {
 
     /** Base block reward in satoshis (5 WATTx per block for each PoW/PoS) */
     /** 50% to PoW miners, 50% to PoS stakers - each receives this amount */
-    int64_t nBaseBlockReward{500000000};
+    /** Base block reward in satoshis: 50 WTX.
+     *  With a 210,000-block halving interval the full series totals exactly
+     *  21,000,000 WTX. */
+    int64_t nBaseBlockReward{5000000000};
 
     /** Height at which trust tier system activates */
     int nTrustTierActivationHeight{1001}; // After PoW phase

@@ -143,8 +143,11 @@ bool RandomXMiner::Initialize(const void* key, size_t keySize, Mode mode, bool s
     m_mode = mode;
     m_safeMode = safeMode;
 
-    // Determine flags
-    unsigned flags = m_flags;
+    // Determine flags. Start from the recommended flags with FULL_MEM cleared:
+    // m_flags persists across initialisations, so a previous full-memory run
+    // would otherwise leave the flag set while this run allocates no dataset,
+    // and randomx_create_vm asserts on that combination and aborts the process.
+    unsigned flags = m_flags & ~static_cast<unsigned>(RANDOMX_FLAG_FULL_MEM);
     if (mode == Mode::FULL) {
         flags |= RANDOMX_FLAG_FULL_MEM;
     }
@@ -402,10 +405,21 @@ void RandomXMiner::StartMining(const CBlock& block, const uint256& target,
         LogPrintf("RandomX: DEBUG - creating VMs, current count=%zu, need=%d\n",
                   m_vms.size(), numThreads);
 
+        // randomx_create_vm asserts if FULL_MEM is set without a dataset, which
+        // aborts the whole process. Fall back to light mode instead: slower
+        // verification is always better than killing the wallet.
+        unsigned vm_flags = m_flags;
+        if (!m_dataset && (vm_flags & RANDOMX_FLAG_FULL_MEM)) {
+            LogPrintf("RandomX: no dataset allocated, creating VMs in light mode\n");
+            vm_flags &= ~static_cast<unsigned>(RANDOMX_FLAG_FULL_MEM);
+            m_flags = vm_flags;
+            m_mode = Mode::LIGHT;
+        }
+
         while (m_vms.size() < static_cast<size_t>(numThreads)) {
-            LogPrintf("RandomX: DEBUG - calling randomx_create_vm (flags=0x%x)\n", m_flags);
+            LogPrintf("RandomX: DEBUG - calling randomx_create_vm (flags=0x%x)\n", vm_flags);
             randomx_vm* vm = randomx_create_vm(
-                static_cast<randomx_flags>(m_flags),
+                static_cast<randomx_flags>(vm_flags),
                 m_cache,
                 m_dataset
             );

@@ -1,6 +1,12 @@
-build/
-build-win/
-build-win64/
+# Anchored with a leading slash ON PURPOSE. An unanchored "build/" matches a
+# directory named build at ANY depth, which silently excluded src/blst/build/ --
+# the vendored per-architecture assembly. A fresh clone then failed to build with
+# "assembly.S: No such file or directory". Keep these anchored to the repo root.
+/build/
+/build-win/
+/build-win64/
+/build-arm64/
+/build-*/
 *.o
 *.a
 *.so
@@ -18,3 +24,11 @@ src/privacy/fcmp/rust/target/
 
 # Regtest runtime datadir used by auxpow tests (LevelDB/wallet churn)
 test/auxpow/wattx_regtest_data/
+
+# Build outputs. These were tracked, so every packaging run modified the working
+# tree and stamped the version string "-dirty" even when no source had changed.
+/release-linux64/
+/release-win64/
+/contracts/mining-game/artifacts/
+/contracts/mining-game/cache/
+/build-android/

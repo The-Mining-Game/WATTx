@@ -267,6 +267,12 @@ int32_t fcmp_verify(
  * tx_hash       - 32-byte signable transaction hash
  * key_image_out - 32-byte output: key image L = x*I
  * c_tilde_out   - 32-byte output: pseudo-out C~ (pass to fcmp_verify_full)
+ * c_blind_out   - 32-byte output: r_c, the commitment re-randomiser. SECRET.
+ *
+ * The re-randomisation is C~ = C + r_c*G, so the pseudo-out's blinding is
+ * b~ = b + r_c. A spender needs r_c to balance the transaction's output blindings
+ * against its inputs; without it the balance equation is unsatisfiable even for an
+ * honest sender. Never publish it: r_c + C~ re-links the input to its tree leaf.
  *
  * @return FCMP_SUCCESS on success
  */
@@ -281,7 +287,8 @@ int32_t fcmp_prove_full(
     const uint8_t* y_bytes,
     const uint8_t* tx_hash,
     uint8_t*       key_image_out,
-    uint8_t*       c_tilde_out
+    uint8_t*       c_tilde_out,
+    uint8_t*       c_blind_out
 );
 
 /**

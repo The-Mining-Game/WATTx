@@ -102,6 +102,18 @@ unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHead
         return pindexLast->nBits;
     }
 
+    // Multi-algorithm proof of work: each algorithm retargets against its own
+    // recent blocks. Sharing one difficulty across all seven means hashrate
+    // arriving on any single algorithm (an ASIC on sha256d, say) raises the bar
+    // for every other one, and the CPU-mined algorithms stop winning blocks
+    // altogether. The per-algorithm path also scales target spacing by the
+    // number of enabled algorithms so the chain still averages one block per
+    // TargetSpacing overall.
+    if (!fProofOfStake && pblock && params.IsX25XActive(pindexLast->nHeight + 1)) {
+        return x25x::GetNextWorkRequiredForAlgorithm(
+            pindexLast, x25x::GetBlockAlgorithm(pblock->nVersion), params);
+    }
+
     return CalculateNextWorkRequired(pindexPrev, pindexPrevPrev->GetBlockTime(), params, fProofOfStake);
 }
 

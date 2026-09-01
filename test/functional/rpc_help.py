@@ -103,7 +103,11 @@ class HelpRpcTest(BitcoinTestFramework):
         # command titles
         titles = [line[3:-3] for line in node.help().splitlines() if line.startswith('==')]
 
-        components = ['Blockchain', 'Control', 'Mining', 'Network', 'Rawtransactions', 'Util']
+        # WATTx adds RPC categories upstream does not have. The list below is
+        # compared for exact equality, so every category the daemon exposes must
+        # appear here or this test fails on a purely cosmetic difference.
+        components = ['Blockchain', 'Control', 'Eth', 'Messaging', 'Mining', 'Network',
+                      'Privacy', 'Rawtransactions', 'Util', 'Validators']
 
         if self.is_wallet_compiled():
             components.append('Wallet')

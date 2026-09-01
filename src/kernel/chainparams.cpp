@@ -119,7 +119,7 @@ public:
         m_chain_type = ChainType::MAIN;
         consensus.signet_blocks = false;
         consensus.signet_challenge.clear();
-        consensus.nSubsidyHalvingInterval = 1051200; // WATTx halving every ~4 years at 2min blocks
+        consensus.nSubsidyHalvingInterval = 210000; // 50 WTX base x 210,000 x 2 = 21,000,000 WTX
         consensus.BIP34Height = 0;
         consensus.BIP34Hash = uint256{}; // Will be set after genesis mining
         consensus.BIP65Height = 0;
@@ -132,7 +132,7 @@ public:
         consensus.QIP7Height = 0;
         consensus.QIP9Height = 0;
         consensus.nOfflineStakeHeight = 1; // Enable offline staking from start
-        consensus.nReduceBlocktimeHeight = 0; // 1-second blocks from genesis
+        consensus.nReduceBlocktimeHeight = 0; // RBT spacing/maturity apply from genesis (120s blocks)
         consensus.nMuirGlacierHeight = 0;
         consensus.nLondonHeight = 0;
         consensus.nShanghaiHeight = 0;
@@ -247,10 +247,15 @@ public:
 
         // WATTx-specific parameters
         consensus.nBlocktimeDownscaleFactor = 1; // No downscaling
-        consensus.nCoinbaseMaturity = 1; // WATTx: PoW rewards spendable after 1 confirmation
-        consensus.nRBTCoinbaseMaturity = 1;
+        // Must not be shorter than the reorg the chain is willing to accept
+        // (nMaxReorgDepth, 100). At 1 confirmation a two-block reorg orphans a
+        // coinbase that has already been spent, invalidating every transaction
+        // descending from it.
+        consensus.nCoinbaseMaturity = 100;
+        consensus.nRBTCoinbaseMaturity = 100; // the value actually used (nReduceBlocktimeHeight = 0)
+        consensus.nCoinbaseMaturityV2Height = 2500; // above the tip: PoS blocks already mined staked coins younger than 100
         consensus.nStakeMinConfirmations = 500; // WATTx: Coins need 500 confirmations to stake
-        consensus.nSubsidyHalvingIntervalV2 = 1051200; // ~4 years at 2min blocks (525600 min/year * 2)
+        consensus.nSubsidyHalvingIntervalV2 = 210000; // the value in use (nReduceBlocktimeHeight = 0)
         consensus.nMinValidatorStake = 20000 * COIN; // 20,000 WATTx minimum for super staking validator
 
         consensus.nLastPOWBlock = 5000; // PoS enabled after block 5000, hybrid PoW/PoS from then on
@@ -268,14 +273,14 @@ public:
         consensus.nRBTCheckpointSpan = 500;
         consensus.delegationsAddress = uint160(ParseHex("0000000000000000000000000000000000000086"));
         consensus.historyStorageAddress = uint160(ParseHex("0000F90827F1C53a10cb7A02335B175320002935"));
-        consensus.nStakeTimestampMask = 0; // 1-second precision for 1s blocks
+        consensus.nStakeTimestampMask = 0;   // superseded by the 16s mask at nPoSDifficultyFixHeight
         consensus.nRBTStakeTimestampMask = 0;
 
         // X25X Multi-Algorithm Mining Activation
         // Set to a future block height to preserve existing chain
         // Miners can use SHA256, Scrypt, Ethash, RandomX, Equihash, X11, or kHeavyHash after this height
         consensus.nRandomXActivationHeight = 210000; // Activate RandomX at block 210,000
-        consensus.nX25XActivationHeight = 210000; // Activate X25X at block 210,000
+        consensus.nX25XActivationHeight = 2000; // per-algorithm difficulty; see nPowRetargetHeight
 
         // FCMP Privacy Transaction Activation
         consensus.nFcmpActivationHeight = 210000; // Activate FCMP at block 210,000
@@ -289,7 +294,7 @@ public:
         // and 4x stronger difficulty adjustment multiplier for faster convergence.
         // The timestamp mask alone slows blocks from ~10s to ~160s, then the 4x multiplier
         // converges toward the 120s target within a few blocks.
-        consensus.nPoSDifficultyFixHeight = 210000;
+        consensus.nPoSDifficultyFixHeight = 2000; // 16s stake mask + 4x convergence, with the other difficulty fixes
         consensus.FixedRBTPosLimit = uint256{"0000000fffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
 
         // WATTx Trust Tier parameters (to be added to consensus struct)

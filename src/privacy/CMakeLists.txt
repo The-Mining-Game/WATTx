@@ -21,6 +21,12 @@ add_library(wattx_privacy STATIC
     stealth.cpp
     ring_signature.cpp
     confidential.cpp
+    # ed25519 amount layer: provides CreateCommitment / VerifyCommitmentBalance /
+    # Create|VerifyRangeProof / Create|VerifyAggregatedRangeProof. The secp256k1
+    # versions of those still live in confidential.cpp as legacy_secp256k1_*,
+    # unused, kept for reference only -- they cannot be balance-checked against
+    # ed25519 FCMP inputs. Must be linked together with wattx_bpplus.
+    confidential_ed25519.cpp
     privacy.cpp
     consensus.cpp
     p2p.cpp

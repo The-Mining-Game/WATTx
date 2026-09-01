@@ -549,6 +549,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-par=<n>", strprintf("Set the number of script verification threads (0 = auto, up to %d, <0 = leave that many cores free, default: %d)",
         MAX_SCRIPTCHECK_THREADS, DEFAULT_SCRIPTCHECK_THREADS), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-randomxlightvalidation", "Use RandomX LIGHT mode (~256MB) instead of FULL mode (~2GB) for PoW validation. Slower per-hash but fits low-memory nodes (default: 0)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-fcmpamountlayer", "Enable the FCMP confidential amount layer: shielded outputs with ed25519 Pedersen commitments, Bulletproofs+ range proofs and a value-conservation check (default: 0). This is CONSENSUS-AFFECTING - a node with it enabled will accept transactions that a node without it rejects. For regtest/testnet evaluation until the layer is activated by height.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-persistmempool", strprintf("Whether to save the mempool on shutdown and load on restart (default: %u)", DEFAULT_PERSIST_MEMPOOL), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-persistmempoolv1",
                    strprintf("Whether a mempool.dat file created by -persistmempool or the savemempool RPC will be written in the legacy format "
@@ -2176,6 +2177,17 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     if (!privacy::InitializeFcmpConsensus(args.GetDataDirNet())) {
         LogPrintf("Warning: FCMP consensus initialization failed\n");
         // Not fatal - FCMP features will be unavailable until activated
+    }
+
+    // Confidential amount layer. CONSENSUS-AFFECTING: a node with this enabled
+    // accepts shielded outputs that a node without it rejects, so a mixed
+    // network will split. Logged loudly on purpose -- this must never be on by
+    // accident, and it should become a height-gated activation before mainnet.
+    privacy::g_fcmp_amount_layer_enabled = args.GetBoolArg("-fcmpamountlayer", false);
+    if (privacy::g_fcmp_amount_layer_enabled) {
+        LogPrintf("FCMP: confidential AMOUNT LAYER ENABLED (-fcmpamountlayer). "
+                  "This is consensus-affecting; peers without it will reject "
+                  "shielded outputs this node accepts.\n");
     }
 
     // ********************************************************* Step 9: load wallet

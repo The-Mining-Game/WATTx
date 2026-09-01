@@ -5,6 +5,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <crypto/x25x/x25x.h>
+#include <node/randomx_miner.h>
 #include <primitives/block.h>
 #include <uint256.h>
 #include <streams.h>
@@ -135,17 +136,73 @@ BOOST_AUTO_TEST_CASE(ethash_hash_test)
     BOOST_CHECK(hash == hash2);
 }
 
+/**
+ * A RandomX verifier that has not been keyed must refuse to answer, not guess.
+ *
+ * hash::RandomX() used to initialise a context with an ALL-ZERO key whenever
+ * none existed, and return a hash computed against that wrong dataset. Callers
+ * compared it to the PoW target as though it were authoritative. On mainnet that
+ * rejected a valid block at startup -- block index entries are checked before
+ * anything keys RandomX with the genesis hash -- and the node refused to start
+ * with "Error loading block database", crash-looping until it was stopped.
+ *
+ * This cannot be caught on regtest: powLimit there is 0x207fffff, so even a hash
+ * from the wrong dataset clears the target and the block still validates. It
+ * needs either real difficulty or a direct check like this one.
+ *
+ * The correct key is the genesis hash, owned by EnsureRandomXInitializedForPow()
+ * in validation.cpp and reached via CheckProofOfWorkRandomX().
+ */
+BOOST_AUTO_TEST_CASE(randomx_unkeyed_verifier_fails_closed)
+{
+    // Only meaningful while the process-wide context is unkeyed. If an earlier
+    // test in this binary initialised it, say so rather than assert something
+    // this test is not actually exercising.
+    if (node::GetRandomXMiner().IsInitialized()) {
+        BOOST_TEST_MESSAGE("RandomX context already keyed by an earlier test; "
+                           "skipping the unkeyed fail-closed check");
+        return;
+    }
+
+    CBlockHeader header;
+    header.nVersion = x25x::SetBlockAlgorithm(0x20000000, x25x::Algorithm::RANDOMX);
+    header.hashPrevBlock = uint256::ONE;
+    header.hashMerkleRoot = uint256::ONE;
+    header.nTime = 1700000000;
+    header.nBits = 0x1e242554;
+    header.nNonce = 12345;
+
+    const uint256 hash = x25x::hash::RandomX(header);
+
+    // A null hash is the refusal. Anything else is a confident answer computed
+    // against a key we never established -- the exact failure this guards.
+    BOOST_CHECK_MESSAGE(hash.IsNull(),
+        "unkeyed RandomX verifier returned a hash instead of failing closed");
+
+    // And it must not have silently keyed itself along the way.
+    BOOST_CHECK(!node::GetRandomXMiner().IsInitialized());
+}
+
 BOOST_AUTO_TEST_CASE(randomx_hash_test)
 {
     CBlockHeader header = CreateTestHeader();
     header.nVersion = x25x::SetBlockAlgorithm(header.nVersion, x25x::Algorithm::RANDOMX);
 
-    uint256 hash = x25x::HashBlockHeader(header, x25x::Algorithm::RANDOMX);
+    // Key the context explicitly. This test previously asserted that hashing
+    // WITHOUT keying still returned a hash -- encoding as correct the behaviour
+    // that made a node reject a valid block and refuse to start. Hashing against
+    // an unestablished key is the bug, not the baseline; see
+    // randomx_unkeyed_verifier_fails_closed below.
+    node::RandomXMiner& miner = node::GetRandomXMiner();
+    if (!miner.IsInitialized()) {
+        const uint256 key = uint256::ONE; // any fixed key; consensus uses genesis
+        BOOST_REQUIRE(miner.Initialize(key.data(), 32, node::RandomXMiner::Mode::LIGHT, false));
+    }
 
-    // Hash should not be zero (RandomX should be initialized)
+    uint256 hash = x25x::HashBlockHeader(header, x25x::Algorithm::RANDOMX);
     BOOST_CHECK(!hash.IsNull());
 
-    // Same input should produce same hash
+    // Same input and same key must produce the same hash
     uint256 hash2 = x25x::HashBlockHeader(header, x25x::Algorithm::RANDOMX);
     BOOST_CHECK(hash == hash2);
 }

@@ -173,6 +173,44 @@ bool CreateCommitment(
     CPedersenCommitment& commitment);
 
 /**
+ * @brief Make output blinding factors balance the inputs
+ *
+ * Sets the LAST output blinding to  sum(inputs) - sum(other outputs)  so that
+ * the blinding terms cancel in  sum(in) == sum(out) + fee. The fee commitment
+ * carries zero blinding (see CreatePublicValueCommitment), so once the values
+ * balance this makes the whole equation hold on the curve.
+ *
+ * Without this the sender picks every blinding at random, the G-components
+ * never cancel, and a correctly-valued transaction is still rejected as
+ * imbalanced. The caller must recompute the last output's commitment after
+ * calling this.
+ *
+ * @param inputBlinds   Blinding factors of the input pseudo-outputs
+ * @param outputBlinds  [in,out] Output blinding factors; last entry is overwritten
+ * @return true if the adjustment succeeded
+ */
+bool BalanceBlindingFactors(
+    const std::vector<CBlindingFactor>& inputBlinds,
+    std::vector<CBlindingFactor>& outputBlinds);
+
+/**
+ * @brief Commit to a PUBLIC value with zero blinding: C = v*H
+ *
+ * Used for the transaction fee, which is public. Because the blinding is zero
+ * the commitment is fully determined by v, so any verifier can recompute it and
+ * check  sum(inputs) == sum(outputs) + fee  without being told a secret.
+ * This is what lets a shielded transaction pay a transparent fee while still
+ * being balance-checkable.
+ *
+ * @param amount The public amount (>= 0)
+ * @param commitment [out] The resulting commitment
+ * @return true if creation succeeded
+ */
+bool CreatePublicValueCommitment(
+    CAmount amount,
+    CPedersenCommitment& commitment);
+
+/**
  * @brief Verify that commitments balance (sum inputs == sum outputs)
  *
  * @param inputCommitments Input commitments
@@ -184,6 +222,35 @@ bool VerifyCommitmentBalance(
     const std::vector<CPedersenCommitment>& inputCommitments,
     const std::vector<CPedersenCommitment>& outputCommitments,
     const CPedersenCommitment* feeCommitment = nullptr);
+
+/**
+ * @brief Verify the shielded pool ledger invariant.
+ *
+ *     sum(inputCommitments) + delta*H == sum(outputCommitments)
+ *
+ * where `delta` is the net transparent value the shielded pool gained in this
+ * transaction: positive when value was shielded, negative when it was unshielded
+ * or when a fee was paid out of the pool, zero for a transfer whose fee is paid
+ * transparently.
+ *
+ * `delta` is a PUBLIC value with zero blinding, so every verifier computes the
+ * same delta*H term from the transaction and the coins view alone. It is signed,
+ * and the sign is handled by moving the term to the other side of the equation
+ * rather than by negating a scalar -- see the implementation.
+ *
+ * Either commitment vector may be empty: a pure shield has no shielded inputs,
+ * and a full unshield produces no shielded outputs. Both are legitimate, and
+ * both still have to balance.
+ *
+ * @param inputCommitments  Pseudo-output commitments of the shielded inputs
+ * @param outputCommitments Commitments of the shielded outputs
+ * @param delta             Net value the pool gained (signed)
+ * @return true if the invariant holds
+ */
+bool VerifyPoolBalance(
+    const std::vector<CPedersenCommitment>& inputCommitments,
+    const std::vector<CPedersenCommitment>& outputCommitments,
+    CAmount delta);
 
 /**
  * @brief Create a range proof for an amount

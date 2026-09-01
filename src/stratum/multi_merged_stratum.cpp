@@ -324,6 +324,24 @@ size_t MultiMergedStratumServer::GetTotalClientCount() const {
     return m_clients.size();
 }
 
+namespace {
+// Consensus encodes the mining algorithm in block version bits 8-15 using the
+// x25x::Algorithm ids; the stratum tracks parent chains with its own enum.
+uint8_t AlgoToX25XId(ParentChainAlgo algo)
+{
+    switch (algo) {
+        case ParentChainAlgo::SHA256D:    return 0x00;
+        case ParentChainAlgo::SCRYPT:     return 0x01;
+        case ParentChainAlgo::ETHASH:     return 0x02;
+        case ParentChainAlgo::RANDOMX:    return 0x03;
+        case ParentChainAlgo::EQUIHASH:   return 0x04;
+        case ParentChainAlgo::X11:        return 0x05;
+        case ParentChainAlgo::KHEAVYHASH: return 0x07;
+    }
+    return 0x00;
+}
+} // namespace
+
 size_t MultiMergedStratumServer::GetClientCount(ParentChainAlgo algo) const {
     std::lock_guard<std::mutex> lock(m_clients_mutex);
     size_t count = 0;
@@ -1720,7 +1738,12 @@ void MultiMergedStratumServer::CreateJob(ParentChainAlgo algo) {
             job.wattx_bits       = m_ethash_round.wattx_bits;
             job.wattx_target     = m_ethash_round.wattx_target;
         } else {
-            job.wattx_template = m_wattx_mining->createNewBlock();
+            // Build the template for this job's algorithm so its nBits is the
+            // one that algorithm must satisfy; per-algorithm difficulty makes
+            // that differ between algorithms.
+            node::BlockCreateOptions tpl_opts;
+            tpl_opts.pow_algo = AlgoToX25XId(job.algo);
+            job.wattx_template = m_wattx_mining->createNewBlock(tpl_opts);
             if (job.wattx_template) {
                 auto header = job.wattx_template->getBlockHeader();
                 job.wattx_height = tip ? tip->height + 1 : 0;
@@ -2256,6 +2279,9 @@ bool MultiMergedStratumServer::ValidateShare(int client_id, const std::string& j
             CTransactionRef submit_cb = payout_cb
                 ? payout_cb : wtpl->getCoinbaseTx();
 
+            // The template was created for this algorithm, so its version
+            // already carries the algorithm id that its nBits was derived
+            // from. Submit that version unchanged apart from the AuxPoW flag.
             bool success = wtpl->submitAuxPowSolution(
                 header.nVersion | CAuxPowBlockHeader::AUXPOW_VERSION_FLAG,
                 header.nTime,

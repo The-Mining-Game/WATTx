@@ -22,6 +22,34 @@
 
 namespace wallet {
 
+namespace {
+
+//! Convert an ed25519 blinding scalar into the CBlindingFactor container the
+//! confidential layer takes. Both sides reduce mod the group order, and an
+//! already-reduced scalar round-trips unchanged.
+privacy::CBlindingFactor ToBlindingFactor(const ed25519::Scalar& s)
+{
+    const std::vector<uint8_t> b = s.GetBytes();
+    uint256 u;
+    if (b.size() == 32) std::memcpy(u.begin(), b.data(), 32);
+    return privacy::CBlindingFactor(u);
+}
+
+//! Build a commitment through the confidential layer rather than by hand.
+//!
+//! Every site that used to assemble the 33-byte buffer itself wrote a 0x02 tag,
+//! which the ed25519 layer deliberately REJECTS as a legacy secp256k1
+//! commitment (see confidential_ed25519.cpp). Nothing the wallet built could
+//! pass consensus. Going through CreateCommitment keeps the tag in exactly one
+//! place, so the wallet and the verifier cannot drift apart again.
+bool MakeCommitment(CAmount amount, const ed25519::Scalar& blinding,
+                    privacy::CPedersenCommitment& out)
+{
+    return privacy::CreateCommitment(amount, ToBlindingFactor(blinding), out);
+}
+
+} // namespace
+
 // ============================================================================
 // Constructor / Destructor
 // ============================================================================
@@ -124,6 +152,12 @@ CFcmpTransactionResult CFcmpWalletManager::CreateFcmpTransaction(
     // Build outputs
     CAmount changeAmount = inputTotal - totalOutput - fee;
 
+    // Blindings and amounts of the SHIELDED outputs, in the order they are added
+    // to privacyOutputs. Needed to balance the blindings and then range-prove the
+    // final commitments.
+    std::vector<privacy::CBlindingFactor> outputBlinds;
+    std::vector<CAmount> outputAmounts;
+
     for (size_t i = 0; i < recipients.size(); ++i) {
         const auto& recipient = recipients[i];
         CAmount outputAmount = recipient.amount;
@@ -150,20 +184,19 @@ CFcmpTransactionResult CFcmpWalletManager::CreateFcmpTransaction(
                 privOutput.stealthOutput
             );
 
-            // Create commitment for confidential amount
+            // Create commitment for confidential amount. The blinding is
+            // provisional: the LAST shielded output's blinding is replaced below
+            // so the whole set balances the inputs, and its commitment is then
+            // recomputed. Proving range before that would bind the proof to a
+            // commitment the transaction does not end up carrying.
             ed25519::Scalar blinding = ed25519::Scalar::Random();
-            auto commitment = ed25519::PedersenCommitment::CommitAmount(
-                static_cast<uint64_t>(outputAmount),
-                blinding
-            );
-
-            privOutput.confidentialOutput.commitment.data.resize(33);
-            privOutput.confidentialOutput.commitment.data[0] = 0x02;
-            std::memcpy(
-                privOutput.confidentialOutput.commitment.data.data() + 1,
-                commitment.GetPoint().data.data(),
-                32
-            );
+            if (!MakeCommitment(outputAmount, blinding,
+                                privOutput.confidentialOutput.commitment)) {
+                result.error = "Failed to create output commitment";
+                return result;
+            }
+            outputBlinds.push_back(ToBlindingFactor(blinding));
+            outputAmounts.push_back(outputAmount);
         } else {
             // Deshielding: regular script output (sender privacy preserved,
             // recipient receives to a standard address with visible amount)
@@ -203,18 +236,13 @@ CFcmpTransactionResult CFcmpWalletManager::CreateFcmpTransaction(
             );
         }
 
-        auto changeCommitment = ed25519::PedersenCommitment::CommitAmount(
-            static_cast<uint64_t>(changeAmount),
-            changeBlinding
-        );
-
-        changeOutput.confidentialOutput.commitment.data.resize(33);
-        changeOutput.confidentialOutput.commitment.data[0] = 0x02;
-        std::memcpy(
-            changeOutput.confidentialOutput.commitment.data.data() + 1,
-            changeCommitment.GetPoint().data.data(),
-            32
-        );
+        if (!MakeCommitment(changeAmount, changeBlinding,
+                            changeOutput.confidentialOutput.commitment)) {
+            result.error = "Failed to create change commitment";
+            return result;
+        }
+        outputBlinds.push_back(ToBlindingFactor(changeBlinding));
+        outputAmounts.push_back(changeAmount);
         changeOutput.nValue = changeAmount;
 
         result.privacyTx.privacyOutputs.push_back(changeOutput);
@@ -242,19 +270,83 @@ CFcmpTransactionResult CFcmpWalletManager::CreateFcmpTransaction(
         }
     }
 
-    // Self-verify the transaction (SA+L signature, balance)
-    // Note: FCMP proof FFI verification is skipped during creation as the proof
-    // will be validated by consensus when the transaction is included in a block.
-    // The SA+L signature and commitment balance are verified here.
-    if (!result.privacyTx.VerifyFcmpSelfCheck()) {
+    // Balance the output blindings against the inputs, THEN range-prove.
+    //
+    // Previously every output got an independent random blinding and no range
+    // proof was produced at all, so the G-components never cancelled and the
+    // transaction could not satisfy the balance equation even with correct
+    // values. The last shielded output's blinding is replaced with
+    // sum(inputBlinds) - sum(other outputBlinds) and its commitment recomputed.
+    if (!outputBlinds.empty()) {
+        std::vector<privacy::CBlindingFactor> inputBlinds;
+        inputBlinds.reserve(selectedInputs.size());
+        for (const auto& in : selectedInputs) {
+            inputBlinds.push_back(ToBlindingFactor(in.blinding));
+        }
+
+        if (inputBlinds.empty()) {
+            result.error = "Shielded outputs with no shielded inputs to fund them";
+            return result;
+        }
+        if (!privacy::BalanceBlindingFactors(inputBlinds, outputBlinds)) {
+            result.error = "Failed to balance blinding factors";
+            return result;
+        }
+
+        // Recompute the last shielded output's commitment with its new blinding,
+        // and mirror it back into the transaction -- outputBlinds is only a
+        // working copy.
+        const size_t last = outputBlinds.size() - 1;
+        privacy::CPedersenCommitment rebuilt;
+        if (!privacy::CreateCommitment(outputAmounts[last], outputBlinds[last], rebuilt)) {
+            result.error = "Failed to recompute the balancing commitment";
+            return result;
+        }
+
+        std::vector<privacy::CPedersenCommitment> finalCommitments;
+        size_t shieldedIdx = 0;
+        for (auto& out : result.privacyTx.privacyOutputs) {
+            if (out.confidentialOutput.commitment.IsNull()) continue;
+            if (shieldedIdx == last) {
+                out.confidentialOutput.commitment = rebuilt;
+            }
+            finalCommitments.push_back(out.confidentialOutput.commitment);
+            shieldedIdx++;
+        }
+
+        // Prove range over the FINAL commitments. Proving earlier would bind the
+        // proof to a commitment the transaction no longer carries.
+        if (!privacy::CreateAggregatedRangeProof(outputAmounts, outputBlinds,
+                                                 finalCommitments,
+                                                 result.privacyTx.aggregatedRangeProof)) {
+            result.error = "Failed to create the aggregated range proof";
+            return result;
+        }
+    }
+
+    // Self-verify: SA+L signatures, range proof, and value conservation against
+    // the pool delta this transaction will express transparently. The membership
+    // proof is deferred to consensus, which has the chain's tree root.
+    //
+    // The delta is negative by the fee: the shell spends pool UTXOs covering the
+    // inputs and pays back the outputs, with the fee coming out of the pool.
+    const CAmount poolDelta = -fee;
+    if (!result.privacyTx.VerifyFcmpSelfCheck(poolDelta)) {
         result.error = "Transaction self-check failed";
         return result;
     }
 
-    // Convert to standard transaction for broadcast
-    result.standardTx = MakeTransactionRef(result.privacyTx.ToTransaction());
-
-    result.success = true;
+    // NOT YET BROADCASTABLE. Assembling the shell needs pool UTXO selection (the
+    // pool script is not wallet-owned, so its coins come from the chain's UTXO
+    // set, not from wallet coin selection), and the membership proofs are still
+    // produced by the scaffold prover, which cannot verify against a real tree
+    // root. See P-a/P-b/P-c in doc/design/fcmp-value-balance.md. Returning
+    // standardTx = nullptr is deliberate: the previous code called
+    // ToTransaction(), which emitted an input-less transaction and returned a
+    // txid for something that could never confirm.
+    result.standardTx = nullptr;
+    result.error = "FCMP spend path incomplete: pool input selection and a "
+                   "curve-tree-backed membership proof are not yet wired";
     return result;
 }
 
@@ -1203,18 +1295,21 @@ std::optional<privacy::CFcmpInput> CFcmpWalletManager::BuildFcmpInput(
     auto cxr = fcmpInput.salSignature.c * xPlusR;
     fcmpInput.salSignature.s = rerandomizer + cxr;
 
-    // Create pseudo-output commitment
-    auto pseudoCommitment = ed25519::PedersenCommitment::CommitAmount(
-        static_cast<uint64_t>(output.amount),
-        output.blinding
-    );
-    fcmpInput.pseudoOutput.data.resize(33);
-    fcmpInput.pseudoOutput.data[0] = 0x02;
-    std::memcpy(
-        fcmpInput.pseudoOutput.data.data() + 1,
-        pseudoCommitment.GetPoint().data.data(),
-        32
-    );
+    // Create the pseudo-output commitment.
+    //
+    // NOTE: this publishes the leaf's OWN commitment C, un-rerandomized -- a
+    // byte-for-byte copy of a public tree leaf, which identifies exactly which
+    // note is being spent and defeats the membership proof's whole purpose. It
+    // must become C~ = C + r_c*G, with r_c from the real prover (now exported as
+    // fcmp_prove_full's c_blind_out) and the blinding tracked as b~ = b + r_c so
+    // the outputs can be balanced against it. That change is blocked on the
+    // curve-tree work (P-c in doc/design/fcmp-value-balance.md); leaving it
+    // as-is is a PRIVACY LEAK, not a value bug -- the balance below is still
+    // sound because b~ reduces to b when r_c is zero.
+    if (!MakeCommitment(output.amount, output.blinding, fcmpInput.pseudoOutput)) {
+        LogPrintf("FCMP: Failed to create pseudo-output commitment\n");
+        return std::nullopt;
+    }
 
     return fcmpInput;
 }

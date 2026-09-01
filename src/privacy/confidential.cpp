@@ -73,7 +73,7 @@ CPubKey GetGeneratorH()
     return g_generatorH;
 }
 
-bool CreateCommitment(
+bool legacy_secp256k1_CreateCommitment(
     CAmount amount,
     const CBlindingFactor& blindingFactor,
     CPedersenCommitment& commitment)
@@ -149,7 +149,7 @@ bool CreateCommitment(
     return true;
 }
 
-bool VerifyCommitmentBalance(
+bool legacy_secp256k1_VerifyCommitmentBalance(
     const std::vector<CPedersenCommitment>& inputCommitments,
     const std::vector<CPedersenCommitment>& outputCommitments,
     const CPedersenCommitment* feeCommitment)
@@ -343,7 +343,7 @@ static bool PointAdd(secp256k1_context* ctx, const CPubKey& P1, const CPubKey& P
 // - t_hat (32 bytes) - evaluation of t(x) at challenge
 // - Inner product proof (variable) - log2(n) rounds of L, R pairs
 
-bool CreateRangeProof(
+bool legacy_secp256k1_CreateRangeProof(
     CAmount amount,
     const CBlindingFactor& blindingFactor,
     const CPedersenCommitment& commitment,
@@ -584,7 +584,7 @@ bool CreateRangeProof(
     return true;
 }
 
-bool VerifyRangeProof(
+bool legacy_secp256k1_VerifyRangeProof(
     const CPedersenCommitment& commitment,
     const CRangeProof& rangeProof)
 {
@@ -801,7 +801,7 @@ bool VerifyRangeProof(
     return true;
 }
 
-bool CreateAggregatedRangeProof(
+bool legacy_secp256k1_CreateAggregatedRangeProof(
     const std::vector<CAmount>& amounts,
     const std::vector<CBlindingFactor>& blindingFactors,
     const std::vector<CPedersenCommitment>& commitments,
@@ -834,7 +834,7 @@ bool CreateAggregatedRangeProof(
     // Create individual proofs and concatenate
     for (size_t i = 0; i < amounts.size(); i++) {
         CRangeProof singleProof;
-        if (!CreateRangeProof(amounts[i], blindingFactors[i], commitments[i], singleProof)) {
+        if (!legacy_secp256k1_CreateRangeProof(amounts[i], blindingFactors[i], commitments[i], singleProof)) {
             secp256k1_context_destroy(ctx);
             return false;
         }
@@ -852,7 +852,7 @@ bool CreateAggregatedRangeProof(
     return true;
 }
 
-bool VerifyAggregatedRangeProof(
+bool legacy_secp256k1_VerifyAggregatedRangeProof(
     const std::vector<CPedersenCommitment>& commitments,
     const CRangeProof& rangeProof)
 {
@@ -891,7 +891,7 @@ bool VerifyAggregatedRangeProof(
         singleProof.data.assign(rangeProof.data.begin() + offset,
                                  rangeProof.data.begin() + offset + proofSize);
 
-        if (!VerifyRangeProof(commitments[i], singleProof)) {
+        if (!legacy_secp256k1_VerifyRangeProof(commitments[i], singleProof)) {
             return false;
         }
 
@@ -1412,7 +1412,7 @@ bool VerifyInnerProductProof(
     return result;
 }
 
-bool ComputeBalancingBlindingFactor(
+bool legacy_secp256k1_ComputeBalancingBlindingFactor(
     const std::vector<CBlindingFactor>& inputBlinds,
     const std::vector<CBlindingFactor>& outputBlinds,
     CBlindingFactor& balancingBlind)

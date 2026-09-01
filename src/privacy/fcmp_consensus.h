@@ -41,6 +41,11 @@ class CCoinsViewCache;
 
 namespace privacy {
 
+//! Master switch for the FCMP confidential amount layer. Default false.
+//! See fcmp_consensus.cpp for why this stays off until the builder and
+//! end-to-end regtest spends are proven.
+extern bool g_fcmp_amount_layer_enabled;
+
 // ============================================================================
 // Key Image Database
 // ============================================================================
@@ -284,6 +289,66 @@ bool HasFcmpOutputs(const CTransaction& tx);
  * @return true if FCMP data found and decoded
  */
 bool DecodeFcmpTransaction(const CTransaction& tx, CPrivacyTransaction& privTx);
+
+// ============================================================================
+// Shielded Pool (value backing)
+// ============================================================================
+//
+// The shielded set is backed by ordinary UTXOs paying to one reserved script.
+// Shielding pays into it, unshielding spends it, and a shielded-to-shielded
+// transfer spends a pool UTXO and pays the same value (less fee) back. The net
+// transparent value the pool gained is the "pool delta":
+//
+//     delta = sum(value of pool outputs created) - sum(value of pool UTXOs spent)
+//
+// Both terms are read from the transaction and the coins view, so nothing about
+// delta is declared by the sender and nothing about it can be lied about. The
+// shielded value balance is then pinned to delta (see doc/design/fcmp-value-balance.md).
+//
+// WHY A REAL UTXO AND NOT A BURN/MINT COUNTER: this leaves Consensus::CheckTxInputs
+// untouched. The transparent layer already forbids outputs exceeding inputs, so no
+// consensus path can create coin, and the worst case for a bug in the FCMP logic is
+// theft bounded by the pool's balance rather than unbounded inflation. It also keeps
+// gettxoutsetinfo honest -- the pool UTXOs' total value IS the shielded supply, and
+// it can be audited against the tree at any time.
+
+/**
+ * @brief The reserved scriptPubKey backing the shielded pool.
+ *
+ * A witness program of an as-yet-unassigned version, so that pre-activation nodes
+ * treat it as anyone-can-spend and this deploys as a softfork -- the same upgrade
+ * path segwit and taproot used. Its security comes from Rule P1 below, not from
+ * script.
+ *
+ * Being a native witness program, the spending input's scriptSig is empty, so the
+ * txid is not scriptSig-malleable and the FCMP payload rides in the witness, which
+ * the txid excludes. Both properties are relied on: the SA+L signature commits to
+ * the txid, which is what stops a third party rewriting a pool-spending
+ * transaction's outputs (see IsPoolScript's callers).
+ */
+const CScript& GetShieldedPoolScript();
+
+/** @brief Is this scriptPubKey the reserved shielded-pool script? */
+bool IsPoolScript(const CScript& scriptPubKey);
+
+/**
+ * @brief Compute the pool delta for a transaction.
+ *
+ * @param tx           The transaction
+ * @param view         Coins view, must have every input available
+ * @param[out] delta   Net value the pool gained (may be negative)
+ * @return false if an input coin is missing or the sums overflow
+ *
+ * Signed: positive for a shield, negative for an unshield or a pool-paid fee,
+ * zero for a transfer whose fee is paid transparently.
+ */
+bool ComputePoolDelta(const CTransaction& tx, const CCoinsViewCache& view, CAmount& delta);
+
+/** @brief Does this transaction spend at least one pool UTXO? */
+bool SpendsPool(const CTransaction& tx, const CCoinsViewCache& view);
+
+/** @brief Does this transaction create at least one pool output? */
+bool CreatesPool(const CTransaction& tx);
 
 /**
  * @brief Get the FCMP activation height

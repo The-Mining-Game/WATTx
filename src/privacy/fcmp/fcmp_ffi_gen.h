@@ -315,8 +315,15 @@ int32_t fcmp_verify(const uint8_t *tree_root,
  * `O = x·G + y·T`, and the 32-byte `signable_tx_hash`.
  *
  * On success the serialised `FcmpPlusPlus` proof is written to `proof_out`, its length to
- * `*proof_len_out`, the key image `L = x·I` to `key_image_out`, and the pseudo-out `C~` to
- * `c_tilde_out`.  Both 32-byte output buffers must be provided by the caller.
+ * `*proof_len_out`, the key image `L = x·I` to `key_image_out`, the pseudo-out `C~` to
+ * `c_tilde_out`, and the commitment re-randomiser `r_c` to `c_blind_out`.  All three 32-byte
+ * output buffers must be provided by the caller.
+ *
+ * `r_c` is required by the caller, not merely informative: the re-randomisation is
+ * `C~ = C + r_c·G`, so the blinding of the pseudo-out is `b~ = b + r_c`, and a spender cannot
+ * balance a transaction's output blindings against its inputs without it.  The blinds are drawn
+ * inside `RerandomizedOutput::new` from the OS RNG, so this is the only way out.  Treat it as
+ * secret: publishing `r_c` alongside `C~` would re-link the input to its tree leaf.
  *
  * # Safety
  * All pointers must be valid for the described lengths.
@@ -331,7 +338,8 @@ int32_t fcmp_prove_full(uint8_t *proof_out,
                         const uint8_t *y_bytes,
                         const uint8_t *tx_hash,
                         uint8_t *key_image_out,
-                        uint8_t *c_tilde_out);
+                        uint8_t *c_tilde_out,
+                        uint8_t *c_blind_out);
 
 /**
  * Verify a real FCMP++ membership proof produced by `fcmp_prove_full`.
