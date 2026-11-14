@@ -498,12 +498,16 @@ check. Two transactions in the *same* block could also carry the same key image,
 since duplicates were rejected only within a single transaction and the mempool
 check queries a database that does not yet contain the block's own spends.
 
-`CFcmpConsensusState::ConnectBlock` now rejects a block that repeats a key image
-or reuses one already recorded as spent. **That is only the double-spend half.**
-Blocks still do not re-verify membership proofs, range proofs, or value balance,
-because `ConnectBlock` has no coins view to compute Δ from. Full block-level
-validation needs the coins view threaded through — design work, not a patch, and
-a hard blocker alongside P-c.
+`CFcmpConsensusState::ConnectBlock` rejects a block that repeats a key image
+or reuses one already recorded as spent. `Chainstate::ConnectBlock` also runs
+`CheckFcmpTransaction` / `CheckFcmpInputs` against the coins view, so a
+transaction mined straight into a block is held to the same proof, range-proof
+and pool-delta checks as one that arrived through the mempool. The mempool
+keeps its own key-image set, so a second spend is rejected before it is
+relayed, and connecting a block evicts any mempool transaction that spends a
+note the block just spent. The per-block output count is stored in the key-image
+DB; a reorg after restart removes those notes from the curve tree instead of
+leaving them spendable after the transparent effects have been undone.
 
 ### An outside data point
 

@@ -39,6 +39,7 @@ bool g_fcmp_amount_layer_enabled = false;
 // Database keys
 static constexpr uint8_t DB_KEY_IMAGE = 'K';
 static constexpr uint8_t DB_SPENT_COUNT = 'S';
+static constexpr uint8_t DB_OUTPUT_COUNT = 'H';
 
 // Serializable structure for key image spend info
 struct KeyImageSpendInfo {
@@ -124,6 +125,24 @@ bool CFcmpKeyImageDB::EraseBatch(const std::vector<CKeyImage>& keyImages)
     }
 
     return m_db->WriteBatch(batch);
+}
+
+bool CFcmpKeyImageDB::WriteOutputCount(int height, uint64_t count)
+{
+    LOCK(cs_keyimage);
+    return m_db->Write(std::make_pair(DB_OUTPUT_COUNT, static_cast<int32_t>(height)), count);
+}
+
+bool CFcmpKeyImageDB::ReadOutputCount(int height, uint64_t& count) const
+{
+    LOCK(cs_keyimage);
+    return m_db->Read(std::make_pair(DB_OUTPUT_COUNT, static_cast<int32_t>(height)), count);
+}
+
+bool CFcmpKeyImageDB::EraseOutputCount(int height)
+{
+    LOCK(cs_keyimage);
+    return m_db->Erase(std::make_pair(DB_OUTPUT_COUNT, static_cast<int32_t>(height)));
 }
 
 bool CFcmpKeyImageDB::Sync()
@@ -318,9 +337,28 @@ bool CFcmpConsensusState::ConnectBlock(const CBlock& block, const CBlockIndex* p
     if (!keyImagesToMark.empty()) {
         if (!m_keyImageDB->WriteBatch(keyImagesToMark)) {
             LogPrintf("FCMP: Failed to write key images for block %d\n", height);
+            if (outputsAdded > 0 && !m_curveTree->RemoveLastN(outputsAdded)) {
+                LogPrintf("FCMP: also failed to roll back %lu tree outputs at block %d\n",
+                          outputsAdded, height);
+            }
             return false;
         }
         m_keyImagesSpent += keyImagesToMark.size();
+    }
+
+    // Persist the output count BEFORE considering the block applied. A later
+    // restart must be able to disconnect this block without the in-memory map.
+    if (!m_keyImageDB->WriteOutputCount(height, outputsAdded)) {
+        LogPrintf("FCMP: Failed to persist output count for block %d\n", height);
+        if (!keyImagesToMark.empty()) {
+            std::vector<CKeyImage> rollback;
+            rollback.reserve(keyImagesToMark.size());
+            for (const auto& entry : keyImagesToMark) rollback.push_back(entry.first);
+            m_keyImageDB->EraseBatch(rollback);
+            m_keyImagesSpent -= keyImagesToMark.size();
+        }
+        if (outputsAdded > 0) m_curveTree->RemoveLastN(outputsAdded);
+        return false;
     }
 
     // Track for reorg handling
@@ -355,27 +393,57 @@ bool CFcmpConsensusState::DisconnectBlock(const CBlock& block, const CBlockIndex
         }
     }
 
-    // Unmark key images
-    if (!keyImagesToUnmark.empty()) {
-        if (!m_keyImageDB->EraseBatch(keyImagesToUnmark)) {
+    // Unmark key images this block actually spent. A key image recorded at a
+    // different height belongs to a block that is still in the chain; erasing
+    // it would make that note spendable a second time.
+    std::vector<CKeyImage> confirmedUnmark;
+    confirmedUnmark.reserve(keyImagesToUnmark.size());
+    for (const auto& ki : keyImagesToUnmark) {
+        uint256 spentBy;
+        int spentHeight = -1;
+        if (!m_keyImageDB->GetSpendingInfo(ki, spentBy, spentHeight)) continue;
+        if (spentHeight != height) {
+            LogPrintf("FCMP: disconnect of block %d left key image %s spent at height %d\n",
+                      height, ki.GetHash().ToString(), spentHeight);
+            continue;
+        }
+        confirmedUnmark.push_back(ki);
+    }
+    if (!confirmedUnmark.empty()) {
+        if (!m_keyImageDB->EraseBatch(confirmedUnmark)) {
             LogPrintf("FCMP: Failed to erase key images for block %d\n", height);
             return false;
         }
-        m_keyImagesSpent -= keyImagesToUnmark.size();
+        if (m_keyImagesSpent >= confirmedUnmark.size()) {
+            m_keyImagesSpent -= confirmedUnmark.size();
+        } else {
+            m_keyImagesSpent = 0;
+        }
     }
 
-    // Remove outputs from curve tree
-    auto it = m_outputsAddedPerBlock.find(height);
-    if (it != m_outputsAddedPerBlock.end() && it->second > 0) {
-        if (!m_curveTree->RemoveLastN(it->second)) {
+    // Remove outputs from curve tree. Prefer the persisted count so a reorg
+    // after restart still rolls the note out of the tree. Falling back to the
+    // in-memory map covers a block connected before this field existed.
+    uint64_t outputsToRemove = 0;
+    bool haveCount = m_keyImageDB->ReadOutputCount(height, outputsToRemove);
+    if (!haveCount) {
+        auto it = m_outputsAddedPerBlock.find(height);
+        if (it != m_outputsAddedPerBlock.end()) {
+            outputsToRemove = it->second;
+            haveCount = true;
+        }
+    }
+    if (haveCount && outputsToRemove > 0) {
+        if (!m_curveTree->RemoveLastN(outputsToRemove)) {
             LogPrintf("FCMP: Failed to remove %lu outputs from curve tree for block %d\n",
-                      it->second, height);
+                      outputsToRemove, height);
             return false;
         }
         LogPrintf("FCMP: Block %d disconnected. Removed %lu outputs. Tree size: %lu\n",
-                  height, it->second, m_curveTree->GetOutputCount());
-        m_outputsAddedPerBlock.erase(it);
+                  height, outputsToRemove, m_curveTree->GetOutputCount());
     }
+    m_keyImageDB->EraseOutputCount(height);
+    m_outputsAddedPerBlock.erase(height);
 
     if (height <= m_lastBlockHeight) {
         m_lastBlockHeight = height - 1;
@@ -558,7 +626,8 @@ bool CFcmpConsensusState::CheckFcmpTransaction(const CTransaction& tx, TxValidat
 }
 
 bool CFcmpConsensusState::CheckFcmpInputs(const CTransaction& tx, TxValidationState& state,
-                                          const CCoinsViewCache& view, int nSpendHeight) const
+                                          const CCoinsViewCache& view, int nSpendHeight,
+                                          std::set<uint256>* block_spends, bool check_mempool) const
 {
     LOCK(cs_fcmp);
 
@@ -614,11 +683,21 @@ bool CFcmpConsensusState::CheckFcmpInputs(const CTransaction& tx, TxValidationSt
 
     // Verify each FCMP input
     for (const auto& input : privTx.fcmpInputs) {
-        // 1. Check key image not already spent
-        if (IsKeyImageSpent(input.keyImage)) {
+        const uint256 kiHash = input.keyImage.GetHash();
+
+        // 1. Check key image not already spent on the active chain, by an
+        //    earlier transaction in this block, or by a different mempool tx.
+        //    The same note must not be spendable twice in any of those sets.
+        if (IsKeyImageSpent(input.keyImage) ||
+            (block_spends && block_spends->count(kiHash) != 0)) {
             return state.Invalid(TxValidationResult::TX_CONSENSUS,
                                  "fcmp-keyimage-spent",
                                  "FCMP key image already spent");
+        }
+        if (check_mempool && IsKeyImageInMempool(input.keyImage, tx.GetHash())) {
+            return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                                 "fcmp-keyimage-mempool-spent",
+                                 "FCMP key image is already spent by a mempool transaction");
         }
 
         // 2. Verify membership proof matches current tree root
@@ -730,7 +809,70 @@ bool CFcmpConsensusState::CheckFcmpInputs(const CTransaction& tx, TxValidationSt
                                        FormatMoney(poolDelta)));
     }
 
+    // Record this transaction's key images only after every check passed, so a
+    // rejected tx does not poison the in-block spent set.
+    if (block_spends) {
+        for (const auto& input : privTx.fcmpInputs) {
+            block_spends->insert(input.keyImage.GetHash());
+        }
+    }
+
     return true;
+}
+
+void CFcmpConsensusState::AccountMempoolTx(const CTransaction& tx)
+{
+    LOCK(cs_fcmp);
+    const uint256 txid = tx.GetHash();
+    for (const auto& ki : ExtractKeyImages(tx)) {
+        const uint256 kiHash = ki.GetHash();
+        auto it = m_mempoolKeyImages.find(kiHash);
+        if (it != m_mempoolKeyImages.end() && it->second != txid) {
+            // CheckFcmpInputs should have rejected this. Keep the first claim.
+            LogPrintf("FCMP: mempool tx %s reuses key image %s already held by %s\n",
+                      txid.ToString(), kiHash.ToString(), it->second.ToString());
+            continue;
+        }
+        m_mempoolKeyImages[kiHash] = txid;
+    }
+}
+
+void CFcmpConsensusState::UnaccountMempoolTx(const CTransaction& tx)
+{
+    LOCK(cs_fcmp);
+    const uint256 txid = tx.GetHash();
+    for (const auto& ki : ExtractKeyImages(tx)) {
+        auto it = m_mempoolKeyImages.find(ki.GetHash());
+        if (it != m_mempoolKeyImages.end() && it->second == txid) {
+            m_mempoolKeyImages.erase(it);
+        }
+    }
+}
+
+bool CFcmpConsensusState::IsKeyImageInMempool(const CKeyImage& keyImage, const uint256& ignore_txid) const
+{
+    LOCK(cs_fcmp);
+    auto it = m_mempoolKeyImages.find(keyImage.GetHash());
+    if (it == m_mempoolKeyImages.end()) return false;
+    return it->second != ignore_txid;
+}
+
+std::vector<uint256> CFcmpConsensusState::MempoolConflicts(const CBlock& block) const
+{
+    LOCK(cs_fcmp);
+    std::set<uint256> inBlock;
+    for (const auto& tx : block.vtx) inBlock.insert(tx->GetHash());
+
+    std::set<uint256> conflicts;
+    for (const auto& tx : block.vtx) {
+        for (const auto& ki : ExtractKeyImages(*tx)) {
+            auto it = m_mempoolKeyImages.find(ki.GetHash());
+            if (it == m_mempoolKeyImages.end()) continue;
+            if (inBlock.count(it->second) != 0) continue;
+            conflicts.insert(it->second);
+        }
+    }
+    return std::vector<uint256>(conflicts.begin(), conflicts.end());
 }
 
 CFcmpConsensusState::Stats CFcmpConsensusState::GetStats() const

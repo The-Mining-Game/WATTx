@@ -13,6 +13,7 @@
 #include <consensus/validation.h>
 #include <logging.h>
 #include <policy/policy.h>
+#include <privacy/fcmp_consensus.h>
 #include <policy/settings.h>
 #include <random.h>
 #include <tinyformat.h>
@@ -514,6 +515,12 @@ void CTxMemPool::addNewTransaction(CTxMemPool::txiter newit, CTxMemPool::setEntr
     txns_randomized.emplace_back(newit->GetSharedTx());
     newit->idx_randomized = txns_randomized.size() - 1;
 
+    // A shielded note may have only one in-flight spend. CheckFcmpInputs
+    // rejects a second claim; this records the claim that was accepted.
+    if (privacy::IsFcmpStateAvailable() && privacy::GetFcmpState().IsInitialized()) {
+        privacy::GetFcmpState().AccountMempoolTx(tx);
+    }
+
     TRACEPOINT(mempool, added,
         entry.GetTx().GetHash().data(),
         entry.GetTxSize(),
@@ -523,6 +530,10 @@ void CTxMemPool::addNewTransaction(CTxMemPool::txiter newit, CTxMemPool::setEntr
 
 void CTxMemPool::removeUnchecked(txiter it, MemPoolRemovalReason reason)
 {
+    if (privacy::IsFcmpStateAvailable() && privacy::GetFcmpState().IsInitialized()) {
+        privacy::GetFcmpState().UnaccountMempoolTx(it->GetTx());
+    }
+
     // We increment mempool sequence value no matter removal reason
     // even if not directly reported below.
     uint64_t mempool_sequence = GetAndIncrementSequence();

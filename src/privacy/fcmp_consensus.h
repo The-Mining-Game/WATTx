@@ -32,9 +32,11 @@
 #include <dbwrapper.h>
 #include <sync.h>
 
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
+#include <vector>
 
 class CBlockIndex;
 class CCoinsViewCache;
@@ -102,6 +104,17 @@ public:
      * @brief Batch erase for efficiency during block disconnection
      */
     bool EraseBatch(const std::vector<CKeyImage>& keyImages);
+
+    /**
+     * @brief How many curve-tree outputs this height added.
+     *
+     * Stored beside the key images so a restart still knows how far to roll
+     * the tree back. The in-memory map alone is lost on shutdown, and a reorg
+     * after that left the note in the tree while clearing its key image.
+     */
+    bool WriteOutputCount(int height, uint64_t count);
+    bool ReadOutputCount(int height, uint64_t& count) const;
+    bool EraseOutputCount(int height);
 
     /**
      * @brief Sync to disk
@@ -199,8 +212,35 @@ public:
      * @param nSpendHeight Current spend height
      * @return true if valid
      */
+    /**
+     * @param block_spends Key-image hashes already spent by earlier transactions
+     *        in the block being connected. Null when the tx is not in a block.
+     * @param check_mempool Reject key images already claimed by a different
+     *        mempool transaction. Block connection passes false: the block is
+     *        authoritative and the conflicting mempool tx is evicted afterwards.
+     */
     bool CheckFcmpInputs(const CTransaction& tx, TxValidationState& state,
-                         const CCoinsViewCache& view, int nSpendHeight) const;
+                         const CCoinsViewCache& view, int nSpendHeight,
+                         std::set<uint256>* block_spends = nullptr,
+                         bool check_mempool = true) const;
+
+    /**
+     * @brief Remember / forget the key images of a mempool transaction.
+     *
+     * Called when a tx enters or leaves the mempool. Two transactions that
+     * spend the same shielded note must not both be relayable.
+     */
+    void AccountMempoolTx(const CTransaction& tx);
+    void UnaccountMempoolTx(const CTransaction& tx);
+
+    /** True if some mempool tx other than ignore_txid already spends this image. */
+    bool IsKeyImageInMempool(const CKeyImage& keyImage, const uint256& ignore_txid = uint256::ZERO) const;
+
+    /**
+     * @brief Mempool transactions that spend a key image this block just spent,
+     *        excluding the transactions that are themselves in the block.
+     */
+    std::vector<uint256> MempoolConflicts(const CBlock& block) const;
 
     // ========== Statistics ==========
 
@@ -226,8 +266,12 @@ private:
     // Key image database
     std::unique_ptr<CFcmpKeyImageDB> m_keyImageDB;
 
-    // Track outputs added per block for reorg handling
+    // Track outputs added per block for reorg handling. Mirrored to the key
+    // image DB so it survives restart; the map is only a cache.
     std::map<int, uint64_t> m_outputsAddedPerBlock GUARDED_BY(cs_fcmp);
+
+    // key-image hash -> mempool txid. A note may be in flight once.
+    std::map<uint256, uint256> m_mempoolKeyImages GUARDED_BY(cs_fcmp);
 
     // Statistics
     uint64_t m_keyImagesSpent{0};
