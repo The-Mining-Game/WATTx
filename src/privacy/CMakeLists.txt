@@ -157,6 +157,9 @@ if(WATTX_FCMP_ENABLED)
     )
 
     target_compile_options(test_fcmp PRIVATE ${SODIUM_CFLAGS_OTHER})
+else()
+    # Prover symbols the wallet and tx builder reference. Fail closed.
+    target_sources(wattx_privacy PRIVATE fcmp/fcmp_stub.cpp)
 endif()
 
 # NOTE: the ported Monero Bulletproofs+ (libwattx_bpplus) lives in the TOP-LEVEL

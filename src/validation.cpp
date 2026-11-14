@@ -21,6 +21,8 @@
 #include <consensus/tx_verify.h>
 #include <consensus/validation.h>
 #include <privacy/fcmp_consensus.h>
+
+#include <set>
 #include <privacy/consensus.h>
 // Gapcoin PoW removed - replaced with X25X multi-algorithm mining
 #include <cuckoocache.h>
@@ -4063,6 +4065,11 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         }
     }
 
+    // Key images spent by earlier transactions in THIS block. The chain DB
+    // does not contain them yet, and the mempool set does not either when the
+    // miner never relayed the transactions.
+    std::set<uint256> fcmpSpentInBlock;
+
     for (unsigned int i = 0; i < block.vtx.size(); i++)
     {
         if (!state.IsValid()) break;
@@ -4086,6 +4093,28 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
                 state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-txns-accumulated-fee-outofrange",
                               "accumulated fee in the block out of range");
                 break;
+            }
+
+            // FCMP spends are consensus, not a mempool policy. A block that
+            // never passed through the mempool must still be rejected when it
+            // spends a shielded note twice, or spends one whose proof does not
+            // verify. check_mempool is false: a conflicting mempool tx is
+            // evicted after the block connects, it does not invalidate the block.
+            if (privacy::IsFcmpActive(pindex->nHeight, params.GetConsensus()) &&
+                privacy::IsFcmpStateAvailable() && privacy::GetFcmpState().IsInitialized()) {
+                if (!privacy::GetFcmpState().CheckFcmpTransaction(tx, tx_state)) {
+                    state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                  tx_state.GetRejectReason(),
+                                  tx_state.GetDebugMessage() + " in transaction " + tx.GetHash().ToString());
+                    break;
+                }
+                if (!privacy::GetFcmpState().CheckFcmpInputs(tx, tx_state, view, pindex->nHeight,
+                                                            &fcmpSpentInBlock, /*check_mempool=*/false)) {
+                    state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                  tx_state.GetRejectReason(),
+                                  tx_state.GetDebugMessage() + " in transaction " + tx.GetHash().ToString());
+                    break;
+                }
             }
 
             // Check that transaction is BIP68 final
@@ -4687,6 +4716,18 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             LogPrintf("FCMP: Failed to connect block %d for FCMP state\n", pindex->nHeight);
             return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-fcmp-connect",
                                  strprintf("FCMP state update failed at block %d", pindex->nHeight));
+        }
+        // Drop mempool spends of notes this block just spent. Leaving them
+        // in the pool makes the next block template invalid.
+        if (m_mempool) {
+            const std::vector<uint256> conflicts = privacy::GetFcmpState().MempoolConflicts(block);
+            LOCK(m_mempool->cs);
+            for (const uint256& txid : conflicts) {
+                CTransactionRef conflict = m_mempool->get(txid);
+                if (conflict) {
+                    m_mempool->removeRecursive(*conflict, MemPoolRemovalReason::CONFLICT);
+                }
+            }
         }
     }
 

@@ -9,6 +9,7 @@
 #include <wallet/wallet.h>
 #include <wallet/walletdb.h>
 #include <privacy/fcmp/fcmp_wrapper.h>
+#include <privacy/fcmp_consensus.h>
 #include <privacy/ed25519/pedersen.h>
 #include <privacy/stealth.h>
 #include <hash.h>
@@ -602,10 +603,20 @@ std::vector<CFcmpOutputInfo> CFcmpWalletManager::GetSpendableFcmpOutputs(int min
     int currentHeight = GetCurrentHeight();
     std::vector<CFcmpOutputInfo> outputs;
 
+    const bool have_consensus = privacy::IsFcmpStateAvailable() && privacy::GetFcmpState().IsInitialized();
     for (const auto& [outpoint, info] : m_fcmpOutputs) {
-        if (info.IsSpendable(currentHeight, minConfirmations)) {
-            outputs.push_back(info);
+        if (!info.IsSpendable(currentHeight, minConfirmations)) continue;
+        // A note this wallet already handed to a spend, or that the chain or
+        // mempool has already spent, must not be selected again.
+        if (!info.keyImageHash.IsNull() && m_spentKeyImages.count(info.keyImageHash) != 0) continue;
+        if (have_consensus) {
+            const privacy::CKeyImage ki = GenerateKeyImage(info.privKey, info.outputTuple.O);
+            if (privacy::GetFcmpState().IsKeyImageSpent(ki) ||
+                privacy::GetFcmpState().IsKeyImageInMempool(ki)) {
+                continue;
+            }
         }
+        outputs.push_back(info);
     }
 
     // Sort by amount (largest first for efficient selection)
