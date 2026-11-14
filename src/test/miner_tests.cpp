@@ -436,22 +436,18 @@ void MinerTestingSetup::TestBasicMining(const CScript& scriptPubKey, const std::
         CTxMemPool& tx_mempool{MakeMempool()};
         LOCK(tx_mempool.cs);
 
-        // subsidy changing
-        // WATTx REGTEST: SubsidyHalvingWeight(h) = h-3, SubsidyHalvingInterval = 3942000
-        // halvings = (h-4) / 3942000; first halving at height 3942004
-        // Test GetBlockSubsidy directly since creating millions of dummy blocks is impractical
-        // WATTx REGTEST: SubsidyHalvingIntervalV2=200, SubsidyHalvingWeight(h)=h-3
-        // halvings = (h-4)/200; boundaries at heights 204, 404, 604, etc.
-        BOOST_CHECK(GetBlockSubsidy(1, consensusParams) == 500000000);         // no halving
-        BOOST_CHECK(GetBlockSubsidy(203, consensusParams) == 500000000);       // last before 1st halving
-        BOOST_CHECK(GetBlockSubsidy(204, consensusParams) == 250000000);       // 1st halving
-        BOOST_CHECK(GetBlockSubsidy(551, consensusParams) == 125000000);       // 2nd halving (our chain height)
-        BOOST_CHECK(GetBlockSubsidy(604, consensusParams) == 62500000);        // 3rd halving
-        BOOST_CHECK(GetBlockSubsidy(1404, consensusParams) == 0);              // after 7th halving (zero reward)
-        // Integration test: verify createNewBlock produces correct reward at current height
+        // Subsidy is derived from the premine and the regtest halving interval.
+        const int interval = consensusParams.nSubsidyHalvingInterval;
+        const CAmount initial = GetInitialBlockSubsidy(consensusParams);
+        BOOST_CHECK_EQUAL(GetBlockSubsidy(1, consensusParams), initial);
+        BOOST_CHECK_EQUAL(GetBlockSubsidy(interval, consensusParams), initial);
+        BOOST_CHECK_EQUAL(GetBlockSubsidy(interval + 1, consensusParams), initial >> 1);
+        BOOST_CHECK_EQUAL(GetBlockSubsidy(interval * 60, consensusParams), 0);
+        const int nextHeight = m_node.chainman->ActiveChain().Height() + 1;
+        const CAmount expected = GetBlockSubsidy(nextHeight, consensusParams);
         auto pblocktemplate = mining->createNewBlock(options);
         BOOST_REQUIRE(pblocktemplate);
-        BOOST_CHECK(calculateReward(pblocktemplate->getBlock(), *m_node.chainman) == 125000000);
+        BOOST_CHECK_EQUAL(calculateReward(pblocktemplate->getBlock(), *m_node.chainman), expected);
 
         // invalid p2sh txn in tx_mempool: WATTx block assembler includes the parent
         // tx (valid) but the child tx with invalid P2SH script gets filtered out

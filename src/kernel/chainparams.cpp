@@ -101,6 +101,18 @@ static CBlock CreateSigNetGenesisBlock(uint32_t nTime, uint32_t nNonce, uint32_t
     return CreateGenesisBlock(pszTimestamp, genesisOutputScript, nTime, nNonce, nBits, nVersion, genesisReward);
 }
 
+// Find a nonce whose SHA256d header hash meets nBits. Used so a changed
+// premine (which changes the coinbase, the merkle root and the hash) still
+// produces a genesis block the node will accept. The search is deterministic.
+static void MineGenesis(CBlock& genesis)
+{
+    arith_uint256 bnTarget;
+    bnTarget.SetCompact(genesis.nBits);
+    for (genesis.nNonce = 0; genesis.nNonce < 0xFFFFFFFF; ++genesis.nNonce) {
+        if (UintToArith256(genesis.GetHash()) <= bnTarget) return;
+    }
+}
+
 // WATTx Regtest Genesis - separate from mainnet
 static CBlock CreateRegtestGenesisBlock(uint32_t nTime, uint32_t nNonce, uint32_t nBits, int32_t nVersion, const CAmount& genesisReward)
 {
@@ -119,7 +131,9 @@ public:
         m_chain_type = ChainType::MAIN;
         consensus.signet_blocks = false;
         consensus.signet_challenge.clear();
-        consensus.nSubsidyHalvingInterval = 210000; // 50 WTX base x 210,000 x 2 = 21,000,000 WTX
+        // 210,000-block eras. Initial reward is (21,000,000 - nPremine) / (2 * 210,000),
+        // about 5.16666666 coins, so the series plus the 18,830,000 premine is 21,000,000.
+        consensus.nSubsidyHalvingInterval = 210000;
         consensus.BIP34Height = 0;
         consensus.BIP34Hash = uint256{}; // Will be set after genesis mining
         consensus.BIP65Height = 0;
@@ -193,13 +207,12 @@ public:
         m_assumed_blockchain_size = 1;
         m_assumed_chain_state_size = 1;
 
-        // WATTx Mainnet Genesis Block
-        // Timestamp: 1736985600 (Wed Jan 15 2025)
-        // Nonce: 108499
-        genesis = CreateMainnetGenesisBlock(1736985600, 108499, 0x1f00ffff, 1, 500000000);
+        // Genesis pays the premine (Monero supply at nMoneroForkHeight).
+        // The hash depends on that amount, so the nonce is searched rather
+        // than pinned to the pre-fork WATTx genesis.
+        genesis = CreateMainnetGenesisBlock(1736985600, 0, 0x1f00ffff, 1, consensus.nPremine);
+        MineGenesis(genesis);
         consensus.hashGenesisBlock = genesis.GetHash();
-        assert(consensus.hashGenesisBlock == uint256{"0000b7a5960e86b92ee86ad1b7f620adcd8ca275b109e8a98854f4dbed0eea93"});
-        assert(genesis.hashMerkleRoot == uint256{"7b487d66f12265f822fcf7abfae9daca9252903db779c3d3c94ffe0b9e565f43"});
 
         // WATTx seed nodes (to be configured)
         vSeeds.emplace_back("seed1.wattxchange.app");
@@ -385,10 +398,9 @@ public:
         // Message: "WATTx Testnet Launch - Jan 2026 - Fast Sync Testing"
         // Timestamp: 1736035200 (Sat Jan 4 2026)
         // Nonce: 229304
-        genesis = CreateTestnetGenesisBlock(1736035200, 229304, 0x1f00ffff, 1, 500000000);
+        genesis = CreateTestnetGenesisBlock(1736035200, 0, 0x1f00ffff, 1, consensus.nPremine);
+        MineGenesis(genesis);
         consensus.hashGenesisBlock = genesis.GetHash();
-        assert(consensus.hashGenesisBlock == uint256{"000051d2ae90ec304f7a735985a894f1b7b25061fda9d945a2df882b0442aed3"});
-        assert(genesis.hashMerkleRoot == uint256{"7e7f6df20a55469d87e183aedb2a726d984b519bbd33828e62121a242044d372"});
 
         vFixedSeeds.clear();
         vSeeds.clear();
@@ -548,7 +560,7 @@ public:
         m_assumed_chain_state_size = 1;
 
         // WATTx Signet Genesis Block - Uses mainnet genesis
-        genesis = CreateMainnetGenesisBlock(1735430400, 0, 0x1f00ffff, 1, 500000000);
+        genesis = CreateMainnetGenesisBlock(1735430400, 0, 0x1f00ffff, 1, consensus.nPremine);
 
         // Mine signet genesis (finds valid nonce) - same as mainnet but cached separately
         {
@@ -783,7 +795,10 @@ public:
         m_chain_type = ChainType::REGTEST;
         consensus.signet_blocks = false;
         consensus.signet_challenge.clear();
-        consensus.nSubsidyHalvingInterval = 50; // WATTx regtest: Fast halving for testing (every 50 blocks)
+        // Scaled down so a regtest can see a halving without 210,000 blocks.
+        // The initial reward is re-derived from the premine, so the series
+        // still sums to nMaxSupply. Per-block reward is larger than mainnet.
+        consensus.nSubsidyHalvingInterval = 150;
         consensus.BIP34Height = 1; // Always active unless overridden
         consensus.BIP34Hash = uint256();
         consensus.BIP65Height = 1;  // Always active unless overridden
@@ -869,7 +884,7 @@ public:
 
         // WATTx Regtest Genesis - Easy difficulty for testing
         // Mine genesis block at startup to find valid nonce
-        genesis = CreateRegtestGenesisBlock(1735430400, 0, 0x207fffff, 1, 500000000);
+        genesis = CreateRegtestGenesisBlock(1735430400, 0, 0x207fffff, 1, consensus.nPremine);
         {
             arith_uint256 bnTarget;
             bnTarget.SetCompact(genesis.nBits);
@@ -926,7 +941,7 @@ public:
         consensus.nStakeMinConfirmations = 20; // WATTx regtest: Lower for fast testing (halves: 20 -> 10 -> 5)
         consensus.nMinStakeConfirmationsFloor = 2; // WATTx regtest: Lower floor for testing
         consensus.nRBTCoinbaseMaturity = 10;  // WATTx regtest: lowered for fast testing
-        consensus.nSubsidyHalvingIntervalV2 = consensus.nBlocktimeDownscaleFactor*50; // WATTx regtest: Fast halving for testing
+        consensus.nSubsidyHalvingIntervalV2 = consensus.nSubsidyHalvingInterval;
         consensus.nMinValidatorStake = 10 * COIN; // Lower for regtest (10 WATTx)
 
         consensus.nLastPOWBlock = 0x7fffffff;

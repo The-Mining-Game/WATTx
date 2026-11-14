@@ -381,9 +381,34 @@ struct Params {
 
     /** Base block reward in satoshis (5 WATTx per block for each PoW/PoS) */
     /** 50% to PoW miners, 50% to PoS stakers - each receives this amount */
-    /** Base block reward in satoshis: 50 WTX.
-     *  With a 210,000-block halving interval the full series totals exactly
-     *  21,000,000 WTX. */
+    /**
+     * Supply cap for this fork. Premine (genesis) plus every later block
+     * subsidy sums to this and then stops. There is no tail emission.
+     */
+    int64_t nMaxSupply{21000000 * COIN};
+
+    /**
+     * Genesis allocation. Placeholder for Monero's already-mined supply at
+     * nMoneroForkHeight. Mid-Nov 2026 that was about 18.83M XMR at height
+     * 3,806,282; change both fields together when the fork block is fixed.
+     *
+     * The coins are one genesis output. The intended distribution is an
+     * ERC-20 of the same amount on EVM chains, bridged back onto this
+     * output. The bridge is not implemented; this output is only the
+     * accounting entry so the cap still holds.
+     *
+     * Mineable supply is nMaxSupply - nPremine. With a halving interval H
+     * the initial block reward is that remainder divided by 2*H, so the
+     * infinite halving series converges to the remainder. Integer satoshi
+     * truncation leaves a few thousand satoshis short; the last non-zero
+     * subsidy block is paid that residual once. It is not a continuing reward.
+     */
+    int64_t nPremine{18830000 * COIN};
+
+    /** Monero height whose circulating supply nPremine stands in for. */
+    int nMoneroForkHeight{3806282};
+
+    /** Legacy field. Emission uses nPremine and nMaxSupply, not this. */
     int64_t nBaseBlockReward{5000000000};
 
     /** Height at which trust tier system activates */

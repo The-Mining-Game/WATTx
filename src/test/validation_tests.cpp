@@ -21,85 +21,62 @@
 
 BOOST_FIXTURE_TEST_SUITE(validation_tests, TestingSetup)
 
-static void TestBlockSubsidyHalvings(const Consensus::Params& consensusParams)
+static CAmount SumEmission(const Consensus::Params& params)
 {
-    int maxHalvings = 7;
-    CAmount nInitialSubsidy = 4 * COIN;
-
-    CAmount nPreviousSubsidy = nInitialSubsidy * 2; // for height == LastPoWBlock + 1
-    BOOST_CHECK_EQUAL(nPreviousSubsidy, nInitialSubsidy * 2);
-    for (int nHalvings = 0; nHalvings < maxHalvings; nHalvings++) {
-        int nHeight = nHalvings * consensusParams.nSubsidyHalvingInterval + consensusParams.nLastBigReward + 1;
-        CAmount nSubsidy = GetBlockSubsidy(nHeight, consensusParams);
-        BOOST_CHECK(nSubsidy <= nInitialSubsidy);
-        BOOST_CHECK_EQUAL(nSubsidy, nPreviousSubsidy / 2);
-        nPreviousSubsidy = nSubsidy;
+    CAmount sum = 0;
+    // Height 0 is the premine. Stop once a whole era has paid zero, which is
+    // past the last residual block.
+    const int interval = params.nSubsidyHalvingInterval;
+    bool saw_zero = false;
+    for (int height = 0; height < interval * 64; ++height) {
+        const CAmount subsidy = GetBlockSubsidy(height, params);
+        sum += subsidy;
+        BOOST_CHECK(MoneyRange(sum));
+        BOOST_CHECK(sum <= params.nMaxSupply);
+        if (height > 0 && subsidy == 0) {
+            if (saw_zero) break;
+            saw_zero = true;
+        } else {
+            saw_zero = false;
+        }
     }
-    BOOST_CHECK_EQUAL(GetBlockSubsidy(maxHalvings * consensusParams.nSubsidyHalvingInterval + consensusParams.nLastBigReward + 1, consensusParams), 0);
-}
-
-static void TestBlockSubsidyHalvings(int nSubsidyHalvingInterval)
-{
-    Consensus::Params consensusParams;
-    consensusParams.nSubsidyHalvingInterval = nSubsidyHalvingInterval;
-    consensusParams.nReduceBlocktimeHeight = 0x7fffffff;
-    TestBlockSubsidyHalvings(consensusParams);
+    return sum;
 }
 
 BOOST_AUTO_TEST_CASE(block_subsidy_test)
 {
-    const auto chainParams = CreateChainParams(*m_node.args, ChainType::MAIN);
-    Consensus::Params consensusParams = chainParams->GetConsensus();
-    consensusParams.nReduceBlocktimeHeight = 0x7fffffff; // Check for the halving before fork for target spacing
-    TestBlockSubsidyHalvings(consensusParams); // As in main
-    TestBlockSubsidyHalvings(150); // As in regtest
-    TestBlockSubsidyHalvings(1000); // Just another interval
-}
+    const auto main = CreateChainParams(*m_node.args, ChainType::MAIN);
+    const Consensus::Params& mainParams = main->GetConsensus();
+    BOOST_CHECK_EQUAL(mainParams.nMoneroForkHeight, 3806282);
+    BOOST_CHECK_EQUAL(mainParams.nPremine, 18830000 * COIN);
+    BOOST_CHECK_EQUAL(mainParams.nMaxSupply, 21000000 * COIN);
+    BOOST_CHECK_EQUAL(mainParams.nSubsidyHalvingInterval, 210000);
 
-BOOST_AUTO_TEST_CASE(subsidy_limit_test)
-{
-    const auto chainParams = CreateChainParams(*m_node.args, ChainType::MAIN);
-    Consensus::Params consensusParams = chainParams->GetConsensus();
-    consensusParams.nReduceBlocktimeHeight = 800000; // Check for the halving after fork for target spacing
-    int nMaxHeight = 14000000 * consensusParams.nBlocktimeDownscaleFactor;
-    CAmount nSum = 0;
-    for (int nHeight = 1; nHeight < nMaxHeight; nHeight++) {
-        CAmount nSubsidy = GetBlockSubsidy(nHeight, consensusParams);
-        int nSubsidyHalvingWeight = consensusParams.SubsidyHalvingWeight(nHeight);
-        int nSubsidyHalvingInterval = consensusParams.SubsidyHalvingInterval(nHeight);
-        int nBlocktimeDownscaleFactor = consensusParams.BlocktimeDownscaleFactor(nHeight);
+    const CAmount remaining = mainParams.nMaxSupply - mainParams.nPremine;
+    BOOST_CHECK_EQUAL(remaining, 2170000 * COIN);
+    const CAmount initial = GetInitialBlockSubsidy(mainParams);
+    // 2,170,000 / (2 * 210,000) = 5.1666... coins, floored to satoshis.
+    BOOST_CHECK_EQUAL(initial, remaining / (210000 * 2));
+    BOOST_CHECK_EQUAL(initial, CAmount{516666666});
+    BOOST_CHECK_EQUAL(GetBlockSubsidy(0, mainParams), mainParams.nPremine);
+    BOOST_CHECK_EQUAL(GetBlockSubsidy(1, mainParams), initial);
+    BOOST_CHECK_EQUAL(GetBlockSubsidy(210000, mainParams), initial);
+    BOOST_CHECK_EQUAL(GetBlockSubsidy(210001, mainParams), initial >> 1);
+    BOOST_CHECK_EQUAL(SumEmission(mainParams), mainParams.nMaxSupply);
 
-        if(nSubsidyHalvingWeight <= 0){
-            BOOST_CHECK_EQUAL(nSubsidy, (20000 * COIN));
-        }
-        else if(nSubsidyHalvingWeight <= nSubsidyHalvingInterval){
-            BOOST_CHECK_EQUAL(nSubsidy, 4 * COIN / nBlocktimeDownscaleFactor);
-        }
-        else if(nSubsidyHalvingWeight <= nSubsidyHalvingInterval*2){
-            BOOST_CHECK_EQUAL(nSubsidy, 2 * COIN / nBlocktimeDownscaleFactor);
-        }
-        else if(nSubsidyHalvingWeight <= nSubsidyHalvingInterval*3){
-            BOOST_CHECK_EQUAL(nSubsidy, 1 * COIN / nBlocktimeDownscaleFactor);
-        }
-        else if(nSubsidyHalvingWeight <= nSubsidyHalvingInterval*4){
-            BOOST_CHECK_EQUAL(nSubsidy, 0.5 * COIN / nBlocktimeDownscaleFactor);
-        }
-        else if(nSubsidyHalvingWeight <= nSubsidyHalvingInterval*5){
-            BOOST_CHECK_EQUAL(nSubsidy, 0.25 * COIN / nBlocktimeDownscaleFactor);
-        }
-        else if(nSubsidyHalvingWeight <= nSubsidyHalvingInterval*6){
-            BOOST_CHECK_EQUAL(nSubsidy, 0.125 * COIN / nBlocktimeDownscaleFactor);
-        }
-        else if(nSubsidyHalvingWeight <= nSubsidyHalvingInterval*7){
-            BOOST_CHECK_EQUAL(nSubsidy, 0.0625 * COIN / nBlocktimeDownscaleFactor);
-        }
-        else{
-            BOOST_CHECK_EQUAL(nSubsidy, 0);
-        }
-        nSum += nSubsidy;
-        BOOST_CHECK(MoneyRange(nSum));
-    }
-    BOOST_CHECK_EQUAL(nSum, CAmount{10782240625000000});
+    const auto reg = CreateChainParams(*m_node.args, ChainType::REGTEST);
+    const Consensus::Params& regParams = reg->GetConsensus();
+    BOOST_CHECK_EQUAL(regParams.nSubsidyHalvingInterval, 150);
+    BOOST_CHECK_EQUAL(regParams.nPremine, mainParams.nPremine);
+    const CAmount regInitial = GetInitialBlockSubsidy(regParams);
+    BOOST_CHECK_EQUAL(GetBlockSubsidy(1, regParams), regInitial);
+    BOOST_CHECK_EQUAL(GetBlockSubsidy(150, regParams), regInitial);
+    BOOST_CHECK_EQUAL(GetBlockSubsidy(151, regParams), regInitial >> 1);
+    BOOST_CHECK(GetBlockSubsidy(151, regParams) < GetBlockSubsidy(1, regParams));
+    BOOST_CHECK_EQUAL(SumEmission(regParams), regParams.nMaxSupply);
+
+    // After the series is exhausted the reward stays zero. No tail.
+    BOOST_CHECK_EQUAL(GetBlockSubsidy(regParams.nSubsidyHalvingInterval * 60, regParams), 0);
 }
 
 BOOST_AUTO_TEST_CASE(signet_parse_tests)

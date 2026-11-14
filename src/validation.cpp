@@ -2381,30 +2381,83 @@ CAmount ApplyTrustTierBonus(CAmount baseReward, const CKeyID& stakerId,
     return baseReward;
 }
 
+namespace {
+
+int EmissionInterval(const Consensus::Params& consensusParams)
+{
+    // The cap math uses one interval for the whole chain. nSubsidyHalvingInterval
+    // is that value; the Qtum "V2 / downscale" weight would change how many
+    // blocks each era lasts and the series would no longer sum to
+    // nMaxSupply - nPremine.
+    return consensusParams.nSubsidyHalvingInterval;
+}
+
+CAmount HalvingSeriesSum(CAmount base, int interval)
+{
+    CAmount sum = 0;
+    for (int era = 0; era < 63 && base > 0; ++era) {
+        sum += base * static_cast<CAmount>(interval);
+        base >>= 1;
+    }
+    return sum;
+}
+
+int LastNonZeroEra(CAmount base)
+{
+    int era = 0;
+    while (era < 62 && (base >> (era + 1)) > 0) {
+        ++era;
+    }
+    return era;
+}
+
+} // namespace
+
+CAmount GetInitialBlockSubsidy(const Consensus::Params& consensusParams)
+{
+    const int interval = EmissionInterval(consensusParams);
+    if (interval <= 0) return 0;
+    const CAmount remaining = consensusParams.nMaxSupply - consensusParams.nPremine;
+    if (remaining <= 0) return 0;
+    return remaining / (static_cast<CAmount>(interval) * 2);
+}
+
 CAmount GetBlockSubsidy(int nHeight, const Consensus::Params& consensusParams)
 {
-    // WATTx: Initial PoW phase gets larger reward for bootstrap
-    if(nHeight <= consensusParams.nLastBigReward)
-        return 20000 * COIN;
+    // Height 0 is the premine, paid by the genesis coinbase. Later blocks
+    // only emit the halving series on what is left under the cap.
+    if (nHeight <= 0) {
+        return consensusParams.nPremine;
+    }
 
-    // WATTx: Use base block reward from consensus params
-    // Default: 500000000 satoshis = 5 WTX per block (50 WTX per 10 min at 2-min blocks)
-    CAmount nBaseReward = consensusParams.nBaseBlockReward;
+    const int interval = EmissionInterval(consensusParams);
+    if (interval <= 0) return 0;
 
-    // Calculate halvings based on height
-    int subsidyHalvingInterval = consensusParams.SubsidyHalvingInterval(nHeight);
-    int subsidyHalvingWeight = consensusParams.SubsidyHalvingWeight(nHeight);
-    int halvings = (subsidyHalvingWeight - 1) / subsidyHalvingInterval;
+    const CAmount base = GetInitialBlockSubsidy(consensusParams);
+    if (base <= 0) return 0;
 
-    // Let the series run until the shift exhausts the reward. Cutting it off at
-    // seven halvings stopped emission at 0.39 WTX/block and capped the supply
-    // well below the intended total.
-    if (halvings >= 64)
-        return 0;
+    const int halvings = (nHeight - 1) / interval;
+    if (halvings >= 63) return 0;
 
-    // Apply halving
-    CAmount nSubsidy = nBaseReward >> halvings;
-    return nSubsidy;
+    CAmount subsidy = base >> halvings;
+    if (subsidy <= 0) return 0;
+
+    // Integer shifts under-emit. Pay the missing satoshis once, on the last
+    // block that still has a non-zero halving reward, so
+    // premine + subsidies == nMaxSupply. Blocks after that pay zero.
+    const CAmount remaining = consensusParams.nMaxSupply - consensusParams.nPremine;
+    const CAmount series = HalvingSeriesSum(base, interval);
+    const CAmount shortfall = remaining > series ? remaining - series : 0;
+    const int lastEra = LastNonZeroEra(base);
+    const int64_t lastHeight = static_cast<int64_t>(lastEra + 1) * interval;
+    if (nHeight == lastHeight && shortfall > 0) {
+        subsidy += shortfall;
+    }
+
+    // Hard ceiling. A mis-set interval or premine cannot push the chain
+    // past nMaxSupply, and it cannot pay a subsidy before the premine fits.
+    if (subsidy > remaining) subsidy = remaining;
+    return subsidy;
 }
 
 CoinsViews::CoinsViews(DBParams db_params, CoinsViewOptions options)
@@ -3308,8 +3361,10 @@ bool CheckReward(const CBlock& block, BlockValidationState& state, int nHeight, 
             }
         }
 
-        // Apply trust tier bonus to the subsidy portion (not fees)
-        CAmount adjustedSubsidy = ApplyTrustTierBonus(baseSubsidy, stakerId, nHeight, consensusParams);
+        // The trust-tier bonus is not consensus emission. Adding it on top of
+        // GetBlockSubsidy would push premine + subsidies past nMaxSupply.
+        CAmount adjustedSubsidy = baseSubsidy;
+        (void)stakerId;
         CAmount blockReward = nFees + adjustedSubsidy;
 
         if (nActualStakeReward > blockReward)

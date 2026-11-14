@@ -146,6 +146,9 @@ extern std::set<std::pair<COutPoint, unsigned int>> setStakeSeen;
 
 int64_t FutureDrift(uint32_t nTime, int nHeight, const Consensus::Params& consensusParams);
 
+/** Initial per-block subsidy, derived from (nMaxSupply - nPremine) / (2 * halving interval). */
+CAmount GetInitialBlockSubsidy(const Consensus::Params& consensusParams);
+
 CAmount GetBlockSubsidy(int nHeight, const Consensus::Params& consensusParams);
 
 /** Get trust tier bonus percentage for a given trust tier (0, 5, 10, or 15) */
