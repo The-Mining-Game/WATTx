@@ -589,6 +589,7 @@ void MiningPage::startMining()
 
         // Initialize RandomX miner
         node::RandomXMiner& miner = node::GetRandomXMiner();
+        miner.SetConfiguredThreads(this->currentCpuThreads.load());
         auto mode = fullMode ? node::RandomXMiner::Mode::FULL : node::RandomXMiner::Mode::LIGHT;
 
         QMetaObject::invokeMethod(this, [this, fullMode, safeMode]() {

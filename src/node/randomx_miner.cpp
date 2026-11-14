@@ -132,6 +132,11 @@ bool RandomXMiner::HasLargePages() {
     return false;
 }
 
+void RandomXMiner::SetConfiguredThreads(int n)
+{
+    m_configuredThreads = std::max(1, n);
+}
+
 bool RandomXMiner::Initialize(const void* key, size_t keySize, Mode mode, bool safeMode) {
     std::lock_guard<std::mutex> lock(m_mutex);
 
@@ -196,9 +201,10 @@ bool RandomXMiner::Initialize(const void* key, size_t keySize, Mode mode, bool s
             unsigned long itemCount = randomx_dataset_item_count();
             LogPrintf("RandomX: Initializing dataset (%lu items)...\n", itemCount);
 
-            // Use multiple threads for dataset initialization
-            unsigned numThreads = std::thread::hardware_concurrency();
-            if (numThreads < 1) numThreads = 1;
+            // Use the mining thread count, not every core. A wallet set to
+            // one thread must not fan out across the machine while the
+            // dataset is built.
+            unsigned numThreads = static_cast<unsigned>(std::max(1, m_configuredThreads));
 
             std::vector<std::thread> initThreads;
             unsigned long itemsPerThread = itemCount / numThreads;

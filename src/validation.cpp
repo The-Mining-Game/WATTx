@@ -2242,25 +2242,11 @@ bool CheckHeaderPoWAtHeight(const CBlockHeader& block, int nHeight, const Consen
         return CheckProofOfWorkImpl(block.GetHash(), block.nBits, consensusParams);
     }
 
-    // Check if this is an AuxPoW (merged-mined) block
-    // For header-only validation, we can't verify AuxPoW without the proof
-    // The full proof is validated in CheckBlock when we have the complete block
+    // Merged mining is not part of this chain. A header that claims an AuxPoW
+    // proof is invalid even before the full block is available.
     if (block.nVersion & AUXPOW_VERSION_FLAG) {
-        // Check if AuxPoW is active at this height
-        if (!consensus::IsAuxPowActive(nHeight, consensusParams)) {
-            LogPrintf("CheckHeaderPoWAtHeight: AuxPoW flag set but not active at height %d\n", nHeight);
-            return false;
-        }
-        // Header-only AuxPoW validation passes - full validation in CheckBlock
-        // Just verify the target is valid
-        arith_uint256 target;
-        bool fNegative, fOverflow;
-        target.SetCompact(block.nBits, &fNegative, &fOverflow);
-        if (fNegative || fOverflow || target == 0) {
-            LogPrintf("CheckHeaderPoWAtHeight: AuxPoW block has invalid nBits target\n");
-            return false;
-        }
-        return true;
+        LogPrintf("CheckHeaderPoWAtHeight: AuxPoW is disabled (height %d)\n", nHeight);
+        return false;
     }
 
     // Check if X25X is active at this height
@@ -6267,6 +6253,14 @@ bool CheckBlock(const CBlock& block, BlockValidationState& state, const Consensu
 
     if (block.fChecked)
         return true;
+
+    // This chain is proof-of-work only. A coinstake (non-null prevoutStake)
+    // is not a valid block. Header fields stay in the serialization so old
+    // tooling can still read them; they must be null.
+    if (block.IsProofOfStake()) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-pos-disabled",
+                             "proof-of-stake is disabled");
+    }
 
     // Handle AuxPoW (merged-mined) blocks
     bool fAuxPowChecked = false;

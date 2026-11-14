@@ -2274,8 +2274,9 @@ void StakeQtums(bool fStake, wallet::CWallet *pwallet)
 
     if(fStake)
     {
-        pwallet->stakeThread = new boost::thread_group();
-        pwallet->stakeThread->create_thread(boost::bind(&ThreadStakeMiner, pwallet));
+        // Staking is disabled. Leave the wallet without a staker thread.
+        LogPrintf("StakeQtums: staking is disabled on this chain\n");
+        return;
     }
 }
 

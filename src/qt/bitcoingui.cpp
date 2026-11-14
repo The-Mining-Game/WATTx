@@ -751,10 +751,11 @@ void BitcoinGUI::createToolBars()
         contractActions.append(callContractAction);
         appNavigationBar->mapGroup(smartContractAction, contractActions);
         QList<QAction*> walletStakeActions;
-        walletStakeActions.append(stakeAction);
+        // Staking, delegations, and super-staking are not part of this chain.
+        stakeAction->setVisible(false);
+        delegationAction->setVisible(false);
+        superStakerAction->setVisible(false);
         walletStakeActions.append(miningAction);
-        walletStakeActions.append(delegationAction);
-        walletStakeActions.append(superStakerAction);
         appNavigationBar->mapGroup(walletStakeAction, walletStakeActions);
         appNavigationBar->addAction(WRCTokenAction);
         appNavigationBar->addAction(messagingAction);

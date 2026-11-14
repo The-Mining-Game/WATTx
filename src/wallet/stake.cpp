@@ -24,17 +24,9 @@ void StakeQtums(CWallet& wallet, bool fStake)
 
 void StartStake(CWallet& wallet)
 {
-    if(wallet.IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS))
-    {
-        wallet.m_enabled_staking = node::ENABLE_HARDWARE_STAKE && !wallet.m_ledger_id.empty() && QtumLedger::instance().toolExists();
-    }
-    else
-    {
-        wallet.m_enabled_staking = true;
-    }
-
-    wallet.m_is_staking_thread_stopped = false;
-    StakeQtums(wallet, true);
+    // Proof-of-stake is not part of this chain. Do not start a staker thread.
+    wallet.m_enabled_staking = false;
+    wallet.m_is_staking_thread_stopped = true;
 }
 
 void StopStake(CWallet& wallet)

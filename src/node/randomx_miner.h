@@ -68,6 +68,13 @@ public:
      * @param safeMode If true, disable JIT compilation (slower but more stable)
      * @return true if initialization succeeded
      */
+    /**
+     * How many threads dataset initialization may use. Mining itself already
+     * uses the count passed to StartMining. Without this, full-mode init
+     * spawned one thread per core even when the UI asked for one.
+     */
+    void SetConfiguredThreads(int n);
+
     bool Initialize(const void* key, size_t keySize, Mode mode = Mode::LIGHT, bool safeMode = false);
 
     /**
@@ -212,6 +219,7 @@ private:
     mutable std::mutex m_vmMutex;
 
     // Configuration
+    int m_configuredThreads{1};
     Mode m_mode{Mode::LIGHT};
     unsigned m_flags{0};
     bool m_safeMode{false};
